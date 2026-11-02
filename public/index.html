@@ -568,6 +568,11 @@
   .dp-table th, .dp-table td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: middle; }
   .dp-table th { background: var(--bg2); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text2); }
   .dp-table td.dp-num, .dp-table td.dp-machine { font-weight: 600; }
+  /* The corrected value under a figure (owner, 2026-11-02). */
+  .dp-table input.dp-corr { display: block; width: 100%; min-width: 48px; box-sizing: border-box; margin-top: 4px; padding: 2px 6px; font: inherit; font-weight: 700; color: #166534; background: rgba(22,163,74,0.08); border: 1px dashed rgba(22,163,74,0.55); border-radius: 5px; text-align: inherit; }
+  .dp-table input.dp-corr::placeholder { color: rgba(22,101,52,0.45); font-weight: 400; }
+  .dp-table input.dp-corr:focus { outline: none; border-style: solid; border-color: #166534; background: #fff; }
+  .dp-table .dp-corr-view { margin-top: 4px; color: #166534; font-weight: 700; }
   .dp-table td.dp-num { text-align: right; font-variant-numeric: tabular-nums; }
   .dp-table input.dp-cell {
     width: 100%; padding: 4px 6px; border: 1px dashed var(--border2); border-radius: 4px;
@@ -22790,6 +22795,88 @@ function dailyProductionActiveTab() {
   if (visible('rt-dp-die'))      return 'die';
   return 'printing';
 }
+// ── Corrected values (owner, 2026-11-02) ──
+// A green box under every figure, on every row. Column = the table's own heading.
+const DP_CORR_SECTIONS = ['printing', 'die', 'coatings', 'breaking', 'pasting', 'sorting'];
+function dpCorrKey(th) { return String(th.textContent || '').trim().toLowerCase(); }
+async function dpShowCorrections(section, date) {
+  let corr = {};
+  try { corr = await api('GET', '/api/reports/daily-production-corrected/' + encodeURIComponent(date)); } catch (e) { /* the originals still show */ }
+  const body = document.getElementById(`dp-${section}-body`);
+  const table = body && body.querySelector('.dp-table');
+  if (!table) return;
+  const keys = [...table.querySelectorAll('thead th')].map(dpCorrKey);
+  const canEdit = hasPerm('production_edit');
+  const mine = corr[section] || {};
+  table.querySelectorAll('tbody tr').forEach(tr => {
+    if (tr.dataset.draft || tr.querySelector('.dp-corr')) return;   // a new row gets its boxes once saved and reloaded
+    const named = tr.querySelector('.dp-cell[data-machine]');
+    const machine = named && named.dataset.machine;
+    if (!machine) return;
+    [...tr.children].forEach((td, i) => {
+      if (i === 0 || td.classList.contains('dp-action') || !keys[i]) return;   // the first column names the row
+      const val = (mine[machine] || {})[keys[i]] || '';
+      if (canEdit) {
+        const input = document.createElement('input');
+        input.type = 'text'; input.className = 'dp-corr'; input.value = val; input.placeholder = '✎';
+        input.title = 'Corrected value - the original above stays as it is';
+        input.dataset.section = section; input.dataset.machine = machine; input.dataset.col = keys[i]; input.dataset.date = date; input.dataset.saved = val;
+        input.onblur = () => dpSaveCorrection(input);
+        td.appendChild(input);
+      } else if (val) {
+        const div = document.createElement('div');
+        div.className = 'dp-corr-view'; div.textContent = val;
+        td.appendChild(div);
+      }
+    });
+  });
+}
+async function dpSaveCorrection(input) {
+  const value = input.value.trim();
+  if (value === input.dataset.saved) return;
+  const { section, machine, col, date } = input.dataset;
+  try {
+    await api('PUT', `/api/reports/daily-production-corrected/${encodeURIComponent(section)}/${encodeURIComponent(date)}/${encodeURIComponent(machine)}`, { col, value });
+    input.dataset.saved = value;
+  } catch (e) {
+    notify('Could not save the correction: ' + e.message);
+  }
+}
+// Print: put the corrected values into the printed tables, in the same green.
+function dpApplyPrintMode(root, mode, corr) {
+  if (mode === 'original') return;
+  const tables = root.querySelectorAll('.dp-print-tbl');
+  tables.forEach((table, t) => {
+    const mine = corr[DP_CORR_SECTIONS[t]] || {};
+    const keys = [...table.querySelectorAll('thead th')].map(dpCorrKey);
+    table.querySelectorAll('tbody tr').forEach(tr => {
+      const first = tr.children[0];
+      if (!first) return;
+      const copy = first.cloneNode(true);
+      copy.querySelectorAll('.urdu').forEach(u => u.remove());
+      const row = mine[copy.textContent.trim()];
+      if (!row) return;
+      [...tr.children].forEach((td, i) => {
+        const val = i > 0 && row[keys[i]];
+        if (!val) return;
+        const green = `<div style="color:#166534;font-weight:700;">${esc(val)}</div>`;
+        td.innerHTML = mode === 'both' ? td.innerHTML + green : green;
+      });
+    });
+  });
+}
+function dpPrintChooser() {
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
+    <h2 style="margin-bottom:6px;">Print Daily Production</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:14px;">Which figures should it show?</div>
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <button class="btn" onclick="closeModal();printDailyRegister('original')"><b>Original</b> - as recorded</button>
+      <button class="btn" onclick="closeModal();printDailyRegister('corrected')"><b style="color:#166534;">Corrected</b> - corrected value where there is one</button>
+      <button class="btn" onclick="closeModal();printDailyRegister('both')"><b>Both</b> - original with the <span style="color:#166534;font-weight:700;">corrected</span> under it</button>
+    </div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button></div>
+  </div>`);
+}
 function loadDailyProductionForCurrentTab() {
   const t = dailyProductionActiveTab();
   if (t === 'printing')      loadDailyProductionPrinting();
@@ -22810,6 +22897,7 @@ async function loadDailyProductionPrinting() {
   try {
     const rows = await api('GET', `/api/reports/daily-production/printing/${encodeURIComponent(date)}`);
     renderDailyProductionPrinting(rows, date);
+    dpShowCorrections('printing', date);
   } catch (e) {
     body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
   }
@@ -22825,6 +22913,7 @@ async function loadDailyProductionDie() {
   try {
     const rows = await api('GET', `/api/reports/daily-production/die/${encodeURIComponent(date)}`);
     renderDailyProductionDie(rows, date);
+    dpShowCorrections('die', date);
   } catch (e) {
     body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
   }
@@ -22840,6 +22929,7 @@ async function loadDailyProductionCoatings() {
   try {
     const rows = await api('GET', `/api/reports/daily-production/coatings/${encodeURIComponent(date)}`);
     renderDailyProductionCoatings(rows, date);
+    dpShowCorrections('coatings', date);
   } catch (e) {
     body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
   }
@@ -22857,6 +22947,7 @@ async function loadDailyProductionSorting() {
   try {
     const rows = await api('GET', `/api/reports/daily-production/sorting/${encodeURIComponent(date)}`);
     renderDailyProductionSorting(rows, date);
+    dpShowCorrections('sorting', date);
   } catch (e) {
     body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
   }
@@ -22907,6 +22998,7 @@ async function loadDailyProductionBreaking() {
   try {
     const rows = await api('GET', `/api/reports/daily-production/breaking/${encodeURIComponent(date)}`);
     renderDailyProductionBreaking(rows, date);
+    dpShowCorrections('breaking', date);
   } catch (e) {
     body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
   }
@@ -22982,6 +23074,7 @@ async function loadDailyProductionPasting() {
   try {
     const rows = await api('GET', `/api/reports/daily-production/pasting/${encodeURIComponent(date)}`);
     renderDailyProductionPasting(rows, date);
+    dpShowCorrections('pasting', date);
   } catch (e) {
     body.innerHTML = `<div class="empty">Error loading: ${esc(e.message)}</div>`;
   }
@@ -23506,7 +23599,8 @@ async function saveDailyProductionCell(input) {
 // Coating, Breaking, Pasting and Sorting together — opens the browser print
 // dialog, then cleans up. Everything else on the page is hidden via
 // @media print while the dp-print-root is visible.
-async function printDailyRegister() {
+async function printDailyRegister(mode) {
+  if (typeof mode !== 'string') { dpPrintChooser(); return; }   // Original, Corrected or Both (owner, 2026-11-02)
   // Whichever date picker the user touched last — they're all kept in
   // sync, so any of them is fine.
   const date = (document.getElementById('dp-date')         || {}).value
@@ -23516,15 +23610,16 @@ async function printDailyRegister() {
             || (document.getElementById('dp-sorting-date') || {}).value;
   if (!date) { notify('Pick a date first'); return; }
   showSaving(true);
-  let printing, die, coatings, breaking, pasting, sorting;
+  let printing, die, coatings, breaking, pasting, sorting, corrected;
   try {
-    [printing, die, coatings, breaking, pasting, sorting] = await Promise.all([
+    [printing, die, coatings, breaking, pasting, sorting, corrected] = await Promise.all([
       api('GET', `/api/reports/daily-production/printing/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/die/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/coatings/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/breaking/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/pasting/${encodeURIComponent(date)}`),
       api('GET', `/api/reports/daily-production/sorting/${encodeURIComponent(date)}`),
+      api('GET', `/api/reports/daily-production-corrected/${encodeURIComponent(date)}`),
     ]);
   } catch (e) {
     notify('Could not load all sections: ' + e.message);
@@ -23610,7 +23705,7 @@ async function printDailyRegister() {
   // each; the four shorter sections share the third.
   const regHeading = (sections) => `<div style="margin-bottom:6mm;">${reportPrintHeading({
     title: 'DAILY PRODUCTION REGISTER',
-    scope: sections,
+    scope: sections + (mode === 'corrected' ? ' · Corrected' : mode === 'both' ? ' · Original + Corrected' : ''),
     dateText: `Date: ${dateNice}`,
   })}</div>`;
   const html = `
@@ -23664,6 +23759,7 @@ async function printDailyRegister() {
     document.body.appendChild(root);
   }
   root.innerHTML = html;
+  dpApplyPrintMode(root, mode, corrected || {});
   // body.printing-register flips on the @media print rules that hide
   // every sibling of the print container. Without this class plain
   // Ctrl+P prints the visible app normally — exactly what you want.
