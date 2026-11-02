@@ -571,7 +571,7 @@
   /* The line manager's screen: no way back to other reports; Log Out instead. */
   .mgr-dp-only { display: none; }
   body.mgr-dp-on .mgr-dp-only { display: block; flex: 0 0 auto; }
-  body.mgr-dp-on #daily-production-group .rsb-back, body.mgr-dp-on .dp-add-corner { display: none !important; }
+  body.mgr-dp-on #daily-production-group .rsb-back { display: none !important; }
   /* Daily Production on a tablet (owner, 2026-11-02): sections as a row of big
      chips on top, the table scrolls sideways with the machine name staying put. */
   @media (max-width: 1100px) {
@@ -22840,6 +22840,11 @@ async function dpShowCorrections(section, date) {
   const canEdit = hasPerm('production_edit') || mgrOpsUnlocked();
   const mine = corr[section] || {};
   table.querySelectorAll('tbody tr').forEach(tr => {
+    // The line manager fills in Breaking, Sorting and rows added with the +; a
+    // recorded machine's own figures stay as they are.
+    if (mgrOpsUnlocked() && (section === 'breaking' || section === 'sorting' || tr.querySelector('.dp-row-remove'))) {
+      tr.querySelectorAll('.dp-cell').forEach(el => { el.disabled = false; el.readOnly = false; });
+    }
     if (tr.dataset.draft || tr.querySelector('.dp-corr')) return;   // a new row gets its boxes once saved and reloaded
     const named = tr.querySelector('.dp-cell[data-machine]');
     const machine = named && named.dataset.machine;
@@ -22998,7 +23003,7 @@ function renderDailyProductionSorting(rows, date) {
     <tr>
       <td class="dp-machine">${esc(row.operator)}</td>
       ${field(row, 'sheets')}${field(row, 'hours', 'maxlength="6"')}${field(row, 'jobs')}${field(row, 'helper')}${field(row, 'remarks')}
-      ${dpActionCell(true)}
+      ${dpActionCell(!!row.is_custom)}
     </tr>`).join('');
   body.innerHTML = `
     <div class="dp-meta" style="margin-bottom:8px;color:var(--text2);font-size:13px;">
@@ -23039,7 +23044,7 @@ function renderDailyProductionBreaking(rows, date) {
   const body = document.getElementById('dp-breaking-body');
   if (!body) return;
   if (!rows.length) {
-    body.innerHTML = '<div class="empty">No breaking operators configured. Add operators on any machine with the "Sorting" role under Users &rarr; Operators.</div>';
+    body.innerHTML = '<div class="empty">No breaking operators configured. Add operators on any machine with the "Breaking" role under Users &rarr; Operators.</div>';
     return;
   }
   const editable = hasPerm('production_edit');
