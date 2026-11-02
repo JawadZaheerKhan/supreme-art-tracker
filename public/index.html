@@ -14276,6 +14276,8 @@ function refreshVisibleStockMovement() {
     const pane = document.getElementById('rt-stock-' + d);
     if (pane && pane.offsetParent !== null) loadStockMovement(d);
   }
+  const oc = document.getElementById('rt-offcut-consumption');
+  if (oc && oc.offsetParent !== null) loadOffcutConsumption();
 }
 
 // Reverse a wrong stock-in entry. Confirms, hits the server, then reloads
@@ -26968,9 +26970,17 @@ function offcutConsumptionRows() {
     .filter(t => txMatchesJobCardSearch(t, jobCardL))
     .sort((a,b) => new Date(b.created_at)-new Date(a.created_at));
 }
+// Same Reverse as Stock Out; greyed at View. Not on the old 'job-auto-offcut' rows:
+// moving such a job back to CTP refunds them by itself, so it would refund twice.
+function offcutRowReverseBtn(t) {
+  if (t.reason === 'job-auto-offcut') return '';
+  if (!canReverseTx(t) && permLevel('inv_btn_reverse') !== 'view') return '';
+  return `<button class="btn btn-sm" data-acc="inv_btn_reverse" style="background:#DC2626;color:#fff;border-color:#DC2626;font-weight:600;padding:3px 8px;font-size:11px;white-space:nowrap;" onclick="event.stopPropagation(); reverseStockTx(${t.id}, ${t.item_id || 'null'})" title="Refund this stock-out entry — adds a correction that cancels it out">&#8634; Reverse</button>`;
+}
 function renderOffcutConsumption() {
   const rows = offcutConsumptionRows();
   const canDelete = seeBtn('rpt_btn_delete_consumption');   // its own row (owner, 2026-10-27)
+  const hasActions = canDelete || rows.some(t => offcutRowReverseBtn(t));
   const totalSheets = rows.reduce((a,t)=>a+Math.abs(+t.change||0),0);
   const totalUnits = rows.reduce((a,t)=>a+(Math.abs(+t.change||0)/packetSize(t.paper_type||'')),0);
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
@@ -26992,7 +27002,7 @@ function renderOffcutConsumption() {
         <th ${th}>Size</th><th ${th}>GSM</th><th ${th}>Brand</th>
         <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Consumed</th>
         <th ${th}>Issued By</th>
-        ${canDelete ? '<th style="width:70px;padding:8px;"></th>' : ''}
+        ${hasActions ? '<th style="width:70px;padding:8px;"></th>' : ''}
       </tr></thead>
       <tbody>${rows.map(t => {
         const ps = packetSize(t.paper_type || '');
@@ -27009,7 +27019,7 @@ function renderOffcutConsumption() {
           <td style="padding:6px 8px;">${esc(t.item_brand || '—')}</td>
           <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};white-space:nowrap;">${fmt(Math.abs(t.change)/ps)} ${unit}<br><span style="font-size:11px;color:var(--text2);font-weight:500;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
           <td style="padding:6px 8px;white-space:nowrap;"${t.actor_name ? ` title="${esc(txByTitle(t))}"` : ''}>${esc(txByName(t) || '—')}</td>
-          ${canDelete ? `<td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteOffcutConsumptionRows([${t.id}])">Delete</button></td>` : ''}
+          ${hasActions ? `<td style="padding:6px 8px;text-align:right;white-space:nowrap;">${offcutRowReverseBtn(t)}${canDelete ? ` <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteOffcutConsumptionRows([${t.id}])">Delete</button>` : ''}</td>` : ''}
         </tr>`;
       }).join('')}</tbody>
     </table>
