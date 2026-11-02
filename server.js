@@ -3193,7 +3193,7 @@ app.post('/api/operators/manager-roster', requireStationUser, requirePermission(
     const sql = getDb();
     const v = await verifyManagerPin(sql, String(req.body.pin || '').trim());
     if (v.error) return res.status(v.status).json({ error: v.error });
-    const rows = await sql`SELECT id, name, roles, persons FROM operators WHERE active AND NOT is_manager ORDER BY name`;
+    const rows = await sql`SELECT id, name, roles, persons, stage_index, stage_indices, is_manager, active FROM operators WHERE active ORDER BY name`;
     res.json(rows);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -3223,7 +3223,7 @@ app.put('/api/operators/:id/manager-persons', requireStationUser, requirePermiss
 
 // Floor operators list (owner, 2026-10-24): every person who works the
 // machines; a machine picks its people from here.
-app.get('/api/floor-people', requireOperatorViewer, async (req, res) => {
+app.get('/api/floor-people', managerPinOr(requireOperatorViewer), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3232,7 +3232,7 @@ app.get('/api/floor-people', requireOperatorViewer, async (req, res) => {
     console.error(err); res.status(500).json({ error: err.message });
   }
 });
-app.post('/api/floor-people', requireOperatorAdmin, async (req, res) => {
+app.post('/api/floor-people', managerPinOr(requireOperatorAdmin), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3248,7 +3248,7 @@ app.post('/api/floor-people', requireOperatorAdmin, async (req, res) => {
   }
 });
 // Renaming carries the new name onto every machine he is on.
-app.put('/api/floor-people/:id', requireOperatorAdmin, async (req, res) => {
+app.put('/api/floor-people/:id', managerPinOr(requireOperatorAdmin), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3275,7 +3275,7 @@ app.put('/api/floor-people/:id', requireOperatorAdmin, async (req, res) => {
   }
 });
 // Only someone on no machine can come off the list.
-app.delete('/api/floor-people/:id', requireOperatorAdmin, async (req, res) => {
+app.delete('/api/floor-people/:id', managerPinOr(requireOperatorAdmin), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3721,7 +3721,7 @@ function jobsDisplayPair(jobsMap) {
 // machine with sheets, jobs count, colors breakdown, plates and the
 // operator list. Hours + Remarks come from daily_production_notes so
 // admin can scribble what the auto-totals can't capture.
-app.get('/api/reports/daily-production/printing/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/printing/:date', managerPinOr(requirePermission('rpt_daily_production_report', 'view')), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -3810,7 +3810,7 @@ function isoTsToDate(ts) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ts || ''));
   return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
 }
-app.get('/api/reports/daily-production/coatings/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/coatings/:date', managerPinOr(requirePermission('rpt_daily_production_report', 'view')), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4018,7 +4018,7 @@ app.get('/api/reports/daily-production/coatings/:date', requirePermission('rpt_d
 // there's no workflow stage to aggregate from, so all numeric cells
 // are admin-entered. We pull the operator roster from anyone whose
 // machine has the 'break' role and serve their saved cells.
-app.get('/api/reports/daily-production/breaking/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/breaking/:date', managerPinOr(requirePermission('rpt_daily_production_report', 'view')), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4077,7 +4077,7 @@ app.get('/api/reports/daily-production/breaking/:date', requirePermission('rpt_d
 // roster to derive and every row is one somebody added with the + button.
 // Rows live in daily_production_notes under section 'sorting', keyed by the
 // person's name in the `machine` column exactly as Breaking does.
-app.get('/api/reports/daily-production/sorting/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/sorting/:date', managerPinOr(requirePermission('rpt_daily_production_report', 'view')), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4106,7 +4106,7 @@ app.get('/api/reports/daily-production/sorting/:date', requirePermission('rpt_da
 // Daily Production register — Pasting section. Same byline-parsing
 // pattern as Printing/Die. UNITS column is sum of pasted_cartons_qty
 // per job per machine on the chosen date.
-app.get('/api/reports/daily-production/pasting/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/pasting/:date', managerPinOr(requirePermission('rpt_daily_production_report', 'view')), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4149,7 +4149,7 @@ app.get('/api/reports/daily-production/pasting/:date', requirePermission('rpt_da
 // Printing endpoint but sheets come from die_cutting_sheets, the stage
 // label is 'Die Cutting', and Make Ready + Settings join Hours/Remarks
 // as admin-editable cells.
-app.get('/api/reports/daily-production/die/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production/die/:date', managerPinOr(requirePermission('rpt_daily_production_report', 'view')), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4676,7 +4676,7 @@ app.get('/api/reports/production', requirePermission('rpt_production_report', 'v
 // also clear by sending empty strings.
 // Corrected values (owner, 2026-11-02): by section, machine and column, one date.
 const DP_SECTIONS = new Set(['printing', 'die', 'coatings', 'breaking', 'pasting', 'sorting']);
-app.get('/api/reports/daily-production-corrected/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+app.get('/api/reports/daily-production-corrected/:date', managerPinOr(requirePermission('rpt_daily_production_report', 'view')), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4688,7 +4688,7 @@ app.get('/api/reports/daily-production-corrected/:date', requirePermission('rpt_
     res.json(out);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.put('/api/reports/daily-production-corrected/:section/:date/:machine', requireAuth, async (req, res) => {
+app.put('/api/reports/daily-production-corrected/:section/:date/:machine', managerPinOr(requirePermission('production_edit')), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4700,7 +4700,6 @@ app.put('/api/reports/daily-production-corrected/:section/:date/:machine', requi
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
     if (!DP_SECTIONS.has(section) || !machine) return res.status(400).json({ error: 'Missing section or machine' });
     if (!/^[a-z][a-z ]{0,29}$/.test(col)) return res.status(400).json({ error: 'Unknown column' });
-    if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'production_edit')) return res.status(403).json({ error: 'Not allowed to edit the production register' });
     const piece = JSON.stringify({ [col]: value });
     await sql`
       INSERT INTO daily_production_notes (date, section, machine, corrected)
@@ -13320,6 +13319,23 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
 // Look up a Manager PIN and confirm it's actually a manager (not a regular
 // machine operator). Shared by the two manager-only endpoints below so a
 // crafted request against a non-manager PIN is always rejected the same way.
+// A route the line manager may use while his PIN is in (owner, 2026-11-02): a valid
+// Manager PIN in X-Manager-Pin passes; anything else falls to the route's usual rule.
+function managerPinOr(normalRule) {
+  return async function (req, res, next) {
+    const pin = String(req.get('x-manager-pin') || '').trim();
+    if (!pin || !req.user || !canRunStation(req.user) || !(userHasRole(req.user, 'super_admin') || roleHasPermission(req.user, 'station_manager_pin'))) return normalRule(req, res, next);
+    try {
+      await dbReady;
+      const sql = getDb();
+      const v = await verifyManagerPin(sql, pin);
+      if (v.error) return normalRule(req, res, next);
+      await withStationActor(sql, req, v.operator);
+      req.managerPinOperator = v.operator;
+      next();
+    } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+  };
+}
 async function verifyManagerPin(sql, pin) {
   if (!validPin(pin)) return { error: 'Enter a 3-digit PIN', status: 400 };
   const ops = await sql`SELECT id, name, is_manager, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
