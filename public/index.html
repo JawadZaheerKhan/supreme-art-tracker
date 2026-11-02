@@ -5648,10 +5648,10 @@ function issuedPrimarySheets(j) {
 // is not in the loaded inventory): there, recomputing would read "issued 0"
 // and ask for the whole job again, so the marker stands.
 function partialPendingSheets(j) {
-  if (j && j.particulars && j.particulars.paper_waived) return 0;   // processed without paper (Admin)
   const raw = j && j.particulars && parseInt(j.particulars.partial_pending_sheets, 10);
   const marker = Number.isFinite(raw) && raw > 0 ? raw : 0;
   if (!marker) return 0;
+  if (j.particulars.paper_waived) return j.particulars.paper_waived.main_owed_sheets === undefined ? 0 : marker;   // processed without paper (Admin): only what was raised since
   const rows = (j && Array.isArray(j.issued_items)) ? j.issued_items : [];
   if (!rows.length) return marker;                // nothing recorded to reckon from
   const need = jobFreshNeedSheets(j);
@@ -5676,7 +5676,6 @@ function secondaryInPreConsumed(j, key = 'secondary_paper') {
 function secondaryPendingSheets(j, key = 'secondary_paper') {
   const sec = j && j.particulars && j.particulars[key];
   if (!sec || !sec.inventory_item_id) return 0;
-  if (j.particulars.paper_waived) return 0;   // processed without paper (Admin)
   if (j.issuance_status !== 'pending' && j.issuance_status !== 'issued') return 0;
   if (secondaryInPreConsumed(j, key)) return 0;
   const packets = parseFloat(sec.packets);
@@ -5686,7 +5685,11 @@ function secondaryPendingSheets(j, key = 'secondary_paper') {
   const ps = packetSize(item.paper_type);
   const needSheets = Math.round(packets * ps);
   const issued = parseInt(sec.issued_sheets, 10) || 0;
-  return Math.max(0, needSheets - issued);
+  // What "process without paper" let off stays let off; paper added since is owed (owner, 2026-11-02).
+  const pw = j.particulars.paper_waived;
+  const wv = pw && pw[key === 'third_paper' ? 'third_owed_sheets' : 'second_owed_sheets'];
+  const waived = !pw ? 0 : (wv === undefined ? Infinity : (parseFloat(wv) || 0));
+  return Math.max(0, needSheets - issued - waived);
 }
 function thirdPendingSheets(j) { return secondaryPendingSheets(j, 'third_paper'); }
 function hasSecondaryPending(j) { return secondaryPendingSheets(j) > 0 || thirdPendingSheets(j) > 0; }

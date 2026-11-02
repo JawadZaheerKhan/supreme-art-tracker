@@ -6431,6 +6431,25 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
           });
         }
       }
+      // Processed without paper: the waived sheets stay let off, so only the
+      // change in the main paper's packets since moves what is asked for.
+      if (jp.paper_waived && oldItemId === newItemId && job.issuance_status === 'issued' && newItemId) {
+        const mainPk = o => (parseFloat((o || {}).quantity_of_packets) || 0) - EXTRA_PAPERS.reduce((a, e) => a + (((o || {})[e.key] && o[e.key].inventory_item_id) ? (parseFloat(o[e.key].packets) || 0) : 0), 0);
+        const deltaPk = mainPk(jp) - mainPk(priorParticulars);
+        if (deltaPk) {
+          const item = (await sql`SELECT * FROM inventory_items WHERE id = ${newItemId}`)[0];
+          const was = parseInt(jp.partial_pending_sheets, 10) || 0;
+          const now = Math.max(0, was + Math.round(deltaPk * packetSize((item && item.paper_type) || '')));
+          if (now !== was) {
+            const np = { ...jp };
+            if (now > 0) np.partial_pending_sheets = now; else delete np.partial_pending_sheets;
+            const upd = await sql`UPDATE jobs SET particulars = ${JSON.stringify(np)} WHERE id = ${job.id} RETURNING *`;
+            if (upd[0]) Object.assign(job, upd[0]);
+            if (now > was) await logAudit(sql, req, { action: 'job.more_paper_needed', entityType: 'job', entityId: job.id,
+              summary: `Stock requested: 1st paper needs ${now.toLocaleString()} more sheets`, metadata: { owed_sheets: now } });
+          }
+        }
+      }
       // The 2nd / 3rd paper are owed by themselves; here it's only recorded.
       for (const e of EXTRA_PAPERS) {
         const after = jp[e.key], before = priorParticulars && priorParticulars[e.key];
@@ -6664,7 +6683,9 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   // isSecondary: one of the extra papers (2nd or 3rd) - extra says which.
   const extra = extraPaperBySource(source);
   const isSecondary = !!extra;
-  if (job.particulars && job.particulars.paper_waived) {
+  // Waived jobs can only be issued what was asked for since (owner, 2026-11-02).
+  const waivedJob = !!(job.particulars && job.particulars.paper_waived);
+  if (waivedJob && !isSecondary && !(parseInt(job.particulars.partial_pending_sheets, 10) > 0)) {
     return { status: 400, error: `Job E-${id} was processed without paper by an Admin - nothing to issue. Send it back to Pending Stock first if paper should be issued.` };
   }
   const secondaryRef = (extra && job.particulars && job.particulars[extra.key]) || null;
@@ -6737,6 +6758,8 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   // share). Secondary uses secondary_paper.issued_sheets for the
   // same purpose. Without this, a top-up would treat needSheets as
   // the FULL need minus offcut, ignoring what was already issued.
+  const waivedExtra = !(waivedJob && isSecondary) ? 0
+    : (v => (v === undefined ? Infinity : (parseFloat(v) || 0)))(job.particulars.paper_waived[extra.key === 'third_paper' ? 'third_owed_sheets' : 'second_owed_sheets']);
   const secondaryIssuedSheets = isSecondary
     ? (parseInt(secondaryRef.issued_sheets, 10) || 0)
     : 0;
@@ -6770,10 +6793,13 @@ async function performIssueStockUnlocked(sql, req, id, body) {
     .reduce((a, x) => a + ((x && !EXTRA_SOURCES.has(x.source)) ? (parseFloat(x.sheets) || 0) : 0), 0);
   const issuedRows = Array.isArray(job.issued_items) ? job.issued_items : [];
   const needSheets = isSecondary
-    ? Math.max(0, totalNeedSheets - secondaryIssuedSheets)
-    : (partialPending > 0
+    ? Math.max(0, totalNeedSheets - secondaryIssuedSheets - waivedExtra)
+    : (waivedJob ? partialPending : (partialPending > 0
         ? (issuedRows.length ? Math.max(0, freshNeed - issuedPrimary) : partialPending)
-        : freshNeed);
+        : freshNeed));
+  if (waivedJob && needSheets <= 0) {
+    return { status: 400, error: `Job E-${id} was processed without paper by an Admin - nothing to issue. Send it back to Pending Stock first if paper should be issued.` };
+  }
   if (needSheets <= 0) {
     // Full coverage but the job somehow stayed in Pending Stock (edge
     // case where the CTP-forward path didn't flip status — e.g. a job
@@ -7126,11 +7152,11 @@ app.post('/api/jobs/:id/manager-issue-stock', requireStationUser, requirePermiss
 // primary needSheets math. 0 when the job isn't waiting on its main paper.
 async function primaryOwedSheets(sql, job, itemsById) {
   if (!job.inventory_item_id) return 0;
-  // Processed without paper by an Admin - nothing is owed.
-  if (job.particulars && job.particulars.paper_waived) return 0;
   const p = job.particulars || {};
   const partialRaw = parseInt(p.partial_pending_sheets, 10);
   const partial = Number.isFinite(partialRaw) && partialRaw > 0 ? partialRaw : 0;
+  // Processed without paper by an Admin: only what was raised since is owed.
+  if (p.paper_waived) return p.paper_waived.main_owed_sheets === undefined ? 0 : partial;
   if (job.issuance_status !== 'issued' && job.issuance_status !== 'pending' && job.issuance_status !== 'ctp') return 0;
   if (job.issuance_status === 'issued' && !partial) return 0;
   // At CTP the main paper may already have been issued early (status stays
@@ -7181,14 +7207,16 @@ function secondaryOwedSheets(job, secItem, key = 'secondary_paper') {
   const p = job.particulars || {};
   const sec = p[key];
   if (!sec || !sec.inventory_item_id || !secItem) return 0;
-  if (p.paper_waived) return 0;          // processed without paper by an Admin
   if (job.issuance_status !== 'pending' && job.issuance_status !== 'issued') return 0;
   const packets = parseFloat(sec.packets);
   if (!Number.isFinite(packets) || packets <= 0) return 0;
   const pre = p.offcut_pre_consumed;
   if (pre && Array.isArray(pre.items) && pre.items.some(it => it && it.item_id === sec.inventory_item_id)) return 0;
   const need = Math.round(packets * packetSize(secItem.paper_type || ''));
-  return Math.max(0, need - (parseInt(sec.issued_sheets, 10) || 0));
+  // What an Admin's "process without paper" let off stays let off; paper added since is owed.
+  const w = p.paper_waived && p.paper_waived[key === 'third_paper' ? 'third_owed_sheets' : 'second_owed_sheets'];
+  const waived = !p.paper_waived ? 0 : (w === undefined ? Infinity : (parseFloat(w) || 0));
+  return Math.max(0, need - (parseInt(sec.issued_sheets, 10) || 0) - waived);
 }
 
 const offcutGroupKey = (it) => [it.paper_type || '', it.size || '', String(it.gsm || '')].join('||');
