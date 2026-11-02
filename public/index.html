@@ -229,7 +229,13 @@
   /* The Access Register on screen (owner, 2026-10-26): View = greyed out;
      Super Admin only = black. See applyBtnAccess. */
   .acc-view { opacity: .45 !important; cursor: not-allowed !important; filter: grayscale(1); }
-  .acc-sa-only { background: #111827 !important; border-color: #111827 !important; color: #fff !important; }
+  .acc-sa-only:not(.stage-pill):not(.rib-dot) { background: #111827 !important; border-color: #111827 !important; color: #fff !important; }
+  /* Stage tiles and the job card keep their real colours: locked, not grey (owner, 2026-11-02). */
+  .stage-pill.acc-view, .rib-dot.acc-view, .job-edit-modal .acc-view { opacity: 1 !important; filter: none !important; }
+  .stage-pill.acc-view, .rib-dot.acc-view { cursor: default !important; }
+  .job-edit-modal input:disabled, .job-edit-modal select:disabled, .job-edit-modal textarea:disabled, .job-edit-modal button:disabled,
+  .job-edit-modal input[readonly], .job-edit-modal textarea[readonly] { opacity: 1 !important; color: inherit; -webkit-text-fill-color: currentColor; }
+  .job-edit-modal input.tick-locked { pointer-events: none; }
   /* Finance features merged in from the Finance app, each gated by its own
      Access Register row (see renderUserChip for the body classes). */
   body.role-no-sale-report .sale-report-only { display: none !important; }
@@ -34319,6 +34325,12 @@ function openEditWithDelivery(id) {
 // The observer is stopped from closeModal() when the modal (and this
 // adjust flow) closes.
 let _adjLockObserver = null;
+function lockTickKeepColour(el) {
+  el.classList.add('tick-locked');
+  el.tabIndex = -1;
+  el.setAttribute('aria-disabled', 'true');
+  el.addEventListener('click', e => e.preventDefault());   // keeps its ticked / unticked state
+}
 function lockJobCardExceptAdjustFields() {
   const root = document.querySelector('.job-edit-modal');
   if (!root) return;
@@ -34343,7 +34355,7 @@ function lockJobCardExceptAdjustFields() {
     if (el.closest('.modal-actions')) return;
     if (el.tagName === 'BUTTON' || el.tagName === 'SELECT') { el.disabled = true; return; }
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-      if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
+      if (el.type === 'checkbox' || el.type === 'radio') lockTickKeepColour(el);
       else el.readOnly = true;
     }
   };
@@ -34386,7 +34398,7 @@ function lockJobCardExceptMachineAndParticulars() {
     if (el.closest('.modal-actions')) return;
     if (el.tagName === 'BUTTON' || el.tagName === 'SELECT') { el.disabled = true; return; }
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-      if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
+      if (el.type === 'checkbox' || el.type === 'radio') lockTickKeepColour(el);
       else el.readOnly = true;
     }
   };
@@ -34481,7 +34493,7 @@ function openEdit(id, opts) {
       const outsideDeliveries = el => !el.closest('.jc-deliveries');
       root.querySelectorAll('input, textarea').forEach(el => {
         if (!outsideDeliveries(el)) return;
-        if (el.type === 'checkbox' || el.type === 'radio') el.disabled = true;
+        if (el.type === 'checkbox' || el.type === 'radio') lockTickKeepColour(el);
         else el.readOnly = true;
       });
       root.querySelectorAll('select').forEach(el => { if (outsideDeliveries(el)) el.disabled = true; });
