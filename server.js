@@ -322,7 +322,8 @@ function getDb() {
 // Bumped again for offcut_challan_counter (offcut print Challan No., 2026-10-24).
 // Bumped again for the Cost Report: finance.cost_settings and its Access Register rows.
 // Bumped again for the Cost Report's per-job board rates (finance.cost_board_rates).
-const SCHEMA_VERSION = 'v2026-10-31-cost-board-rates';
+// Bumped again for Daily Production's corrected values (daily_production_notes.corrected).
+const SCHEMA_VERSION = 'v2026-11-02-dp-corrected';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1527,6 +1528,8 @@ async function initDb() {
     // pasting_waste_qty / coatings_done[].waste_sheets) and admin-
     // editable per machine row, same as Hours / Remarks.
     await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS waste TEXT`;
+    // Corrected values typed under a figure: { "sheets": "7900", ... } by column. The originals stay as they are.
+    await sql`ALTER TABLE daily_production_notes ADD COLUMN IF NOT EXISTS corrected JSONB`;
 
     // Finished Goods Transfer Notes (PRD/QR/008)
     await sql`
@@ -4671,6 +4674,46 @@ app.get('/api/reports/production', requirePermission('rpt_production_report', 'v
 // Save Hours / Remarks for a single (date, section, machine) cell.
 // Upsert so blanking a cell still leaves the row in place — admins can
 // also clear by sending empty strings.
+// Corrected values (owner, 2026-11-02): by section, machine and column, one date.
+const DP_SECTIONS = new Set(['printing', 'die', 'coatings', 'breaking', 'pasting', 'sorting']);
+app.get('/api/reports/daily-production-corrected/:date', requirePermission('rpt_daily_production_report', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    const rows = await sql`SELECT section, machine, corrected FROM daily_production_notes WHERE date = ${date} AND corrected IS NOT NULL`;
+    const out = {};
+    for (const r of rows) { (out[r.section] = out[r.section] || {})[r.machine] = r.corrected; }
+    res.json(out);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/reports/daily-production-corrected/:section/:date/:machine', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const date = String(req.params.date || '').trim();
+    const section = String(req.params.section || '').trim().toLowerCase();
+    const machine = String(req.params.machine || '').trim();
+    const col = String((req.body && req.body.col) || '').trim().toLowerCase();
+    const value = String((req.body && req.body.value) ?? '').trim().slice(0, 200);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
+    if (!DP_SECTIONS.has(section) || !machine) return res.status(400).json({ error: 'Missing section or machine' });
+    if (!/^[a-z][a-z ]{0,29}$/.test(col)) return res.status(400).json({ error: 'Unknown column' });
+    if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'production_edit')) return res.status(403).json({ error: 'Not allowed to edit the production register' });
+    const piece = JSON.stringify({ [col]: value });
+    await sql`
+      INSERT INTO daily_production_notes (date, section, machine, corrected)
+      VALUES (${date}, ${section}, ${machine}, ${value ? piece : '{}'}::jsonb)
+      ON CONFLICT (date, section, machine) DO UPDATE
+        SET corrected = CASE WHEN ${value}::text = '' THEN COALESCE(daily_production_notes.corrected, '{}'::jsonb) - ${col}::text
+                             ELSE COALESCE(daily_production_notes.corrected, '{}'::jsonb) || ${piece}::jsonb END`;
+    await logAudit(sql, req, { action: 'production.correction', entityType: 'daily_production', entityId: null,
+      summary: `Daily Production ${date}, ${section}, ${machine}: ${col} ${value ? 'corrected to ' + value : 'correction removed'}` });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, async (req, res) => {
   try {
     await dbReady;
