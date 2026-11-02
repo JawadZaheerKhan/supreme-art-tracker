@@ -4084,6 +4084,11 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <button class="tab active" data-ops-tab="machines" onclick="setOpsSubTab('machines')">Machines</button>
       <button class="tab" data-ops-tab="people" onclick="setOpsSubTab('people')">Operators</button>
     </div>
+    <div class="search-wrap" style="margin-top:0.6rem;max-width:420px;">
+      <input type="text" id="ops-search" placeholder="Search name or machine..." oninput="setOpsSearch(this.value)">
+      <span class="search-icon">&#128269;</span>
+    </div>
+    <div id="ops-filter-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:0.5rem;"></div>
     <div class="inventory-list" id="operators-list" style="margin-top:0.5rem;"></div>
     <div class="inventory-list" id="floor-people-list" style="margin-top:0.5rem;display:none;"></div>
   </div>
@@ -36548,7 +36553,51 @@ async function loadUsersAndAudit() {
 }
 
 // ── Floor operators management (admin) ───────────────────────
+// Search + a filter per kind of work, on both lists (owner, 2026-11-02).
+const opsFilter = { q: '', role: '' };
+function opsRoleIds(machine) { return machine.is_manager ? ['manager'] : rolesOfOperator(machine); }
+function opsPersonMachines(person) {
+  const n = String(person.name || '').trim().toLowerCase();
+  return operatorsList.filter(o => o.active !== false && (Array.isArray(o.persons) ? o.persons : []).some(x => x && String(x.name || '').trim().toLowerCase() === n));
+}
+function opsMachineHay(o) {
+  return [o.name, ...(Array.isArray(o.persons) ? o.persons : []).flatMap(x => [x && x.name, x && x.name_ur])].filter(Boolean).join(' ');
+}
+function opsPersonHay(person) {
+  return [person.name, person.name_ur, ...opsPersonMachines(person).map(o => o.name)].filter(Boolean).join(' ');
+}
+function opsRowRoles(row) {
+  return opsSubTab === 'people' ? opsPersonMachines(row).flatMap(opsRoleIds) : opsRoleIds(row);
+}
+function opsVisibleRows() {
+  const rows = opsSubTab === 'people' ? floorPeople : operatorsList;
+  const q = opsFilter.q.trim();
+  return rows.filter(r => {
+    if (q && !searchMatch(opsSubTab === 'people' ? opsPersonHay(r) : opsMachineHay(r), q)) return false;
+    if (opsFilter.role === 'none') return !opsRowRoles(r).length;
+    return !opsFilter.role || opsRowRoles(r).includes(opsFilter.role);
+  });
+}
+function renderOpsFilterChips() {
+  const el = document.getElementById('ops-filter-chips');
+  if (!el) return;
+  const rows = opsSubTab === 'people' ? floorPeople : operatorsList;
+  const q = opsFilter.q.trim();
+  const found = rows.filter(r => !q || searchMatch(opsSubTab === 'people' ? opsPersonHay(r) : opsMachineHay(r), q));
+  const count = id => found.filter(r => opsRowRoles(r).includes(id)).length;
+  const chip = (id, label, n) => `<button class="tab${opsFilter.role === id ? ' active' : ''}" onclick="setOpsRole('${id}')">${esc(label)} (${n})</button>`;
+  const none = found.filter(r => !opsRowRoles(r).length).length;
+  el.innerHTML = chip('', 'All', found.length)
+    + ROLES.map(r => chip(r.id, r.label, count(r.id))).join('')
+    + chip('manager', 'Line Manager', count('manager'))
+    + (none ? chip('none', opsSubTab === 'people' ? 'Not on a machine' : 'No role', none) : '');
+}
+function renderOpsLists() { renderOpsFilterChips(); if (opsSubTab === 'people') renderFloorPeople(); else renderOperators(); }
+function setOpsSearch(v) { opsFilter.q = String(v || ''); renderOpsLists(); }
+function setOpsRole(id) { opsFilter.role = id; renderOpsLists(); }
+function opsNoMatchHtml() { return '<div class="empty">Nobody matches this search or filter.</div>'; }
 function renderOperators() {
+  renderOpsFilterChips();
   const el = document.getElementById('operators-list');
   if (!el) return;
   // Visible to admin and production_manager only — the server route this
@@ -36561,7 +36610,9 @@ function renderOperators() {
     el.innerHTML = '<div class="empty">No operators yet. Add one so floor staff can log in at the Station terminal.</div>';
     return;
   }
-  el.innerHTML = operatorsList.map(o => {
+  const shownOps = opsSubTab === 'machines' ? opsVisibleRows() : operatorsList;
+  if (!shownOps.length) { el.innerHTML = opsNoMatchHtml(); return; }
+  el.innerHTML = shownOps.map(o => {
     const persons = Array.isArray(o.persons) ? o.persons : [];
     const peopleStr = persons.length
       ? persons.map(p => esc(p.name || '')).join(', ')
@@ -36592,7 +36643,8 @@ function setOpsSubTab(t) {
   if (pp) pp.style.display = opsSubTab === 'people' ? '' : 'none';
   if (b) b.textContent = opsSubTab === 'people' ? '+ Add Operator' : '+ Add Machine';
   document.querySelectorAll('#ops-subtabs .tab').forEach(x => x.classList.toggle('active', x.dataset.opsTab === opsSubTab));
-  if (opsSubTab === 'people') renderFloorPeople();
+  opsFilter.role = '';   // the two lists have different counts; the search stays
+  renderOpsLists();
 }
 function opsAddClick() { if (opsSubTab === 'people') openFloorPersonModal(); else openOperatorModal(); }
 // The machines a person is on.
@@ -36601,11 +36653,14 @@ function machinesOfPerson(name) {
   return operatorsList.filter(o => o.active !== false && (Array.isArray(o.persons) ? o.persons : []).some(p => p && String(p.name || '').trim().toLowerCase() === n)).map(o => o.name);
 }
 function renderFloorPeople() {
+  if (opsSubTab === 'people') renderOpsFilterChips();
   const el = document.getElementById('floor-people-list');
   if (!el) return;
   if (!hasPerm('user_btn_operators', 'view')) { el.innerHTML = ''; return; }
   if (!floorPeople.length) { el.innerHTML = '<div class="empty">No operators yet. Add one, then pick them on a machine.</div>'; return; }
-  el.innerHTML = floorPeople.map(p => {
+  const shownPeople = opsVisibleRows();
+  if (!shownPeople.length) { el.innerHTML = opsNoMatchHtml(); return; }
+  el.innerHTML = shownPeople.map(p => {
     const on = machinesOfPerson(p.name);
     return `
     <div class="inv-card">
