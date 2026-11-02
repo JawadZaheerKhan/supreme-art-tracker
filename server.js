@@ -4014,10 +4014,36 @@ app.get('/api/reports/daily-production/coatings/:date', managerPinOr(requirePerm
   }
 });
 
+// One row per person on the machines with this role (a person on two machines shows
+// once; managers not), then anyone added with the + button, each with their saved cells.
+async function dpPersonRows(sql, date, section, role) {
+  const machRows = await sql`SELECT name, persons FROM operators WHERE active AND NOT is_manager AND roles @> ARRAY[${role}]::text[]`;
+  const seen = new Map();
+  for (const r of machRows) {
+    for (const p of (Array.isArray(r.persons) ? r.persons : [])) {
+      const n = String((p && p.name) || '').trim();
+      if (n && !seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), { name: n, name_ur: String((p && p.name_ur) || '').trim() });
+    }
+  }
+  const byName = (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+  const operators = [...seen.values()].sort(byName);
+  const notesRows = await sql`SELECT machine, sheets, hours, jobs, helper, remarks FROM daily_production_notes WHERE date = ${date} AND section = ${section}`;
+  const notes = new Map(notesRows.filter(r => r.machine).map(r => [String(r.machine).toLowerCase(), r]));
+  const customOps = notesRows.filter(r => r.machine && !seen.has(String(r.machine).toLowerCase())).map(r => ({ name: r.machine, name_ur: '' })).sort(byName);
+  return [...operators, ...customOps].map(op => {
+    const n = notes.get(op.name.toLowerCase()) || {};
+    return {
+      operator: op.name, operator_ur: op.name_ur || '',
+      sheets: n.sheets || '', hours: n.hours || '', jobs: n.jobs || '', helper: n.helper || '', remarks: n.remarks || '',
+      is_custom: !seen.has(op.name.toLowerCase()),
+    };
+  });
+}
+
 // Daily Production register — Breaking section. Unlike the others
 // there's no workflow stage to aggregate from, so all numeric cells
 // are admin-entered. We pull the operator roster from anyone whose
-// machine has the 'break' role and serve their saved cells.
+// machine has the Breaking role and serve their saved cells.
 app.get('/api/reports/daily-production/breaking/:date', managerPinOr(requirePermission('rpt_daily_production_report', 'view')), async (req, res) => {
   try {
     await dbReady;
@@ -4025,78 +4051,24 @@ app.get('/api/reports/daily-production/breaking/:date', managerPinOr(requirePerm
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
 
-    // Managers excluded: only the breaking crew belongs in this list.
-    const machRows = await sql`SELECT name, persons FROM operators WHERE active AND NOT is_manager AND roles @> ARRAY['break']::text[]`;
-    // De-dupe by lowercase name so the same person appearing on two
-    // machines only shows up once in the register.
-    const seen = new Map();
-    for (const r of machRows) {
-      const list = Array.isArray(r.persons) ? r.persons : [];
-      for (const p of list) {
-        const n = String((p && p.name) || '').trim();
-        if (!n) continue;
-        const key = n.toLowerCase();
-        if (!seen.has(key)) seen.set(key, { name: n, name_ur: String((p && p.name_ur) || '').trim() });
-      }
-    }
-    const operators = [...seen.values()].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
-
-    const notesRows = await sql`SELECT machine, sheets, hours, jobs, helper, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'breaking'`;
-    const noteByOp = new Map(notesRows.map(r => [r.machine, r]));
-    // Custom operators added via the + button on the report. Listed
-    // after the role-tagged roster so the regular crew stays at top.
-    const existingNames = new Set(operators.map(o => o.name.toLowerCase()));
-    const customOps = notesRows
-      .map(r => r.machine)
-      .filter(name => name && !existingNames.has(name.toLowerCase()))
-      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
-      .map(name => ({ name, name_ur: '' }));
-    const allOperators = [...operators, ...customOps];
-
-    const out = allOperators.map(op => {
-      const n = noteByOp.get(op.name) || {};
-      return {
-        operator: op.name,
-        operator_ur: op.name_ur || '',
-        sheets:  n.sheets  || '',
-        hours:   n.hours   || '',
-        jobs:    n.jobs    || '',
-        helper:  n.helper  || '',
-        remarks: n.remarks || '',
-        is_custom: !existingNames.has(op.name.toLowerCase()),
-      };
-    });
+    const out = await dpPersonRows(sql, date, 'breaking', 'breaking');
     res.json(out);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
   }
 });
 
-// Daily Production register — Sorting section. Same shape as Breaking, but
-// entirely hand-entered: nothing on the Job Card feeds it, so there is no
-// roster to derive and every row is one somebody added with the + button.
-// Rows live in daily_production_notes under section 'sorting', keyed by the
-// person's name in the `machine` column exactly as Breaking does.
+// Daily Production register — Sorting section. Same shape as Breaking: figures
+// are hand-entered, one row per person on a Sorting machine plus anyone added
+// with the + button. Rows live in daily_production_notes under section 'sorting',
+// keyed by the person's name in the `machine` column exactly as Breaking does.
 app.get('/api/reports/daily-production/sorting/:date', managerPinOr(requirePermission('rpt_daily_production_report', 'view')), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const date = String(req.params.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
-    const notesRows = await sql`SELECT machine, sheets, hours, jobs, helper, remarks FROM daily_production_notes WHERE date = ${date} AND section = 'sorting'`;
-    const out = notesRows
-      .filter(r => r.machine)
-      .sort((a, b) => String(a.machine).toLowerCase().localeCompare(String(b.machine).toLowerCase()))
-      .map(r => ({
-        operator: r.machine,
-        operator_ur: '',
-        sheets:  r.sheets  || '',
-        hours:   r.hours   || '',
-        jobs:    r.jobs    || '',
-        helper:  r.helper  || '',
-        remarks: r.remarks || '',
-        is_custom: true,
-      }));
+    const out = await dpPersonRows(sql, date, 'sorting', 'break');   // the Sorting role's id is 'break'
     res.json(out);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -4713,7 +4685,7 @@ app.put('/api/reports/daily-production-corrected/:section/:date/:machine', manag
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, async (req, res) => {
+app.put('/api/reports/daily-production/:section/:date/:machine', managerPinOr(requireAuth), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4723,7 +4695,7 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
     if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
     // Only roles with production_edit access can edit register cells.
-    if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'production_edit')) return res.status(403).json({ error: 'Not allowed' });
+    if (!req.managerPinOperator && !userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'production_edit')) return res.status(403).json({ error: 'Not allowed' });
     const hours      = (req.body.hours      == null) ? null : String(req.body.hours).trim();
     const remarks    = (req.body.remarks    == null) ? null : String(req.body.remarks).trim();
     const makeReady  = (req.body.make_ready == null) ? null : String(req.body.make_ready).trim();
@@ -4761,7 +4733,7 @@ app.put('/api/reports/daily-production/:section/:date/:machine', requireAuth, as
 
 // Remove a custom Daily Production row entirely (the × button next to
 // a row added via the + button). Same role gate as the PUT endpoint.
-app.delete('/api/reports/daily-production/:section/:date/:machine', requireAuth, async (req, res) => {
+app.delete('/api/reports/daily-production/:section/:date/:machine', managerPinOr(requireAuth), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -4770,7 +4742,7 @@ app.delete('/api/reports/daily-production/:section/:date/:machine', requireAuth,
     const machine = String(req.params.machine || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD' });
     if (!section || !machine) return res.status(400).json({ error: 'Missing section or machine' });
-    if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'production_edit')) return res.status(403).json({ error: 'Not allowed' });
+    if (!req.managerPinOperator && !userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'production_edit')) return res.status(403).json({ error: 'Not allowed' });
     await sql`DELETE FROM daily_production_notes WHERE date = ${date} AND section = ${section} AND machine = ${machine}`;
     res.json({ ok: true });
   } catch (err) {
