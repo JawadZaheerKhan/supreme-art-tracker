@@ -594,6 +594,25 @@
   .dp-table th, .dp-table td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: middle; }
   .dp-table th { background: var(--bg2); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text2); }
   .dp-table td.dp-num, .dp-table td.dp-machine { font-weight: 600; }
+  /* The line manager's screen: no way back to other reports; Log Out instead. */
+  .mgr-dp-only { display: none; }
+  body.mgr-dp-on .mgr-dp-only { display: block; flex: 0 0 auto; }
+  body.mgr-dp-on #daily-production-group .rsb-back, body.mgr-dp-on .dp-add-corner { display: none !important; }
+  /* Daily Production on a tablet (owner, 2026-11-02): sections as a row of big
+     chips on top, the table scrolls sideways with the machine name staying put. */
+  @media (max-width: 1100px) {
+    #daily-production-group .reports-layout { flex-direction: column; min-height: 0; }
+    #daily-production-group .reports-sidebar { width: 100%; box-sizing: border-box; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 6px; overflow-x: auto; padding: 10px; border-right: none; border-bottom: 1px solid var(--border); }
+    #daily-production-group .rsb-section, #daily-production-group .report-flowing-indicator { display: none; }
+    #daily-production-group .rsb-item, #daily-production-group .rsb-back { flex: 0 0 auto; width: auto; margin: 0; white-space: nowrap; min-height: 44px; padding: 8px 14px; }
+    #daily-production-group .rsb-item.active { background: var(--brand); color: #fff; border-radius: 8px; }
+    #daily-production-group .reports-content { width: 100%; min-width: 0; box-sizing: border-box; padding: 10px; }
+    #daily-production-group .dp-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    #daily-production-group .dp-table { min-width: 900px; }
+    #daily-production-group .dp-table td:first-child, #daily-production-group .dp-table th:first-child { position: sticky; left: 0; z-index: 2; background: var(--bg2); }
+    #daily-production-group .dp-table input.dp-corr, #daily-production-group .dp-table input.dp-cell { min-height: 40px; font-size: 16px; }
+    #daily-production-group .dp-table input.dp-remarks { min-width: 160px; }
+  }
   /* The corrected value under a figure (owner, 2026-11-02). */
   .dp-table input.dp-corr { display: block; width: 100%; min-width: 48px; box-sizing: border-box; margin-top: 4px; padding: 2px 6px; font: inherit; font-weight: 700; color: #166534; background: rgba(22,163,74,0.08); border: 1px dashed rgba(22,163,74,0.55); border-radius: 5px; text-align: inherit; }
   .dp-table input.dp-corr::placeholder { color: rgba(22,101,52,0.45); font-weight: 400; }
@@ -3491,6 +3510,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="openReportsTab()">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
+    <button class="mode-btn" data-mode="mgr-dp" id="mode-mgr-dp-btn" onclick="setMode('mgr-dp')" style="display:none;">&#127981; Daily Production</button>
     <button class="mode-btn" data-mode="mgr-operators" id="mode-mgr-operators-btn" onclick="setMode('mgr-operators')" style="display:none;">&#128101; Operators</button>
     <button class="mode-btn" data-mode="users" onclick="setMode('users')" id="mode-users-btn">Users</button>
     <button class="mode-btn" data-mode="client-view" onclick="setMode('client-view')" id="mode-client-view-btn">&#128100; Client View</button>
@@ -3852,6 +3872,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <div class="reports-layout">
       <aside class="reports-sidebar">
         <button class="rsb-back" onclick="exitReportsGroup()" title="Back to Reports">&larr; Back</button>
+        <button class="btn btn-danger mgr-dp-only" onclick="stationLogout()">&#x23FB; Log Out</button>
         <div class="rsb-section">Daily Production</div>
         <button class="rsb-item active" data-rt="dp-printing" onclick="setReportsTab('dp-printing')">
           <span class="rsb-icon">&#128424;</span> Printing
@@ -5419,6 +5440,7 @@ async function api(method, path, body) {
 }
 async function apiSend(method, path, body) {
   const opts = { method, headers: {'Content-Type':'application/json'}, credentials: 'same-origin' };
+  if (/^\/api\/(reports\/daily-production|floor-people)/.test(path) && mgrOpsUnlocked()) opts.headers['X-Manager-Pin'] = stationOperator.pin;
   if (body) opts.body = JSON.stringify(body);
   const _t0 = performance.now();
   const res = await fetch(path, opts);
@@ -6072,7 +6094,7 @@ function startBtnAccess() {
   _btnObserver.observe(document.body, { childList: true, subtree: true });
 }
 function tabAllowed(m) {
-  if (m === 'mgr-operators') return mgrOpsUnlocked();   // only while a Manager PIN is in, even for Super Admin
+  if (m === 'mgr-operators' || m === 'mgr-dp') return mgrOpsUnlocked();   // only while a Manager PIN is in, even for Super Admin
   if (isSuperAdmin()) return true;
   switch (m) {
     case 'jobs':        return hasPerm('job_tab_access', 'view');
@@ -6527,6 +6549,7 @@ function renderUserChip() {
   showTab('mode-client-view-btn', 'client-view');
   showTab('mode-factory-btn', 'factory');
   showTab('mode-mgr-operators-btn', 'mgr-operators');
+  showTab('mode-mgr-dp-btn', 'mgr-dp');
   if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
   const op = isOperator(), sm = isStoreManager(), fin = isFinance();
   // Trash card — gated by trash_view (default admin/ceo, was previously
@@ -7113,7 +7136,10 @@ function setMode(m) {
   document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
   const cartonEl = document.getElementById('carton-shippers-mode');
   if (cartonEl) cartonEl.style.display = m === 'carton-shippers' ? 'block' : 'none';
-  document.getElementById('reports-mode').style.display   = m === 'reports' ? 'block' : 'none';
+  document.getElementById('reports-mode').style.display   = (m === 'reports' || m === 'mgr-dp') ? 'block' : 'none';
+  document.body.classList.toggle('mgr-dp-on', m === 'mgr-dp');
+  if (m === 'mgr-dp') { openReportsGroup('daily-production-group'); openDailyProduction(); }
+  if (m !== 'mgr-operators') opsSectionGoHome();
   document.getElementById('stickers-mode').style.display  = m === 'stickers' ? 'block' : 'none';
   document.getElementById('users-mode').style.display     = m === 'users' ? 'block' : 'none';
   const dashEl = document.getElementById('dashboard-mode');
@@ -22856,7 +22882,7 @@ async function dpShowCorrections(section, date) {
   const table = body && body.querySelector('.dp-table');
   if (!table) return;
   const keys = [...table.querySelectorAll('thead th')].map(dpCorrKey);
-  const canEdit = hasPerm('production_edit');
+  const canEdit = hasPerm('production_edit') || mgrOpsUnlocked();
   const mine = corr[section] || {};
   table.querySelectorAll('tbody tr').forEach(tr => {
     if (tr.dataset.draft || tr.querySelector('.dp-corr')) return;   // a new row gets its boxes once saved and reloaded
@@ -36650,7 +36676,7 @@ function renderOperators() {
   // showing an empty "No operators yet" state to CEO would be misleading
   // (see loadUsersAndAudit()'s wantsOperators, which no longer fetches
   // this for CEO at all).
-  if (!hasPerm('user_btn_operators', 'view')) { el.innerHTML = ''; return; }
+  if (!hasPerm('user_btn_operators', 'view') && !_opsMgrActive) { el.innerHTML = ''; return; }
   if (!operatorsList.length) {
     el.innerHTML = '<div class="empty">No operators yet. Add one so floor staff can log in at the Station terminal.</div>';
     return;
@@ -36666,11 +36692,13 @@ function renderOperators() {
     <div class="inv-card${o.active===false?' is-done':''}">
       <div class="inv-main">
         <div class="inv-name">${o.is_manager ? '&#128100;' : '&#9881;'} ${esc(o.name || '(unnamed machine)')}${o.is_manager?' <span class="inv-badge" style="background:#f5f3ff;color:#5b21b6;">manager</span>':''}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
-        <div class="inv-sub">${o.is_manager ? 'All stages' : esc(operatorStageNames(o))} · ${o.pin ? 'PIN ' + esc(o.pin) : 'No PIN (info only)'} · ${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
+        <div class="inv-sub">${o.is_manager ? 'All stages' : esc(operatorStageNames(o))} · ${_opsMgrActive ? '' : (o.pin ? 'PIN ' + esc(o.pin) : 'No PIN (info only)') + ' · '}${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
       </div>
       <div class="inv-actions">
-        <button class="btn btn-sm ceo-hide" onclick="openOperatorModal(${o.id})">Edit</button>
-        <button class="btn btn-sm btn-danger ceo-hide" onclick="removeOperator(${o.id})">Remove</button>
+        ${_opsMgrActive
+          ? (o.is_manager ? '' : `<button class="btn btn-sm" onclick="mgrOpsEditMachine(${o.id})">Edit</button>`)
+          : `<button class="btn btn-sm ceo-hide" onclick="openOperatorModal(${o.id})">Edit</button>
+        <button class="btn btn-sm btn-danger ceo-hide" onclick="removeOperator(${o.id})">Remove</button>`}
       </div>
     </div>`;
   }).join('');
@@ -36689,6 +36717,7 @@ function setOpsSubTab(t) {
   if (b) b.textContent = opsSubTab === 'people' ? '+ Add Operator' : '+ Add Machine';
   document.querySelectorAll('#ops-subtabs .tab').forEach(x => x.classList.toggle('active', x.dataset.opsTab === opsSubTab));
   opsFilter.role = '';   // the two lists have different counts; the search stays
+  if (typeof opsSyncAddBtn === 'function') opsSyncAddBtn();
   renderOpsLists();
 }
 function opsAddClick() { if (opsSubTab === 'people') openFloorPersonModal(); else openOperatorModal(); }
@@ -36701,7 +36730,7 @@ function renderFloorPeople() {
   if (opsSubTab === 'people') renderOpsFilterChips();
   const el = document.getElementById('floor-people-list');
   if (!el) return;
-  if (!hasPerm('user_btn_operators', 'view')) { el.innerHTML = ''; return; }
+  if (!hasPerm('user_btn_operators', 'view') && !_opsMgrActive) { el.innerHTML = ''; return; }
   if (!floorPeople.length) { el.innerHTML = '<div class="empty">No operators yet. Add one, then pick them on a machine.</div>'; return; }
   const shownPeople = opsVisibleRows();
   if (!shownPeople.length) { el.innerHTML = opsNoMatchHtml(); return; }
@@ -36714,8 +36743,11 @@ function renderFloorPeople() {
         <div class="inv-sub">${on.length ? 'On: ' + esc(on.join(', ')) : '<span style="color:var(--text3);">Not on any machine</span>'}</div>
       </div>
       <div class="inv-actions">
-        <button class="btn btn-sm ceo-hide" onclick="openFloorPersonModal(${p.id})">Edit</button>
-        <button class="btn btn-sm btn-danger ceo-hide" onclick="removeFloorPerson(${p.id})">Remove</button>
+        ${_opsMgrActive
+          ? `<button class="btn btn-sm" onclick="openFloorPersonModal(${p.id})">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="removeFloorPerson(${p.id})">Remove</button>`
+          : `<button class="btn btn-sm ceo-hide" onclick="openFloorPersonModal(${p.id})">Edit</button>
+        <button class="btn btn-sm btn-danger ceo-hide" onclick="removeFloorPerson(${p.id})">Remove</button>`}
       </div>
     </div>`;
   }).join('');
@@ -36749,6 +36781,7 @@ async function saveFloorPerson(id) {
   try {
     if (id) await api('PUT', `/api/floor-people/${id}`, { name, name_ur });
     else await api('POST', '/api/floor-people', { name, name_ur });
+    if (_opsMgrActive) { await mgrOpsLoad(); closeModal(); notify('Operator saved'); showSaving(false); return; }
     const [people, ops] = await Promise.all([api('GET', '/api/floor-people'), id ? api('GET', '/api/operators') : Promise.resolve(operatorsList)]);
     floorPeople = people; operatorsList = ops;
     renderFloorPeople(); renderOperators();
@@ -37282,7 +37315,7 @@ function stationLogout(silent) {
   if (stationIdleTimer) { clearTimeout(stationIdleTimer); stationIdleTimer = null; }
   mgrOpsList = null;
   mgrOpsSyncTab();
-  if (mode === 'mgr-operators') setMode('station');
+  if (mode === 'mgr-operators' || mode === 'mgr-dp') setMode('station');
   if (mode === 'station') stationRender();
   if (!silent) notify('Signed out of station');
 }
@@ -37298,6 +37331,8 @@ function mgrOpsUnlocked() {
 function mgrOpsSyncTab() {
   const b = document.getElementById('mode-mgr-operators-btn');
   if (b) b.style.display = mgrOpsUnlocked() ? '' : 'none';
+  const d = document.getElementById('mode-mgr-dp-btn');
+  if (d) d.style.display = mgrOpsUnlocked() ? '' : 'none';
   if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
 }
 async function mgrOpsLoad() {
@@ -37307,36 +37342,65 @@ async function mgrOpsLoad() {
   if (!mgrOpsList) el.innerHTML = '<div class="empty">Loading…</div>';
   try {
     mgrOpsList = await api('POST', '/api/operators/manager-roster', { pin: stationOperator.pin });
+    floorPeople = await api('GET', '/api/floor-people').catch(() => floorPeople);
     mgrOpsRender();
   } catch (e) {
     el.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
 }
+// The same screen as Users > Operators (owner, 2026-11-02): the section itself moves
+// in here, so search, filters and lists are one and the same. On his screen no PINs,
+// and machines only take their operators.
+let _opsMgrActive = false, _opsSectionHome = null;
+function opsSectionGoHome() {
+  const sec = document.getElementById('users-operators-section');
+  if (!_opsMgrActive || !sec || !_opsSectionHome) return;
+  _opsSectionHome.parent.insertBefore(sec, _opsSectionHome.next);
+  sec.style.display = 'none';
+  _opsMgrActive = false;
+  const addBtn = document.getElementById('ops-add-btn');
+  if (addBtn) addBtn.style.display = '';
+}
 function mgrOpsRender() {
   const el = document.getElementById('mgr-ops-root');
   if (!el || !mgrOpsList) return;
   const who = (stationPerson && stationPerson.name) || (stationOperator && stationOperator.name) || 'Manager';
+  const sec = document.getElementById('users-operators-section');
+  if (!sec) return;
+  if (!_opsMgrActive) _opsSectionHome = { parent: sec.parentNode, next: sec.nextSibling };
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
-      <div><div style="font-size:20px;font-weight:800;">Operators</div>
-        <div style="color:var(--text2);font-size:13px;">Signed in with the Manager PIN as <b>${esc(who)}</b>. Edit a name, add a new operator, then Save that machine.</div></div>
+      <div style="color:var(--text2);font-size:13px;">Signed in with the Manager PIN as <b>${esc(who)}</b></div>
       <button class="btn btn-danger" onclick="mgrOpsLogout()">&#x23FB; Log Out</button>
     </div>
-    ${mgrOpsList.length ? mgrOpsList.map(o => {
-      const persons = Array.isArray(o.persons) && o.persons.length ? o.persons : [{ name: '', name_ur: '' }];
-      return `
-      <div class="inv-card" data-op-id="${o.id}" style="margin-bottom:12px;">
-        <div class="inv-name">&#9881; ${esc(o.name || '(unnamed machine)')}</div>
-        <div class="mgr-op-persons" style="display:flex;flex-direction:column;gap:8px;margin:10px 0;">${persons.map((p, i) => personRowHtml(p, i)).join('')}</div>
-        <div style="display:flex;gap:8px;justify-content:flex-end;">
-          <button class="btn btn-sm" onclick="mgrOpsAddRow(${o.id})">+ Add Operator</button>
-          <button class="btn btn-sm btn-primary" onclick="mgrOpsSave(${o.id}, this)">Save</button>
-        </div>
-      </div>`;
-    }).join('') : '<div class="empty">No machines yet.</div>'}`;
+    <div id="mgr-ops-slot"></div>`;
+  document.getElementById('mgr-ops-slot').appendChild(sec);
+  sec.style.display = '';
+  _opsMgrActive = true;
+  operatorsList = mgrOpsList;
+  opsSyncAddBtn();
+  renderOpsLists();
+}
+function opsSyncAddBtn() {
+  const addBtn = document.getElementById('ops-add-btn');
+  if (addBtn) addBtn.style.display = (_opsMgrActive && opsSubTab !== 'people') ? 'none' : '';   // machines stay with admin
+}
+function mgrOpsEditMachine(id) {
+  const o = (mgrOpsList || []).find(x => x.id === id);
+  if (!o) return;
+  const persons = Array.isArray(o.persons) && o.persons.length ? o.persons : [{ name: '', name_ur: '' }];
+  openModal(`<div class="modal" onclick="event.stopPropagation()" data-op-id="${o.id}">
+    <h2>&#9881; ${esc(o.name || '(unnamed machine)')}</h2>
+    <div class="mgr-op-persons" style="display:flex;flex-direction:column;gap:8px;margin:10px 0;">${persons.map((p, i) => personRowHtml(p, i)).join('')}</div>
+    <button class="btn btn-sm" onclick="mgrOpsAddRow(${o.id})">+ Add Operator</button>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="mgrOpsSave(${o.id}, this)">Save</button>
+    </div>
+  </div>`);
 }
 function mgrOpsAddRow(id) {
-  const wrap = document.querySelector(`#mgr-ops-root [data-op-id="${id}"] .mgr-op-persons`);
+  const wrap = document.querySelector(`[data-op-id="${id}"] .mgr-op-persons`);
   if (!wrap) return;
   wrap.insertAdjacentHTML('beforeend', personRowHtml({ name: '', name_ur: '' }, wrap.children.length));
   const rows = wrap.querySelectorAll('.op-person-name');
@@ -37344,7 +37408,7 @@ function mgrOpsAddRow(id) {
 }
 async function mgrOpsSave(id, btn) {
   if (!mgrOpsUnlocked()) { notify('Enter the Manager PIN at the Station first'); return; }
-  const card = document.querySelector(`#mgr-ops-root [data-op-id="${id}"]`);
+  const card = document.querySelector(`[data-op-id="${id}"]`);
   if (!card) return;
   const persons = [...card.querySelectorAll('.op-person-row')].map(row => ({
     name: row.querySelector('.op-person-name').value.trim(),
@@ -37355,8 +37419,9 @@ async function mgrOpsSave(id, btn) {
   try {
     const row = await api('PUT', `/api/operators/${id}/manager-persons`, { pin: stationOperator.pin, persons, person: stationPerson && stationPerson.name });
     const k = mgrOpsList.findIndex(o => o.id === id);
-    if (k >= 0) mgrOpsList[k] = row;
-    mgrOpsRender();
+    if (k >= 0) mgrOpsList[k] = { ...mgrOpsList[k], ...row };
+    closeModal();
+    await mgrOpsLoad();
     notify(`Saved the operators on ${row.name}`);
   } catch (e) {
     notify(e.message || 'Could not save');
