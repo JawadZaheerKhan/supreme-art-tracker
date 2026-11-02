@@ -5856,6 +5856,18 @@ const PARTICULARS_LABELS = {
   loose_shipper_qty: 'Loose Carton Shipper',
 };
 
+// Same paper = type, size, GSM and offcut-or-not, whatever the brand; the store
+// chooses the brand when it issues. Two empties are the same; one empty is not.
+async function samePaperGroup(sql, a, b) {
+  if ((a || null) === (b || null)) return true;
+  if (!a || !b) return false;
+  const rows = await sql`SELECT id, paper_type, size, gsm, is_offcut FROM inventory_items WHERE id = ANY(${[a, b]})`;
+  const x = rows.find(r => r.id === a), y = rows.find(r => r.id === b);
+  if (!x || !y) return false;
+  const key = i => [i.paper_type || '', i.size || '', String(i.gsm || ''), !!i.is_offcut].join('|');
+  return key(x) === key(y);
+}
+
 // UPDATE job details
 app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => {
   try {
@@ -6339,7 +6351,22 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     //   - Leave stage_index untouched — job stays where it is (usually
     //     Printing) and the operator carries on with the sheets they
     //     already have while store keeper prepares the new issuance.
-    const paperItemChanged = (oldItemId !== newItemId);
+    // By paper, not by row: the same paper in another brand is no change (the
+    // store picks the brand at issue; re-picking it must not undo the issue).
+    const paperItemChanged = !(await samePaperGroup(sql, oldItemId, newItemId));
+    // 1: paper changed after an early issue at CTP: the job stays at CTP, but the
+    // old paper's issue no longer counts, so the new paper is asked for.
+    const primaryRowsBefore = (Array.isArray(prior[0]?.issued_items) ? prior[0].issued_items : []).filter(x => x && !EXTRA_SOURCES.has(x.source));
+    if (prior[0]?.issuance_status === 'ctp' && paperItemChanged && primaryRowsBefore.length) {
+      const cleanC = { ...(job.particulars || {}) };
+      delete cleanC.partial_pending_sheets;
+      delete cleanC.offcut_pre_consumed;
+      const keepRows = (Array.isArray(job.issued_items) ? job.issued_items : []).filter(x => x && EXTRA_SOURCES.has(x.source));
+      const updatedC = await sql`UPDATE jobs SET issued_items = ${JSON.stringify(keepRows)}::jsonb, particulars = ${JSON.stringify(cleanC)} WHERE id = ${job.id} RETURNING *`;
+      Object.assign(job, updatedC[0]);
+      await logAudit(sql, req, { action: 'job.paper_change_reissue', entityType: 'job', entityId: job.id,
+        summary: `Stock requested: paper changed at CTP after it was issued - the new paper goes to Pending Stock. Old paper's stock not touched.` });
+    }
     if (wasIssued && paperItemChanged) {
       const cleanP = { ...(job.particulars || {}) };
       delete cleanP.partial_pending_sheets;
@@ -6393,7 +6420,7 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
       const sp = (o) => EXTRA_PAPERS.map(e => String((o && o[e.key] && o[e.key].packets) ?? '').trim()).join('|');
       const jp = job.particulars || {};
       const needChanged = pq(priorParticulars) !== pq(jp) || sp(priorParticulars) !== sp(jp);
-      if (needChanged && oldItemId === newItemId && !jp.over_issue_pending
+      if (needChanged && !paperItemChanged && !jp.over_issue_pending
           && (job.issuance_status === 'issued' || job.issuance_status === 'ctp')) {
         const oi = await jobMainPaperOverIssue(sql, job);
         if (oi) {
@@ -6417,8 +6444,8 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
       const sp = (o) => EXTRA_PAPERS.map(e => String((o && o[e.key] && o[e.key].packets) ?? '').trim()).join('|');
       const jp = job.particulars || {};
       const primaryIssued = (Array.isArray(job.issued_items) ? job.issued_items : []).some(x => x && !EXTRA_SOURCES.has(x.source));
-      if ((pq(priorParticulars) !== pq(jp) || sp(priorParticulars) !== sp(jp)) && oldItemId === newItemId
-          && job.issuance_status === 'issued' && primaryIssued && !jp.paper_waived) {
+      if ((pq(priorParticulars) !== pq(jp) || sp(priorParticulars) !== sp(jp)) && !paperItemChanged
+          && (job.issuance_status === 'issued' || job.issuance_status === 'ctp') && primaryIssued && !jp.paper_waived) {
         const owed = await primaryOwedSheets(sql, { ...job, particulars: { ...jp, partial_pending_sheets: 1 } });
         if (owed > 0) {
           const np = { ...jp, partial_pending_sheets: owed };
@@ -6433,7 +6460,8 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
       }
       // Processed without paper: the waived sheets stay let off, so only the
       // change in the main paper's packets since moves what is asked for.
-      if (jp.paper_waived && oldItemId === newItemId && job.issuance_status === 'issued' && newItemId) {
+      // (An issued job with no issued list, from before the list, is reckoned the same way.)
+      if ((jp.paper_waived || !primaryIssued) && !paperItemChanged && job.issuance_status === 'issued' && newItemId) {
         const mainPk = o => (parseFloat((o || {}).quantity_of_packets) || 0) - EXTRA_PAPERS.reduce((a, e) => a + (((o || {})[e.key] && o[e.key].inventory_item_id) ? (parseFloat(o[e.key].packets) || 0) : 0), 0);
         const deltaPk = mainPk(jp) - mainPk(priorParticulars);
         if (deltaPk) {
@@ -6450,11 +6478,25 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
           }
         }
       }
+      // A waived 2nd / 3rd paper swapped for a different one: the let-off was for the old one.
+      if (job.particulars && job.particulars.paper_waived) {
+        const pw = { ...job.particulars.paper_waived };
+        let pwChanged = false;
+        for (const e of EXTRA_PAPERS) {
+          const owedKey = e.key === 'third_paper' ? 'third_owed_sheets' : 'second_owed_sheets';
+          const a = job.particulars[e.key], b = priorParticulars && priorParticulars[e.key];
+          if (pw[owedKey] && !(await samePaperGroup(sql, a && a.inventory_item_id, b && b.inventory_item_id))) { pw[owedKey] = 0; pwChanged = true; }
+        }
+        if (pwChanged) {
+          const upd = await sql`UPDATE jobs SET particulars = ${JSON.stringify({ ...job.particulars, paper_waived: pw })} WHERE id = ${job.id} RETURNING *`;
+          if (upd[0]) Object.assign(job, upd[0]);
+        }
+      }
       // The 2nd / 3rd paper are owed by themselves; here it's only recorded.
       for (const e of EXTRA_PAPERS) {
         const after = jp[e.key], before = priorParticulars && priorParticulars[e.key];
         if (!after || !after.inventory_item_id || parseFloat(after.packets) <= parseFloat((before && before.packets) || 0)) continue;
-        if (!before || before.inventory_item_id !== after.inventory_item_id) continue;
+        if (!before || !(await samePaperGroup(sql, before.inventory_item_id, after.inventory_item_id))) continue;
         const item = (await sql`SELECT * FROM inventory_items WHERE id = ${after.inventory_item_id}`)[0];
         const owedE = item ? secondaryOwedSheets(job, item, e.key) : 0;
         if (owedE > 0) await logAudit(sql, req, { action: 'job.more_paper_needed', entityType: 'job', entityId: job.id,
