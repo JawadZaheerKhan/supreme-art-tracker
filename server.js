@@ -4672,6 +4672,34 @@ app.post('/api/reports/job-issued', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Issues of a paper that is no longer on the job card (main, 2nd or 3rd paper, by paper
+// group): the paper was changed and the old issue was never reversed (owner, 2026-11-03).
+app.get('/api/reports/stale-paper-issues', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT t.id, t.job_id, j.name AS job_name, -t.change AS sheets, t.created_at, t.challan_no,
+             i.paper_type, i.size, i.gsm, i.brand, COALESCE(i.is_offcut, false) AS offcut,
+             ci.paper_type AS card_type, ci.size AS card_size, ci.gsm AS card_gsm, COALESCE(ci.is_offcut, false) AS card_offcut
+        FROM inventory_transactions t
+        JOIN jobs j ON j.id = t.job_id AND j.deleted_at IS NULL
+        LEFT JOIN inventory_items i ON i.id = t.item_id
+        LEFT JOIN inventory_items ci ON ci.id = j.inventory_item_id
+       WHERE t.reason = 'job-consumed' AND t.change < 0 AND t.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+         AND NOT EXISTS (
+           SELECT 1 FROM inventory_items c
+            WHERE c.id IN (j.inventory_item_id,
+                           CASE WHEN (j.particulars->'secondary_paper'->>'inventory_item_id') ~ '^[0-9]+$' THEN (j.particulars->'secondary_paper'->>'inventory_item_id')::int END,
+                           CASE WHEN (j.particulars->'third_paper'->>'inventory_item_id') ~ '^[0-9]+$' THEN (j.particulars->'third_paper'->>'inventory_item_id')::int END)
+              AND COALESCE(c.paper_type, '') = COALESCE(i.paper_type, '') AND COALESCE(c.size, '') = COALESCE(i.size, '')
+              AND COALESCE(c.gsm::text, '') = COALESCE(i.gsm::text, '') AND COALESCE(c.is_offcut, false) = COALESCE(i.is_offcut, false))
+       ORDER BY t.created_at DESC`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/reports/production', requirePermission('rpt_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;

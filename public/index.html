@@ -6144,7 +6144,7 @@ function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 // (buildSaleReportRows), job states = the Jobs tab's views, production =
 // the Production Report (with its own date filter). "Right now" tiles
 // ignore the date filter. View only.
-const ceoDash = { range: 'this-month', dfrom: '', dto: '', prange: 'today', pdfrom: '', pdto: '', srange: 'this-month', sdfrom: '', sdto: '', sLoaded: null, jobIssued: null, txs: null, imports: null, prod: null, err: '', open: '' };
+const ceoDash = { range: 'this-month', dfrom: '', dto: '', prange: 'today', pdfrom: '', pdto: '', srange: 'this-month', sdfrom: '', sdto: '', sLoaded: null, jobIssued: null, stalePaper: null, txs: null, imports: null, prod: null, err: '', open: '' };
 const CEO_DASH_RANGES = [['today', 'Today'], ['this-week', 'This week'], ['this-month', 'This month'], ['last-month', 'Last month'], ['this-year', 'This year'], ['', 'All time'], ['custom', 'Custom range…']];
 function ceoDashRangeBounds(range, dfrom, dto) {
   if (range === 'today') { const d = localDateISO(); return resolveDateFilterBounds('custom', d, d); }
@@ -6224,8 +6224,12 @@ function setCeoDashProdCustom() {
 async function loadCeoDash(withProd) {
   renderCeoDash();
   if (withProd !== false) loadCeoDashProd();
-  const imports = await api('GET', '/api/imports').catch(() => []);
+  const [imports, stale] = await Promise.all([
+    api('GET', '/api/imports').catch(() => []),
+    api('GET', '/api/reports/stale-paper-issues').catch(() => []),
+  ]);
   ceoDash.imports = Array.isArray(imports) ? imports : [];
+  ceoDash.stalePaper = Array.isArray(stale) ? stale : [];
   if (mode === 'dashboard') renderCeoDash();
 }
 // Production = the Production Report's own figures (Daily Production
@@ -6628,6 +6632,19 @@ function renderCeoDash() {
       ${tile('imports', 'import', 'Pending imports', fmt(f.imports.length), '', () => list(f.imports.map(i => row(esc([i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : ''].filter(Boolean).join(' ')), `${fmt(i.packets)}${i.expected_arrival ? ' · ' + dmy(i.expected_arrival) : ''}`)), 'None pending'))}
       ${tile('imports-soon', 'import', 'Imports due this week', fmt(f.importsSoon.length), f.importsOverdue ? `${fmt(f.importsOverdue)} past their date` : 'next 7 days', () => list(f.importsSoon.map(x => row(esc([x.i.paper_type, x.i.size, x.i.gsm ? x.i.gsm + 'gsm' : ''].filter(Boolean).join(' ')), `${fmt(x.i.packets)} · ${dmy(x.d)}${x.d < localDateISO() ? ' <b style="color:#dc2626;">late</b>' : ''}`)), 'Nothing due in the next 7 days'))}
       ${tile('offcut', 'offcut', 'Offcut stock', fmt(f.offcutSheets), `sheets · ${fmt(f.offcuts.length)} papers`, () => list(f.offcuts.map(e => row(esc(e.label), fmt(e.sheets) + ' sheets')), 'No offcut paper on hand'))}
+      ${(() => {
+        // Paper changed on the card, the old paper's issue never reversed (owner, 2026-11-03).
+        const st = ceoDash.stalePaper;
+        const byJob = new Map();
+        for (const r of (st || [])) { const e = byJob.get(r.job_id) || { id: r.job_id, name: r.job_name, rows: [] }; e.rows.push(r); byJob.set(r.job_id, e); }
+        const jl = [...byJob.values()];
+        const pl = (t, sz, g, off) => [t, sz, g ? g + 'gsm' : '', off ? 'offcut' : ''].filter(Boolean).map(esc).join(' ');
+        const amt = r => { const p = (+r.sheets || 0) / packetSize(r.paper_type || ''); return `${fmt(p)} ${isReamPaper(r.paper_type) ? 'reams' : 'pkts'}`; };
+        return tile('stale-paper', jl.length ? 'out' : 'stock', 'Old paper not reversed', st ? fmt(jl.length) : '…', st ? 'paper changed, old issue still on the job' : 'loading…', st ? () =>
+          `<div class="cd-sub">These jobs were issued a paper that is no longer on their job card: the paper was changed and that issue was never reversed. Reverse it from the paper's History (or the Stock Out report) so the stock comes back.</div>`
+          + list(jl.map(e => row(`<a onclick="ceoDashOpenJob(${e.id})">E-${e.id}</a> ${esc(e.name || '')}`,
+              e.rows.map(r => `issued ${pl(r.paper_type, r.size, r.gsm, r.offcut)} · ${amt(r)} · ${date(new Date(r.created_at).getTime())} &middot; card: ${pl(r.card_type, r.card_size, r.card_gsm, r.card_offcut) || '—'}`).join('<br>'))), 'Every issued paper is on its job card') : null);
+      })()}
       ${tile('over-issued', 'over', 'Over-issued paper', fmt(f.overIssued.length), 'waiting for a decision', jobList(f.overIssued, j => { const p = overIssuePending(j) || {}; return `${esc(String(p.total_packets ?? ''))} ${esc(p.unit || 'packets')}${p.challan_no ? ' · challan ' + esc(p.challan_no) : ''}`; }, 'Nothing over-issued'))}
     </div>
     </div>`;
