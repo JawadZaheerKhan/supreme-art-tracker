@@ -6014,6 +6014,7 @@ function firstVisibleReportPane(groupId, fallback) {
 // button is disabled (row = View) or removed (row = Hidden). 'view' = the action is read-only
 // (History, Print, opening the card), so View is enough for it to work.
 const BTN_FN_ROWS = {
+  openRenameProductModal: ['products_btn_name', 'yes'],
   // Jobs
   openEdit: ['job_btn_edit', 'view'], openGroupEdit: ['job_btn_edit', 'view'], openAddToGroupModal: ['job_btn_edit', 'yes'], removeJobFromGroup: ['job_btn_edit', 'yes'], openPacketsTopup: ['job_btn_extra_packets', 'yes'],
   openAdd: ['job_btn_new_job', 'yes'], deleteStockGroup: ['job_btn_edit', 'yes'], openAddExistingToGroupModal: ['job_btn_edit', 'yes'],
@@ -6654,7 +6655,7 @@ async function onGoogleCredential(response) {
     // Operators don't have permission to read inventory; skip the call so it
     // doesn't 403 in their console. Store Manager lands on Inventory; Operator
     // lands on Station; everyone else stays on Jobs (default).
-    const loaders = [loadJobs()];
+    const loaders = [loadJobs(), loadProductNames()];
     if (!isOperator()) loaders.push(loadInventory());
     if (canWastageAdjust()) loaders.push(loadWastageAdjData());
     await Promise.all(loaders);
@@ -6768,6 +6769,45 @@ async function loadProductSpecials() {
   } catch (e) {
     productSpecials = [];
   }
+}
+// Product names (owner, 2026-11-03): the earlier names folded into a product and the
+// name set on its tile. Loaded for everyone who makes jobs (GET /api/product-names).
+let _pnAliases = new Map(), _pnNames = new Map();
+async function loadProductNames() {
+  try {
+    const d = await api('GET', '/api/product-names');
+    _pnAliases = new Map((d.aliases || []).map(a => [String(a.alias || '').trim().toLowerCase(), String(a.canonical || '').trim()]));
+    _pnNames = new Map((d.names || []).map(n => [String(n.key || '').trim().toLowerCase(), String(n.name || '').trim()]));
+  } catch (e) { console.error('Product names not loaded', e); }
+}
+// The product a job name belongs to: { key, name } with the name as it is set now.
+function productOfName(jobName) {
+  const own = String(jobName || '').trim();
+  if (!own) return { key: '', name: '' };
+  const canon = _pnAliases.get(own.toLowerCase());
+  const base = canon || own;
+  const key = base.toLowerCase();
+  return { key, name: _pnNames.get(key) || base };
+}
+// What a new or duplicated job is saved as: its product's current name when the name
+// typed is (or was) a product's, else as typed.
+function productNameForNewJob(typed) {
+  const t = String(typed || '').trim();
+  if (!t) return t;
+  const p = productOfName(t);
+  if (_pnAliases.has(t.toLowerCase()) || _pnNames.has(p.key)) return p.name;
+  const same = (jobs || []).find(j => String(j.name || '').trim().toLowerCase() === p.key);
+  return same ? productOfName(same.name).name : t;
+}
+// The Job Name box's dropdown: every product's name, as set now.
+function productNamesDatalistHtml() {
+  const seen = new Map();
+  for (const j of (jobs || [])) {
+    const p = productOfName(j.name);
+    if (p.key && !seen.has(p.key)) seen.set(p.key, p.name);
+  }
+  for (const [k, n] of _pnNames) if (!seen.has(k)) seen.set(k, n);
+  return '<datalist id="product-names-dl">' + [...seen.values()].sort((a, b) => a.localeCompare(b)).map(n => `<option value="${esc(n)}">`).join('') + '</datalist>';
 }
 async function loadProductAliases() {
   try {
@@ -30443,7 +30483,7 @@ function jobForm(j={}, opts) {
         <td><span class="jc-lbl">Ups</span><input type="text" id="f-ups" value="${v(j.ups)}" oninput="jobCartonQtySync()"></td>
       </tr>
       <tr>
-        <td colspan="5"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" class="lc-input" value="${v(j.name)}" placeholder="e.g. biscuit box 200g"></td>
+        <td colspan="5"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" class="lc-input" value="${v(j.name)}" placeholder="e.g. biscuit box 200g" list="product-names-dl" autocomplete="off">${productNamesDatalistHtml()}</td>
         <td colspan="2"><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
       </tr>
       <tr>
@@ -31192,11 +31232,11 @@ function detectProductType(name) {
 function resolveProductKey(jobName) {
   const own = String(jobName || '').trim().toLowerCase();
   const aliasRow = productAliases.find(a => a.alias === own);
-  if (aliasRow) {
-    const canonical = String(aliasRow.canonical || '').trim();
-    return { key: canonical.toLowerCase(), name: canonical };
-  }
-  return { key: own, name: String(jobName || '').trim() };
+  const r = aliasRow
+    ? { key: String(aliasRow.canonical || '').trim().toLowerCase(), name: String(aliasRow.canonical || '').trim() }
+    : { key: own, name: String(jobName || '').trim() };
+  if (_pnNames.has(r.key)) r.name = _pnNames.get(r.key);   // the name set on the tile
+  return r;
 }
 function buildProductGroups() {
   const bounds = resolveDateFilterBounds(productsFilter.dateRange, productsFilter.dfrom, productsFilter.dto);
@@ -31324,7 +31364,7 @@ function productTileHtml(g, i) {
   const statCols = canSeeRevenue ? 4 : 2;
   return `<div style="border:1px solid var(--border);border-radius:10px;padding:14px;background:#fff;cursor:pointer;" onclick="openProductHistoryModal(${i})" title="Click to view shipment history">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-      <div style="font-weight:700;font-size:14px;color:var(--text);flex:1;min-width:0;word-break:break-word;">${esc(g.name)}${g.type ? ` <span style="font-size:10px;font-weight:700;background:#eef2ff;color:#3730a3;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">${esc(g.type)}</span>` : ''}</div>
+      <div style="font-weight:700;font-size:14px;color:var(--text);flex:1;min-width:0;word-break:break-word;">${esc(g.name)}${seeBtn('products_btn_name') ? ` <button type="button" onclick="event.stopPropagation(); openRenameProductModal(${i})" title="Rename this product - new and duplicated jobs take the new name" style="border:none;background:none;padding:0 2px;cursor:pointer;color:var(--text2);font-size:13px;vertical-align:middle;">&#9998;</button>` : ''}${g.type ? ` <span style="font-size:10px;font-weight:700;background:#eef2ff;color:#3730a3;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">${esc(g.type)}</span>` : ''}</div>
       ${canSeeRate ? `<span onclick="event.stopPropagation()" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text2);white-space:nowrap;">
         Rate
         <input type="number" min="0" step="any" value="${savedRate !== null ? esc(String(savedRate)) : ''}" placeholder="&mdash;" ${canEditRate ? '' : 'disabled'} onchange="saveProductRateInline(${i}, this.value)" style="width:70px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:right;">
@@ -31509,6 +31549,37 @@ async function saveProductSpecials() {
     closeModal();
     refilterProductsGrid();
     notify(list.length ? 'Special Colors saved' : 'Special Colors removed from this product');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+function openRenameProductModal(i) {
+  const g = __productGroupsCache[i];
+  if (!g) return;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
+    <h2>Product name</h2>
+    <div style="font-size:12.5px;color:var(--text2);margin-bottom:10px;">New and duplicated jobs take this name, and the Job Name box offers it. Its ${g.jobs.length} job${g.jobs.length === 1 ? '' : 's'} so far keep${g.jobs.length === 1 ? 's' : ''} its own name and stay on this tile.</div>
+    <div class="form-group"><label class="form-label">Name</label><input type="text" id="rename-product-input" value="${esc(g.name)}" maxlength="200" onkeydown="if(event.key==='Enter') saveRenameProduct(${i})"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveRenameProduct(${i})">Save</button>
+    </div>
+  </div>`);
+  setTimeout(() => { const el = document.getElementById('rename-product-input'); if (el) { el.focus(); el.select(); } }, 50);
+}
+async function saveRenameProduct(i) {
+  const g = __productGroupsCache[i];
+  const el = document.getElementById('rename-product-input');
+  if (!g || !el) return;
+  const to = el.value.trim().replace(/\s+/g, ' ');
+  if (!to) { await alertDialog({ title: 'Name required', message: 'Type the product name.', kind: 'warn' }); return; }
+  if (to === g.name) { closeModal(); return; }
+  showSaving(true);
+  try {
+    await api('POST', '/api/products/rename', { from_key: g.key, to_name: to });
+    await Promise.all([loadProductNames(), loadProductAliases(), loadProductRates(), loadProductSpecials()]);
+    closeModal();
+    renderProductsTab();
+    notify(`Renamed to "${to}"`);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -34812,6 +34883,7 @@ function openDuplicateJob(id) {
   }
   const template = {
     ...source,
+    name:           productNameForNewJob(source.name),   // the product's name as set now
     id:             undefined,           // new job, server assigns
     jobcode:        source.jobcode || '',
     ref:            '',                  // P.O. No. — different each order
@@ -34853,6 +34925,7 @@ function openDuplicateJob(id) {
 
 async function saveAdd() {
   const data = getFormData();
+  data.name = productNameForNewJob(data.name);   // the product's name as set now (Products tab)
   // New job — never pre-populate the legacy delivered-qty scalar (see
   // getFormData()). It's not delivered yet.
   data.delqty = '';
@@ -40398,6 +40471,7 @@ const ACC_PRODUCTS_TAB_ROWS = [
   { key: 'products_btn_rate',    type: 'button' },
   { key: 'products_btn_revenue', type: 'button' },
   { key: 'products_btn_specials', type: 'button' },
+  { key: 'products_btn_name',    type: 'button' },
 ];
 // Station tab: one View/Hidden row for the whole tab.
 const ACC_STATION_TAB_ROWS = [
@@ -41728,7 +41802,7 @@ async function init() {
     renderUserChip();
     // Operators can't read inventory (403), so skip the call for them.
     // Everyone else loads jobs + inventory in parallel.
-    const loaders = [loadJobs(), loadPrintingMachines(), loadMachineRoster()];
+    const loaders = [loadJobs(), loadPrintingMachines(), loadMachineRoster(), loadProductNames()];
     // Finance reference data (Product Rate / aliases / Company Settings), only for roles that can see any of it.
     if (hasPerm('products_tab_access', 'view') || hasPerm('rpt_sale_report', 'view') || hasPerm('job_btn_pricing', 'view')) {
       loaders.push(loadProductRates(), loadProductAliases(), loadCompanySettings(), loadProductSpecials());

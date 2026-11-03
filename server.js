@@ -326,7 +326,8 @@ function getDb() {
 // Bumped again for paper batches (inventory_transactions.batch / po_no / invoice_no /
 // batch_label) and the Access Register row inv_btn_batches (2026-11-03).
 // Bumped again for inventory_transactions.batch_alloc (batch-wise stock out, 2026-11-03).
-const SCHEMA_VERSION = 'v2026-11-03-batch-out';
+// Bumped again for finance.product_names and the Access Register row products_btn_name (2026-11-03).
+const SCHEMA_VERSION = 'v2026-11-03-product-names';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -563,6 +564,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   products_btn_revenue: { label: 'Revenue / Avg Rate — see those two stats on a Product Rate tile', levels: { ceo: 'view', finance: 'view' } },
   dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, wastage, production & MIL and stock tiles with date filters (view only)', levels: { ceo: 'view' } },
   products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
+  products_btn_name:    { label: 'Product name — rename a product on its tile (new and duplicated jobs take the new name; the Job Name box offers product names)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
 
   // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
   // every role until a Super Admin turns it on, except Procurement, whose tab
@@ -1736,6 +1738,16 @@ async function initDb() {
         special_colors JSONB NOT NULL DEFAULT '[]'::jsonb,
         updated_by     TEXT,
         updated_at     TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    // A product's name as set on its tile (owner, 2026-11-03): key = the product's
+    // lowercased name (aliases resolved), name = how it is written on new jobs.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.product_names (
+        key         TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
       )
     `;
     await sql`
@@ -9585,6 +9597,62 @@ app.delete('/api/product-aliases/:alias', requirePermission('products_btn_rate')
 // Set on a Products tile and kept with that product only - never applied to
 // any job, new or old (owner, 2026-10-06). Printed from the tile as 4x3
 // stickers.
+// ── Product names (owner, 2026-11-03) ─────────────────────────────
+// Everyone who makes a job reads these: the Job Name box offers the product
+// names, and a new or duplicated job is saved under its product's name. The
+// old names stay folded in (product_aliases), so their jobs keep their tile.
+app.get('/api/product-names', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const [aliases, names] = await Promise.all([
+      sql`SELECT alias, canonical FROM finance.product_aliases`,
+      sql`SELECT key, name FROM finance.product_names`,
+    ]);
+    res.json({ aliases, names });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Rename a product: its jobs, rate, special colours and earlier names all move to the new name.
+app.post('/api/products/rename', requirePermission('products_btn_name'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const from = String(req.body?.from_key ?? '').trim().toLowerCase();
+    const to = String(req.body?.to_name ?? '').trim().replace(/\s+/g, ' ');
+    const toKey = to.toLowerCase();
+    if (!from || !to) return res.status(400).json({ error: 'The product and its new name are required.' });
+    if (to.length > 200) return res.status(400).json({ error: 'That name is too long.' });
+    if (toKey !== from) {
+      const clash = await sql`SELECT canonical FROM finance.product_aliases WHERE alias = ${toKey}`;
+      if (clash.length && String(clash[0].canonical || '').trim().toLowerCase() !== from) {
+        return res.status(400).json({ error: `"${to}" is already folded into "${clash[0].canonical}". Pick another name.` });
+      }
+      // Renaming back to one of its own earlier names: that name is no longer an alias.
+      await sql`DELETE FROM finance.product_aliases WHERE alias = ${toKey}`;
+      await sql`UPDATE finance.product_aliases SET canonical = ${to}, updated_by = ${req.user.email}, updated_at = NOW() WHERE lower(btrim(canonical)) = ${from}`;
+      await sql`
+        INSERT INTO finance.product_aliases (alias, canonical, updated_by, updated_at)
+        VALUES (${from}, ${to}, ${req.user.email}, NOW())
+        ON CONFLICT (alias) DO UPDATE SET canonical = EXCLUDED.canonical, updated_by = EXCLUDED.updated_by, updated_at = NOW()`;
+      // The rate and special colours go with it, unless the new name already has its own.
+      const hasRate = await sql`SELECT 1 FROM finance.product_rates WHERE lower(btrim(product)) = ${toKey}`;
+      if (!hasRate.length) await sql`UPDATE finance.product_rates SET product = ${to} WHERE lower(btrim(product)) = ${from}`;
+      const hasSpecials = await sql`SELECT 1 FROM finance.product_specials WHERE product_key = ${toKey}`;
+      if (!hasSpecials.length) await sql`UPDATE finance.product_specials SET product_key = ${toKey} WHERE product_key = ${from}`;
+      await sql`DELETE FROM finance.product_names WHERE key = ${from}`;
+    }
+    await sql`
+      INSERT INTO finance.product_names (key, name, updated_by, updated_at)
+      VALUES (${toKey}, ${to}, ${req.user.email}, NOW())
+      ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, updated_by = EXCLUDED.updated_by, updated_at = NOW()`;
+    await logAudit(sql, req, {
+      action: 'product.rename', entityType: 'product', entityId: toKey,
+      summary: `Product renamed: "${from}" -> "${to}" (new and duplicated jobs take the new name)`,
+    });
+    res.json({ ok: true, key: toKey, name: to });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/product-specials', requireFinanceView, async (req, res) => {
   try {
     await dbReady;
