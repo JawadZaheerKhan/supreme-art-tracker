@@ -805,6 +805,11 @@
      line instead of forcing the table into a sideways scroll. */
   .sm-compact th, .sm-compact td { padding: 5px 5px !important; }   /* tight enough for the Batch column on a laptop */
   .bulk-batch-cell select, .bulkout-batch-cell select { width: 100%; min-width: 0; max-width: 170px; font-size: 11.5px; padding: 4px; }
+  .batch-tick { display: flex; align-items: flex-start; gap: 6px; font-size: 12.5px; padding: 2px 0; cursor: pointer; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text); }
+  .batch-tick input[type=checkbox] { width: auto !important; min-width: 0 !important; margin: 2px 0 0; padding: 0; flex: none; }
+  .batch-tick span { line-height: 1.25; white-space: nowrap; }
+  .batch-tick small { display: block; color: var(--text2); font-size: 11px; }
+  .bulkout-batch-cell .batch-tick { font-size: 11.5px; justify-content: flex-start; text-align: left; }
   .sm-compact td { word-break: break-word; }
   .ledger-compact { font-size: 12px; }
   .ledger-compact th, .ledger-compact td { padding: 6px 6px; }
@@ -12622,7 +12627,7 @@ async function saveInvRemoveStock(id) {
   const entryDate = await readStockEntryDate('stockout-date');
   if (entryDate === false) return;
   const notes = document.getElementById('stockout-notes').value.trim();
-  const batch = parseInt((document.getElementById('stockout-batch') || {}).value, 10) || null;
+  const batch = invBatchPicked(document.getElementById('stockout-batch'));
   const batchShort = invBatchShort(id, batch, qty);
   if (batchShort) { await alertDialog({ title: 'Not enough in that batch', message: batchShort, kind: 'warn' }); return; }
 
@@ -14723,10 +14728,10 @@ async function invBatchesOf(itemId) {
   catch (e) { console.error('Batches not loaded', itemId, e); _invBatchCache.set(itemId, []); return []; }
 }
 function invPkts(sheets, paperType) { const p = sheets / packetSize(paperType || ''); return (Number.isInteger(p) ? p : +p.toFixed(2)).toLocaleString(); }
-// The batch picker. in: New batch (default) or Add to one. out: the batches with
-// stock, the oldest already chosen (owner, 2026-11-03). The oldest carries no number
-// (value ''), so more than it holds carries on into the next batch, oldest first.
-// withItem: data-item-id for a brand line.
+// The batch picker. in: New batch (default) or Add to one. out: a tick box per batch
+// with stock, the oldest ticked (owner, 2026-11-03); tick 2, 3 or more to take from
+// them, oldest first. Left as it opened, more than the oldest holds carries on into
+// the next batch. withItem: data-item-id for a brand line.
 function invBatchSelectHtml(itemId, dir, cls, withItem) {
   const it = inventoryAll.find(x => x.id === itemId);
   const list = _invBatchCache.get(itemId) || [];
@@ -14740,8 +14745,16 @@ function invBatchSelectHtml(itemId, dir, cls, withItem) {
   }
   const have = list.filter(b => b.left > 0);
   if (!have.length) return '';
-  return `<select ${attr} title="Which batch to take it from">`
-    + have.map((b, i) => `<option value="${i ? b.n : ''}">${ordinalN(b.n)} batch (${esc(b.label)}) &middot; ${left(b)}</option>`).join('') + '</select>';
+  return `<div ${attr} data-batch-ticks="1" title="Tick the batches to take it from">`
+    + have.map((b, i) => `<label class="batch-tick"><input type="checkbox" value="${b.n}"${i ? '' : ' checked data-first="1"'}> <span><b>${ordinalN(b.n)}</b> ${esc(b.label)}<small>${left(b)}</small></span></label>`).join('') + '</div>';
+}
+// What a tick-box picker says to the server: null when only the oldest is ticked (or
+// none) - the oldest first, carrying on into the next - else the batches ticked.
+function invBatchPicked(box) {
+  if (!box) return null;
+  const on = [...box.querySelectorAll('input[type=checkbox]:checked')];
+  if (!on.length || (on.length === 1 && on[0].dataset.first)) return null;
+  return on.map(x => parseInt(x.value, 10));
 }
 // Fills a form's batch box once that paper's batches are in.
 async function invFillBatchBox(wrapId, itemId, dir, selId) {
@@ -14749,15 +14762,17 @@ async function invFillBatchBox(wrapId, itemId, dir, selId) {
   await invBatchesOf(itemId);
   if (!document.getElementById(wrapId)) return;   // the form was closed meanwhile
   const box = invBatchSelectHtml(itemId, dir, '', false);
-  wrap.innerHTML = box ? `<div class="form-group"><label class="form-label">${dir === 'in' ? 'Which batch?' : 'Take from which batch?'}</label>${box.replace('<select ', `<select id="${selId}" `)}</div>` : '';
+  wrap.innerHTML = box ? `<div class="form-group"><label class="form-label">${dir === 'in' ? 'Which batch?' : 'Take from which batch(es)?'}</label>${box.replace(/^<(select|div) /, `<$1 id="${selId}" `)}</div>` : '';
 }
-// A chosen batch with too little in it, said before saving ('' when fine).
+// Batches ticked that hold too little together, said before saving ('' when fine).
 function invBatchShort(itemId, n, sheets) {
-  if (!n) return '';
-  const b = (_invBatchCache.get(itemId) || []).find(x => x.n === +n);
-  if (!b || b.left >= sheets) return '';
+  const ns = (Array.isArray(n) ? n : [n]).map(Number).filter(x => x > 0);
+  if (!ns.length) return '';
+  const bs = (_invBatchCache.get(itemId) || []).filter(x => ns.includes(x.n));
+  const have = bs.reduce((t, b) => t + b.left, 0);
+  if (!bs.length || have >= sheets) return '';
   const it = inventoryAll.find(x => x.id === itemId);
-  return `The ${ordinalN(b.n)} batch (${b.label}) has ${Math.round(b.left).toLocaleString()} sheets left, less than the ${sheets.toLocaleString()} asked for${it ? ' of ' + [it.paper_type, it.size, it.brand].filter(Boolean).join(' · ') : ''}.`;
+  return `The ${bs.map(b => `${ordinalN(b.n)} (${b.label})`).join(' + ')} batch${bs.length > 1 ? 'es have' : ' has'} ${Math.round(have).toLocaleString()} sheets left, less than the ${sheets.toLocaleString()} asked for${it ? ' of ' + [it.paper_type, it.size, it.brand].filter(Boolean).join(' · ') : ''}.`;
 }
 // The Batch cell of a ledger row: each batch it moved, with the amount when more than one.
 function txBatchHtml(t) {
@@ -14800,8 +14815,7 @@ async function bulkOutRefreshBatches(idx) {
     : invBatchSelectHtml(itemId, 'out', 'bulkout-batch', true);
 }
 function bulkOutBatchOf(tr, itemId) {
-  const el = tr.querySelector(`.bulkout-batch[data-item-id="${itemId}"]`);
-  return el && el.value ? parseInt(el.value, 10) : null;
+  return invBatchPicked(tr.querySelector(`.bulkout-batch[data-item-id="${itemId}"]`));
 }
 
 // ── Stock Report ─────────────────────────────────────────────

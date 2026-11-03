@@ -5435,11 +5435,12 @@ async function itemBatches(sql, itemId) {
 }
 // Which batch(es) a movement goes to, before it is written. In: the batch picked
 // (it must exist), else a new one for a Stock In; anything else coming in (a return,
-// a refund, a reversal) has none and counts in the 1st. Out: the batch picked, else
-// the oldest with stock first.
+// a refund, a reversal) has none and counts in the 1st. Out: the batch(es) ticked,
+// oldest first, else the oldest with stock first. batch: a number or a list of them.
 async function batchPlan(sql, itemId, change, reason, batch, reversesTxId, occurredAt) {
   if (reversesTxId) return { batch: null, alloc: null };
-  const want = parseInt(batch, 10) > 0 ? parseInt(batch, 10) : null;
+  const picked = [...new Set((Array.isArray(batch) ? batch : [batch]).map(x => parseInt(x, 10)).filter(x => x > 0))].sort((a, b) => a - b);
+  const want = picked.length ? picked[0] : null;
   if (change > 0) {
     if (want) {
       const hit = (await itemBatches(sql, itemId) || []).find(b => b.n === want);
@@ -5456,11 +5457,23 @@ async function batchPlan(sql, itemId, change, reason, batch, reversesTxId, occur
   }
   const list = await itemBatches(sql, itemId) || [];
   let need = -change;
-  if (want) {
-    const hit = list.find(b => b.n === want);
-    if (!hit) throw new Error(`There is no ${ordinalN(want)} batch of this paper.`);
-    if (hit.left < need) throw new Error(`Only ${Math.round(hit.left).toLocaleString()} sheets are left in the ${ordinalN(want)} batch (${hit.label}).`);
-    return { batch: null, alloc: [{ n: want, sheets: need, label: hit.label }] };
+  if (picked.length) {
+    const hits = picked.map(n => {
+      const hit = list.find(b => b.n === n);
+      if (!hit) throw new Error(`There is no ${ordinalN(n)} batch of this paper.`);
+      return hit;
+    });
+    const have = hits.reduce((t, b) => t + b.left, 0);
+    if (have < need) {
+      throw new Error(`Only ${Math.round(have).toLocaleString()} sheets are left in the ${hits.map(b => ordinalN(b.n)).join(' + ')} batch${hits.length > 1 ? 'es' : ''} (${hits.map(b => b.label).join(', ')}).`);
+    }
+    const alloc = [];
+    for (const b of hits) {
+      if (need <= 0) break;
+      const take = Math.min(b.left, need);
+      if (take > 0) { alloc.push({ n: b.n, sheets: take, label: b.label }); need -= take; }
+    }
+    return { batch: null, alloc };
   }
   const alloc = [];
   for (const b of list) {
@@ -6993,7 +7006,7 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   let splits;
   if (rawSplits && rawSplits.length) {
     splits = rawSplits
-      .map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10), batch: parseInt(s.batch, 10) || null }))
+      .map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10), batch: s.batch == null ? null : s.batch }))
       .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0);
     if (!splits.length) return { status: 400, error: 'No valid split rows in payload.' };
   } else {
@@ -8357,7 +8370,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     if (sheets <= 0) return res.status(400).json({ error: 'Top-up qty invalid' });
     const rawSplits = Array.isArray(req.body && req.body.splits) ? req.body.splits : [];
     const splits = rawSplits.length
-      ? rawSplits.map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10), batch: parseInt(s.batch, 10) || null }))
+      ? rawSplits.map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10), batch: s.batch == null ? null : s.batch }))
           .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0)
       : [{ item_id: topupItemId, sheets }];
     if (splits.reduce((sum, s) => sum + s.sheets, 0) !== sheets) {
