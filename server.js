@@ -325,7 +325,8 @@ function getDb() {
 // Bumped again for Daily Production's corrected values (daily_production_notes.corrected).
 // Bumped again for paper batches (inventory_transactions.batch / po_no / invoice_no /
 // batch_label) and the Access Register row inv_btn_batches (2026-11-03).
-const SCHEMA_VERSION = 'v2026-11-03-batches';
+// Bumped again for inventory_transactions.batch_alloc (batch-wise stock out, 2026-11-03).
+const SCHEMA_VERSION = 'v2026-11-03-batch-out';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1157,6 +1158,9 @@ async function initDb() {
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS po_no TEXT`;
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS invoice_no TEXT`;
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS batch_label TEXT`;
+    // The batch(es) an entry moved, as written then: [{ n, sheets, label }]. A stock-out
+    // taking the rest of one batch and the start of the next has two.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS batch_alloc JSONB`;
     // Soft delete: "Delete from history" (Manual Consumption, Stock In/Out
     // bulk delete) moves a row to the Archive instead of wiping it outright,
     // same 30-day-retention pattern as jobs/imports. Never touches
@@ -5381,40 +5385,96 @@ function stockEntryInstant(rawDate) {
 }
 // Paper batches (owner, 2026-11-03, as the employee app's store keeps them): the
 // stock already in an item is its 1st batch and each Stock In opens the next one
-// (a brand-new item's first Stock In is the 1st). Nothing is tagged on the way out:
-// stock is used oldest batch first, so what is left sits in the newest batches.
+// (a brand-new item's first Stock In is the 1st), or is added to one picked. Each
+// stock-out records the batch(es) it took (batch_alloc): the one picked, else the
+// oldest with stock first. Entries from before batches were kept belong to the 1st.
 const BATCH_REASONS = new Set(['delivery', 'import-received']);
+function ordinalN(n) { const v = n % 100, sx = ['th', 'st', 'nd', 'rd']; return n + (sx[(v - 20) % 10] || sx[v] || sx[0]); }
+// As a sticker writes it: the number and the year the batch came in, 02-2026.
+function batchNoOf(n, at) { return String(n).padStart(2, '0') + '-' + businessDateISO(at ? new Date(at) : new Date()).slice(0, 4); }
 async function itemBatches(sql, itemId) {
   const [item] = await sql`SELECT id, current_balance FROM inventory_items WHERE id = ${itemId}`;
   if (!item) return null;
   const rows = await sql`
-    SELECT t.id, t.batch, t.change, t.created_at, t.challan_no, t.po_no, t.invoice_no, t.batch_label
+    SELECT t.id, t.batch, t.change, t.created_at, t.challan_no, t.po_no, t.invoice_no, t.batch_label, t.batch_alloc
       FROM inventory_transactions t
-     WHERE t.item_id = ${itemId} AND t.batch IS NOT NULL AND t.change > 0
+     WHERE t.item_id = ${itemId} AND (t.batch IS NOT NULL OR t.batch_alloc IS NOT NULL)
        AND t.reverses_tx_id IS NULL
        AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-     ORDER BY t.batch, t.created_at, t.id`;
+     ORDER BY t.created_at, t.id`;
   const byN = new Map();
+  const get = n => {
+    if (!byN.has(n)) byN.set(n, { n, tx_id: null, received: null, out: 0, first_at: null, challan_no: '', po_no: '', invoice_no: '', batch_label: '' });
+    return byN.get(n);
+  };
   for (const r of rows) {
-    const n = r.batch;
-    if (!byN.has(n)) byN.set(n, { n, tx_id: r.id, received: 0, first_at: r.created_at, challan_no: r.challan_no || '', po_no: r.po_no || '', invoice_no: r.invoice_no || '', batch_label: r.batch_label || '' });
-    byN.get(n).received += parseFloat(r.change) || 0;
+    const ch = parseFloat(r.change) || 0;
+    if (ch > 0 && r.batch) {
+      const b = get(r.batch);
+      if (!b.tx_id) Object.assign(b, { tx_id: r.id, first_at: r.created_at, challan_no: r.challan_no || '', po_no: r.po_no || '', invoice_no: r.invoice_no || '', batch_label: r.batch_label || '' });
+      b.received = (b.received || 0) + ch;
+    } else if (ch < 0 && Array.isArray(r.batch_alloc)) {
+      for (const a of r.batch_alloc) if (a && a.n) get(+a.n).out += +a.sheets || 0;
+    }
   }
   const balance = parseFloat(item.current_balance) || 0;
   if (!byN.size && !(balance > 0)) return [];
-  if (!byN.has(1)) byN.set(1, { n: 1, tx_id: null, received: null, first_at: null, challan_no: '', po_no: '', invoice_no: '', batch_label: '' });
+  get(1);
   const list = [...byN.values()].sort((a, b) => a.n - b.n);
-  // Newest first, each later batch keeps up to what it received; the 1st batch is the rest.
+  // A later batch holds what came into it less what was taken from it (newest
+  // first, never more than the balance); the 1st batch is the rest of the balance.
   let rest = balance;
   for (const b of [...list].reverse()) {
     if (b.n === 1) continue;
-    b.left = Math.max(0, Math.min(b.received, rest));
+    b.left = Math.max(0, Math.min((b.received || 0) - b.out, rest));
     rest -= b.left;
   }
   list[0].left = Math.max(0, rest);
+  for (const b of list) b.label = b.batch_label || batchNoOf(b.n, b.first_at);
   return list;
 }
-async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo, occurredAt }) {
+// Which batch(es) a movement goes to, before it is written. In: the batch picked
+// (it must exist), else a new one for a Stock In; anything else coming in (a return,
+// a refund, a reversal) has none and counts in the 1st. Out: the batch picked, else
+// the oldest with stock first.
+async function batchPlan(sql, itemId, change, reason, batch, reversesTxId, occurredAt) {
+  if (reversesTxId) return { batch: null, alloc: null };
+  const want = parseInt(batch, 10) > 0 ? parseInt(batch, 10) : null;
+  if (change > 0) {
+    if (want) {
+      const hit = (await itemBatches(sql, itemId) || []).find(b => b.n === want);
+      if (!hit) throw new Error(`There is no ${ordinalN(want)} batch of this paper to add to.`);
+      return { batch: want, alloc: [{ n: want, sheets: change, label: hit.label }] };
+    }
+    if (!BATCH_REASONS.has(reason)) return { batch: null, alloc: null };
+    const [r] = await sql`
+      SELECT COALESCE(MAX(t.batch), 1) AS mx, COUNT(t.id)::int AS cnt, COALESCE(MAX(i.current_balance), 0) AS bal
+        FROM inventory_items i LEFT JOIN inventory_transactions t ON t.item_id = i.id
+       WHERE i.id = ${itemId}`;
+    const n = (r && (r.cnt > 0 || parseFloat(r.bal) > 0)) ? Math.max(1, parseInt(r.mx, 10) || 1) + 1 : 1;
+    return { batch: n, alloc: [{ n, sheets: change, label: batchNoOf(n, occurredAt) }] };
+  }
+  const list = await itemBatches(sql, itemId) || [];
+  let need = -change;
+  if (want) {
+    const hit = list.find(b => b.n === want);
+    if (!hit) throw new Error(`There is no ${ordinalN(want)} batch of this paper.`);
+    if (hit.left < need) throw new Error(`Only ${Math.round(hit.left).toLocaleString()} sheets are left in the ${ordinalN(want)} batch (${hit.label}).`);
+    return { batch: null, alloc: [{ n: want, sheets: need, label: hit.label }] };
+  }
+  const alloc = [];
+  for (const b of list) {
+    if (need <= 0) break;
+    const take = Math.min(b.left, need);
+    if (take > 0) { alloc.push({ n: b.n, sheets: take, label: b.label }); need -= take; }
+  }
+  if (need > 0) {
+    const first = alloc.find(a => a.n === 1);
+    if (first) first.sheets += need; else alloc.unshift({ n: 1, sheets: need, label: list[0] ? list[0].label : batchNoOf(1) });
+  }
+  return { batch: null, alloc: alloc.length ? alloc : null };
+}
+async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo, occurredAt, batch }) {
   if (!itemId || !change) return null;
   if (change < 0) {
     const [item] = await sql`SELECT current_balance, deleted_at FROM inventory_items WHERE id = ${itemId}`;
@@ -5428,17 +5488,13 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
   const challan   = challanNo && String(challanNo).trim() ? String(challanNo).trim() : null;
   // Backdated (occurredAt): created_at = that day, recorded_at = now.
   const occurredIso = occurredAt ? new Date(occurredAt).toISOString() : null;
-  const opensBatch = change > 0 && !reversesTxId && BATCH_REASONS.has(reason);   // see itemBatches
+  const plan = await batchPlan(sql, itemId, change, reason, batch, reversesTxId, occurredIso);   // see itemBatches
   const inserted = await sql`
-    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, actor_name, reverses_tx_id, paired_tx_id, challan_no, created_at, recorded_at, batch)
+    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, actor_name, reverses_tx_id, paired_tx_id, challan_no, created_at, recorded_at, batch, batch_alloc)
     VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${actorName}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan},
             COALESCE(${occurredIso}::timestamptz, NOW()),
             CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END,
-            CASE WHEN NOT ${opensBatch}::boolean THEN NULL
-                 WHEN EXISTS (SELECT 1 FROM inventory_transactions x WHERE x.item_id = ${itemId})
-                   OR COALESCE((SELECT current_balance FROM inventory_items WHERE id = ${itemId}), 0) > 0
-                 THEN GREATEST(1, COALESCE((SELECT MAX(batch) FROM inventory_transactions WHERE item_id = ${itemId}), 1)) + 1
-                 ELSE 1 END)
+            ${plan.batch}, ${plan.alloc ? JSON.stringify(plan.alloc) : null}::jsonb)
     RETURNING id
   `;
   // Stock coming back into a deleted item (a reversal, a receive) brings it back to Inventory.
@@ -6937,7 +6993,7 @@ async function performIssueStockUnlocked(sql, req, id, body) {
   let splits;
   if (rawSplits && rawSplits.length) {
     splits = rawSplits
-      .map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10) }))
+      .map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10), batch: parseInt(s.batch, 10) || null }))
       .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0);
     if (!splits.length) return { status: 400, error: 'No valid split rows in payload.' };
   } else {
@@ -7032,6 +7088,7 @@ async function performIssueStockUnlocked(sql, req, id, body) {
     const issueTxId = await applyInventoryChange(sql, {
       itemId: s.item_id,
       change: -s.sheets,
+      batch: s.batch,
       reason: 'job-consumed',
       jobId: job.id,
       notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — ${fmtPack(packs)} ${unit} (${s.sheets} sheets) from ${it.brand || 'no brand'} issued by ${stockWho(req.user)}${overNote}`,
@@ -8300,7 +8357,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     if (sheets <= 0) return res.status(400).json({ error: 'Top-up qty invalid' });
     const rawSplits = Array.isArray(req.body && req.body.splits) ? req.body.splits : [];
     const splits = rawSplits.length
-      ? rawSplits.map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10) }))
+      ? rawSplits.map(s => ({ item_id: parseInt(s.item_id, 10), sheets: parseInt(s.sheets, 10), batch: parseInt(s.batch, 10) || null }))
           .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.sheets) && s.sheets > 0)
       : [{ item_id: topupItemId, sheets }];
     if (splits.reduce((sum, s) => sum + s.sheets, 0) !== sheets) {
@@ -8325,6 +8382,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
       await applyInventoryChange(sql, {
         itemId: s.item_id,
         change: -s.sheets,
+        batch: s.batch,
         reason: 'job-consumed',
         jobId: job.id,
         notes: `Job E-${job.id}${job.jobcode ? ' · ' + job.jobcode : ''}: ${job.name} — extra ${s.sheets / ps} ${unit} (${s.sheets} sheets) top-up from ${splitItem.brand || 'no brand'} issued by ${req.user.email}`,
@@ -11517,7 +11575,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
     await dbReady;
     const sql = getDb();
     const { id } = req.params;
-    const { change, reason, notes, job_card, challan_no, entry_date } = req.body;
+    const { change, reason, notes, job_card, challan_no, entry_date, batch } = req.body;
     const delta = parseSheets(change);
     if (!delta) return res.status(400).json({ error: 'change must be a non-zero integer' });
     const entry = stockEntryInstant(entry_date);
@@ -11597,7 +11655,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       const extraHit = mine !== key(byId.get(jobRow.inventory_item_id))
         ? extrasSet.find(e => mine === key(byId.get(jp[e.key].inventory_item_id))) : null;
       const source = extraHit ? extraHit.source : 'primary';
-      const r = await performIssueStock(sql, req, jobRow.id, { splits: [{ item_id: itemId, sheets: Math.abs(delta) }], challan_no: challan_no == null ? null : String(challan_no), entry_date, source });
+      const r = await performIssueStock(sql, req, jobRow.id, { splits: [{ item_id: itemId, sheets: Math.abs(delta), batch }], challan_no: challan_no == null ? null : String(challan_no), entry_date, source });
       if (r.error) return res.status(r.status || 400).json({ error: r.error });
       const after = r.job || {};
       const owed = extraHit
@@ -11676,6 +11734,7 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
       user: req.user,
       challanNo: challan_no,
       occurredAt,
+      batch,
     });
 
     let offcutItem = null;
@@ -11917,6 +11976,14 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
     const existingReversal = await sql`SELECT id FROM inventory_transactions WHERE reverses_tx_id = ${txId} LIMIT 1`;
     if (existingReversal[0]) {
       return res.status(409).json({ error: 'This entry has already been reversed.' });
+    }
+    // A Stock In opened (or added to) a batch: not once stock was issued from it that
+    // would leave the batch short.
+    if (tx.batch && tx.batch > 1 && (parseFloat(tx.change) || 0) > 0) {
+      const b = ((await itemBatches(sql, tx.item_id)) || []).find(x => x.n === tx.batch);
+      if (b && (b.received || 0) - (parseFloat(tx.change) || 0) - b.out < 0) {
+        return res.status(400).json({ error: `Cannot reverse this yet: stock was already issued from the ${ordinalN(tx.batch)} batch (${b.label}). Reverse those issues first.` });
+      }
     }
 
     // 30-day rolling window applies to the '30-day' tier only. Anything
