@@ -12414,6 +12414,14 @@ async function saveInvAddStock(id) {
     await api('POST', `/api/inventory/${id}/transactions`, data);
     await loadInventory();
     closeModal(); notify(`+${qty.toLocaleString()} sheets added`);
+    if (data.reason === 'delivery' && seeBtn('inv_btn_batches') && hasPerm('inv_btn_batches')
+        && await confirmDialog({ title: 'Print stickers?', message: 'Print the stickers for this Stock In now? You can also print them later from the Batches button, the Stock In report or History.', confirmText: 'Print stickers', cancelText: 'Not now' })) {
+      const list = await invBatchesOf(id);
+      const n = data.batch || (list.length ? list[list.length - 1].n : 1);
+      showSaving(false);
+      await openInvSticker(id, n);
+      return;
+    }
   } catch(e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -13995,6 +14003,7 @@ async function renderInvHistory(id) {
   try {
     const payload = await api('GET', `/api/inventory/${id}/transactions?group=1`);
     const rawTxs = Array.isArray(payload) ? payload : (payload.transactions || []);
+    _invHistRows = rawTxs;   // the Sticker buttons below find their row here
     // One job can be issued from several brands in a single Save. Those
     // ledger rows are written milliseconds apart; combine adjacent parts
     // into one visible event while retaining every underlying TX id.
@@ -14127,7 +14136,7 @@ async function renderInvHistory(id) {
         <td class="lh-wrap">${job}</td>
         <td><div class="lh-by">${by}</div></td>
         <td class="lh-notes">${esc(notes)}</td>
-        <td>${reverseBtn}</td>
+        <td><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch;">${t._parts.length === 1 ? invStickerBtnHtml({ ...t, item_id: t.item_id || id }) : ''}${reverseBtn}</div></td>
       </tr>`;
     }).join('');
     // Modal may have been torn down by a full re-render while we awaited
@@ -14494,12 +14503,18 @@ async function openInvBatches(id) {
 
 const _ist = { itemId: 0, n: 1, txId: 0, po: '', inv: '', label: '', autoBatch: '', ref: 0, rows: [] };
 const istVal = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
-async function openInvSticker(itemId, n) {
+async function openInvSticker(itemId, n, tx) {
   const it = inventoryAll.find(x => x.id === itemId); if (!it) return;
   let b;
-  try { b = ((await api('GET', `/api/inventory/${itemId}/batches`)).batches || []).find(x => x.n === n); }
-  catch (e) { notify('Could not load the batch: ' + e.message); return; }
-  if (!b) { notify('That batch is not there any more.'); return; }
+  if (tx) {
+    // One Stock In: its own amount and numbers. An entry from before batches were kept is in the 1st.
+    b = { n: n || 1, tx_id: tx.batch ? tx.id : 0, received: Math.abs(+tx.change || 0), left: 0, first_at: tx.created_at,
+          challan_no: tx.challan_no || '', po_no: tx.po_no || '', invoice_no: tx.invoice_no || '', batch_label: tx.batch_label || '' };
+  } else {
+    try { b = ((await api('GET', `/api/inventory/${itemId}/batches`)).batches || []).find(x => x.n === n); }
+    catch (e) { notify('Could not load the batch: ' + e.message); return; }
+    if (!b) { notify('That batch is not there any more.'); return; }
+  }
   const ps = packetSize(it.paper_type || '');
   const unit = packetUnitLabel(it.paper_type || '').replace(/s$/, '');
   const total = Math.round(b.received != null && b.received > 0 ? b.received : b.left) || 0;
@@ -14554,6 +14569,23 @@ async function openInvSticker(itemId, n) {
   </div>`);
   istRenderRows();
   istRefresh();
+}
+// Every Stock In row (report, History) has a Sticker button; it finds its row here.
+let _invHistRows = [];
+function invStickerTxOk(t) {
+  return !!(t && t.item_id && (+t.change || 0) > 0 && !t.reverses_tx_id && (t.reason === 'delivery' || t.reason === 'import-received'));
+}
+function invStickerBtnHtml(t) {
+  if (!invStickerTxOk(t) || !seeBtn('inv_btn_batches')) return '';
+  return `<button class="btn btn-sm" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); openInvStickerTx(${t.id})" title="Print the stickers for this Stock In">&#128424; Sticker</button>`;
+}
+function openInvStickerTx(txId) {
+  const pools = [_invHistRows, (stockMovementStates.in || {}).rows || [], (stockMovementStates.out || {}).rows || []];
+  for (const pool of pools) {
+    const t = pool.find(x => x.id === txId);
+    if (t) return openInvSticker(t.item_id, t.batch || 1, t);
+  }
+  notify('That Stock In is not loaded any more - reopen the report.');
 }
 // Changing the date moves the year in a batch number nobody has typed over.
 function istDateChanged() {
@@ -26023,7 +26055,7 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;">${canEditRef
         ? wrapEditHtml(txNotesShown(t), '—', `saveTxRef('${direction}', [${ids.join(',')}], 'notes', this.value)`, "Notes — edit and press Enter; the change is logged in this paper's History", 90, 170)
         : `<div style="max-width:170px;">${esc(txNotesShown(t))}</div>`}${smOffcutNoteHtml(direction, t)}</td>
-      <td style="padding:8px 10px;white-space:nowrap;"><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch;">${direction === 'in' && !isGroup && t.batch && t.item_id && seeBtn('inv_btn_batches') ? `<button class="btn btn-sm" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); openInvSticker(${t.item_id}, ${t.batch})" title="Print this batch's stickers">&#128424; Sticker</button>` : ''}${reverseCell}</div></td>
+      <td style="padding:8px 10px;white-space:nowrap;"><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch;">${direction === 'in' && !isGroup ? invStickerBtnHtml(t) : ''}${reverseCell}</div></td>
     </tr>`;
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
