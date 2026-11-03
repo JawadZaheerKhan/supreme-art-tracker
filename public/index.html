@@ -2974,6 +2974,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
    blue, offcut cyan, imports and low stock red, blocked red). */
 .cd-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:4px 0 12px; }
 .cd-bar .cd-range-label { font-size:12px; color:var(--text2); }
+.cd-bar select, .cd-bar input[type=date] { width:auto; flex:0 0 auto; max-width:170px; }
 .cd-sec { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:var(--text2); margin:14px 0 6px; }
 .cd-sec small { font-weight:600; text-transform:none; letter-spacing:0; color:var(--text3); }
 .cd-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(118px, 1fr)); gap:6px; }
@@ -6143,7 +6144,7 @@ function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 // (buildSaleReportRows), job states = the Jobs tab's views, production =
 // the Production Report (with its own date filter). "Right now" tiles
 // ignore the date filter. View only.
-const ceoDash = { range: 'this-month', dfrom: '', dto: '', prange: 'today', pdfrom: '', pdto: '', srange: 'this-month', sdfrom: '', sdto: '', txs: null, imports: null, prod: null, err: '', open: '' };
+const ceoDash = { range: 'this-month', dfrom: '', dto: '', prange: 'today', pdfrom: '', pdto: '', srange: 'this-month', sdfrom: '', sdto: '', sLoaded: null, jobIssued: null, txs: null, imports: null, prod: null, err: '', open: '' };
 const CEO_DASH_RANGES = [['today', 'Today'], ['this-week', 'This week'], ['this-month', 'This month'], ['last-month', 'Last month'], ['this-year', 'This year'], ['', 'All time'], ['custom', 'Custom range…']];
 function ceoDashRangeBounds(range, dfrom, dto) {
   if (range === 'today') { const d = localDateISO(); return resolveDateFilterBounds('custom', d, d); }
@@ -6163,7 +6164,25 @@ function setCeoDashStockRange(v) { ceoDash.srange = v; if (v !== 'custom') { ceo
 function setCeoDashStockCustom() {
   ceoDash.sdfrom = (document.getElementById('cd-sdfrom') || {}).value || '';
   ceoDash.sdto   = (document.getElementById('cd-sdto')   || {}).value || '';
-  loadCeoDashStock();
+  if (ceoDash.sdfrom && ceoDash.sdto) loadCeoDashStock();
+}
+// The jobs counted as Used in a period: every job that left Printing in it (now in
+// Coating or later, Ready, Delivered). Jobs processed without paper are kept apart.
+function ceoDashUsedJobs(sb) {
+  const inR = ms => ms != null && Number.isFinite(ms) && (!sb || ((sb.from == null || ms >= sb.from) && (sb.to == null || ms <= sb.to)));
+  const used = [], waived = [];
+  for (const j of (jobs || [])) {
+    if (j.is_shade_card || (j.stage_index || 0) < 2) continue;
+    const ms = jobLeftPrintingMs(j);
+    if (!inR(ms)) continue;
+    const pk = (parseFloat((j.particulars || {}).quantity_of_packets) || 0)
+      + packetTopupsApproved(j).reduce((a, t) => a + (parseFloat(t.qty) || 0), 0);
+    if (!pk) continue;
+    const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+    const x = { j, ms, pk, ream: !!(it && isReamPaper(it.paper_type)) };
+    ((j.particulars || {}).paper_waived ? waived : used).push(x);
+  }
+  return { used, waived };
 }
 let ceoDashStockSeq = 0;
 async function loadCeoDashStock() {
@@ -6171,13 +6190,22 @@ async function loadCeoDashStock() {
   const qs = new URLSearchParams({ direction: 'out' });
   if (b && b.from != null) qs.set('from', ceoDashIso(b.from));
   if (b && b.to != null)   qs.set('to', ceoDashIso(b.to));
-  ceoDash.txs = null; ceoDash.err = '';
+  ceoDash.txs = null; ceoDash.jobIssued = null; ceoDash.err = '';
   if (mode === 'dashboard') renderCeoDash();
   try {
-    const txs = await api('GET', '/api/inventory/transactions?' + qs.toString());
+    const ids = ceoDashUsedJobs(b).used.map(x => x.j.id);
+    const [txs, issued] = await Promise.all([
+      api('GET', '/api/inventory/transactions?' + qs.toString()),
+      ids.length ? api('POST', '/api/reports/job-issued', { ids }) : [],
+    ]);
     if (seq !== ceoDashStockSeq) return;
     ceoDash.txs = Array.isArray(txs) ? txs : [];
-  } catch (e) { if (seq !== ceoDashStockSeq) return; ceoDash.err = e.message; ceoDash.txs = []; }
+    const m = new Map();
+    for (const r of (Array.isArray(issued) ? issued : [])) { const l = m.get(r.job_id) || []; l.push(r); m.set(r.job_id, l); }
+    ceoDash.jobIssued = m;
+    ceoDash.jobIssuedIds = new Set(ids);
+  } catch (e) { if (seq !== ceoDashStockSeq) return; ceoDash.err = e.message; ceoDash.txs = []; ceoDash.jobIssued = new Map(); }
+  ceoDash.sLoaded = b;
   if (mode === 'dashboard') renderCeoDash();
 }
 function setCeoDashRange(v) { ceoDash.range = v; if (v !== 'custom') { ceoDash.dfrom = ''; ceoDash.dto = ''; } renderCeoDash(); if (v !== 'custom') loadCeoDash(false); }
@@ -6379,37 +6407,29 @@ function ceoDashFigures() {
     byType.set(type, k);
   }
   f.paperByType = [...byType.values()].sort((x, y) => y.kg - x.kg || y.units - x.units);
-  // Packets issued vs used (owner, 2026-11-03). Issued = paper issued to jobs in the
-  // period. Used = the packets on the job card (+ approved extra packets) of every job
-  // that left Printing in the period - now in Coating or any later stage, Ready or
-  // Delivered. Board counts in packets, paper in reams.
-  const iu = { issued: { pkts: 0, reams: 0 }, used: { pkts: 0, reams: 0 }, issuedJobs: new Map(), usedJobs: [] };
-  for (const t of (ceoDash.txs || [])) {
-    if (!(t.change < 0) || t.reason !== 'job-consumed') continue;
-    const units = Math.abs(t.change) / packetSize(t.paper_type || ''), ream = isReamPaper(t.paper_type);
-    iu.issued[ream ? 'reams' : 'pkts'] += units;
-    const k = t.job_id || ('tx' + t.id);
-    const e = iu.issuedJobs.get(k) || { id: t.job_id, name: t.job_name || '', pkts: 0, reams: 0 };
-    e[ream ? 'reams' : 'pkts'] += units;
-    iu.issuedJobs.set(k, e);
-  }
-  const sb = ceoDashStockBounds();
-  const inStock = ms => ms != null && Number.isFinite(ms) && (!sb || ((sb.from == null || ms >= sb.from) && (sb.to == null || ms <= sb.to)));
-  for (const j of all) {
-    if (j.is_shade_card || (j.stage_index || 0) < 2) continue;
-    const ms = jobLeftPrintingMs(j);
-    if (!inStock(ms)) continue;
-    const pk = (parseFloat((j.particulars || {}).quantity_of_packets) || 0)
-      + packetTopupsApproved(j).reduce((a, t) => a + (parseFloat(t.qty) || 0), 0);
-    if (!pk) continue;
-    const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
-    const ream = !!(it && isReamPaper(it.paper_type));
-    iu.used[ream ? 'reams' : 'pkts'] += pk;
-    iu.usedJobs.push({ j, ms, pk, ream });
+  // Packets issued vs used (owner, 2026-11-03), like for like: the jobs that left
+  // Printing in the period (now in Coating or later, Ready, Delivered). Used = their
+  // job-card packets (+ approved extra packets); Issued = the paper issued to those same
+  // jobs, any date, fresh and offcut. Jobs processed without paper are listed apart.
+  // Board counts in packets, paper in reams.
+  const uj = ceoDashUsedJobs(ceoDash.sLoaded);
+  const iu = { loaded: !!ceoDash.jobIssued, issued: { pkts: 0, reams: 0 }, used: { pkts: 0, reams: 0 }, usedJobs: [], waived: uj.waived.sort(newest) };
+  for (const x of uj.used) {
+    iu.used[x.ream ? 'reams' : 'pkts'] += x.pk;
+    x.issued = { pkts: 0, reams: 0 };
+    for (const r of ((ceoDash.jobIssued && ceoDash.jobIssued.get(x.j.id)) || [])) {
+      x.issued[isReamPaper(r.paper_type) ? 'reams' : 'pkts'] += (+r.sheets || 0) / packetSize(r.paper_type || '');
+    }
+    iu.issued.pkts += x.issued.pkts; iu.issued.reams += x.issued.reams;
+    iu.usedJobs.push(x);
   }
   iu.usedJobs.sort(newest);
-  iu.issuedJobs = [...iu.issuedJobs.values()].sort((x, y) => (y.pkts + y.reams) - (x.pkts + x.reams));
   f.issuedUsed = iu;
+  // A job that left Printing since the figures were fetched: fetch again, once.
+  if (iu.loaded && ceoDash.jobIssuedIds && uj.used.some(x => !ceoDash.jobIssuedIds.has(x.j.id))) {
+    ceoDash.jobIssuedIds = new Set(uj.used.map(x => x.j.id));
+    setTimeout(loadCeoDashStock, 0);
+  }
   // Over-issued: more paper went out than the job needs, decision pending.
   f.overIssued = typeof hasOverIssuePending === 'function' ? live.filter(j => hasOverIssuePending(j)) : [];
   f.prod = ceoDashProduction(ceoDash.prod);
@@ -6494,7 +6514,7 @@ function ceoDashRangeBar(prefix, range, dfrom, dto, onRange, onCustom, reload) {
       <select class="filter" onchange="${onRange}(this.value)">${opts}</select>
       ${custom}
       <button class="btn btn-sm" onclick="${reload}()" title="Load the latest figures">&#8635;</button>
-      <span class="cd-range-label">${esc(ceoDashRangeText(ceoDashRangeBounds(range, dfrom, dto)))}</span>
+      <span class="cd-range-label">${range === 'custom' && !(dfrom && dto) ? 'Pick both dates' : esc(ceoDashRangeText(ceoDashRangeBounds(range, dfrom, dto)))}</span>
     </div>`;
 }
 function renderCeoDash() {
@@ -6589,14 +6609,14 @@ function renderCeoDash() {
         const u = x => [x.pkts ? fmt(x.pkts) + ' pkts' : '', x.reams ? fmt(x.reams) + ' reams' : ''].filter(Boolean).join(' + ') || '0';
         const diff = { pkts: iu.issued.pkts - iu.used.pkts, reams: iu.issued.reams - iu.used.reams };
         const dTxt = [diff.pkts ? (diff.pkts > 0 ? '+' : '') + fmt(diff.pkts) + ' pkts' : '', diff.reams ? (diff.reams > 0 ? '+' : '') + fmt(diff.reams) + ' reams' : ''].filter(Boolean).join(' · ');
-        const value = !f.paperLoaded ? '…' : `<span class="cd-pair"><span><b style="color:#1d4ed8;">${u(iu.issued)}</b> <small>issued</small></span><span><b style="color:#15803d;">${u(iu.used)}</b> <small>used</small></span></span>`;
-        const sub = !f.paperLoaded ? 'loading…' : (dTxt ? 'issued − used: ' + dTxt : 'issued and used are the same');
-        return tile('issued-used', 'stock cd-wide', 'Packets issued vs used', value, sub, f.paperLoaded ? () =>
-          `<div class="cd-sub">Issued = paper issued to jobs in the period. Used = the packets on the job card (+ approved extra packets) of the jobs that left Printing in the period: now in Coating or a later stage, Ready or Delivered.</div>`
-          + head(`Used · ${fmt(iu.usedJobs.length)} job${iu.usedJobs.length === 1 ? '' : 's'} · ${u(iu.used)}`)
-          + list(iu.usedJobs.map(x => row(job(x.j), `${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'} · ${esc(STAGES[x.j.stage_index || 0] || '')} · left Printing ${date(x.ms)}`)), 'No job left Printing in this period')
-          + head(`Issued · ${fmt(iu.issuedJobs.length)} job${iu.issuedJobs.length === 1 ? '' : 's'} · ${u(iu.issued)}`)
-          + list(iu.issuedJobs.map(e => row(e.id ? `<a onclick="ceoDashOpenJob(${e.id})">E-${e.id}</a> ${esc(e.name)}` : esc(e.name || '—'), u(e))), 'No paper issued to jobs in this period') : null);
+        const value = !iu.loaded ? '…' : `<span class="cd-pair"><span><b style="color:#1d4ed8;">${u(iu.issued)}</b> <small>issued</small></span><span><b style="color:#15803d;">${u(iu.used)}</b> <small>used</small></span></span>`;
+        const sub = !iu.loaded ? 'loading…' : `${fmt(iu.usedJobs.length)} job${iu.usedJobs.length === 1 ? '' : 's'} printed · ` + (dTxt ? 'issued − used: ' + dTxt : 'issued and used are the same');
+        const gap = x => { const d = (x.issued.pkts + x.issued.reams) - x.pk; return Math.abs(d) < 0.005 ? '' : ` · <b style="color:${d > 0 ? '#b45309' : '#b91c1c'};">${d > 0 ? '+' : ''}${fmt(d)}</b>`; };
+        return tile('issued-used', 'stock cd-wide', 'Packets issued vs used', value, sub, iu.loaded ? () =>
+          `<div class="cd-sub">The jobs that left Printing in the period (now in Coating or later, Ready or Delivered). Used = their job-card packets (+ approved extra packets). Issued = the paper issued to those same jobs, on any date, fresh and offcut. A job with more issued than its card shows the extra in orange, less in red.</div>`
+          + head(`Jobs · ${fmt(iu.usedJobs.length)} · issued ${u(iu.issued)} · used ${u(iu.used)}`)
+          + list(iu.usedJobs.map(x => row(job(x.j), `issued ${u(x.issued)} · card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'}${gap(x)} · left Printing ${date(x.ms)}`)), 'No job left Printing in this period')
+          + (iu.waived.length ? head(`Processed without paper · ${fmt(iu.waived.length)} (not counted)`) + list(iu.waived.map(x => row(job(x.j), `card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'} · left Printing ${date(x.ms)}`)), '') : '') : null);
       })()}
       ${tile('paper', 'stock', 'Paper issued', paperVal, f.paperLoaded ? fmt(f.paperKg) + ' kg (fresh paper)' : 'loading…', f.paperLoaded ? () => list(f.paperBy.map(e => row(esc(e.label), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
       ${tile('paper-type', 'stock', 'Paper by type', f.paperLoaded ? fmt(f.paperByType.length) : '…', f.paperLoaded ? 'paper types issued' : 'loading…', f.paperLoaded ? () => list(f.paperByType.map(e => row(esc(e.type), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
