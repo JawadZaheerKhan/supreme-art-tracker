@@ -14723,8 +14723,10 @@ async function invBatchesOf(itemId) {
   catch (e) { console.error('Batches not loaded', itemId, e); _invBatchCache.set(itemId, []); return []; }
 }
 function invPkts(sheets, paperType) { const p = sheets / packetSize(paperType || ''); return (Number.isInteger(p) ? p : +p.toFixed(2)).toLocaleString(); }
-// The batch picker. in: New batch (default) or Add to one. out: Oldest first
-// (default) or one with stock. withItem: data-item-id for a brand line.
+// The batch picker. in: New batch (default) or Add to one. out: the batches with
+// stock, the oldest already chosen (owner, 2026-11-03). The oldest carries no number
+// (value ''), so more than it holds carries on into the next batch, oldest first.
+// withItem: data-item-id for a brand line.
 function invBatchSelectHtml(itemId, dir, cls, withItem) {
   const it = inventoryAll.find(x => x.id === itemId);
   const list = _invBatchCache.get(itemId) || [];
@@ -14737,15 +14739,17 @@ function invBatchSelectHtml(itemId, dir, cls, withItem) {
       + list.map(b => `<option value="${b.n}">Add to the ${ordinalN(b.n)} (${esc(b.label)}) &middot; ${left(b)}</option>`).join('') + '</select>';
   }
   const have = list.filter(b => b.left > 0);
-  return `<select ${attr} title="Which batch to take it from"><option value="">Oldest batch first</option>`
-    + have.map(b => `<option value="${b.n}">${ordinalN(b.n)} batch (${esc(b.label)}) &middot; ${left(b)}</option>`).join('') + '</select>';
+  if (!have.length) return '';
+  return `<select ${attr} title="Which batch to take it from">`
+    + have.map((b, i) => `<option value="${i ? b.n : ''}">${ordinalN(b.n)} batch (${esc(b.label)}) &middot; ${left(b)}</option>`).join('') + '</select>';
 }
 // Fills a form's batch box once that paper's batches are in.
 async function invFillBatchBox(wrapId, itemId, dir, selId) {
   const wrap = document.getElementById(wrapId); if (!wrap) return;
   await invBatchesOf(itemId);
   if (!document.getElementById(wrapId)) return;   // the form was closed meanwhile
-  wrap.innerHTML = `<div class="form-group"><label class="form-label">${dir === 'in' ? 'Which batch?' : 'Take from which batch?'}</label>${invBatchSelectHtml(itemId, dir, '', false).replace('<select ', `<select id="${selId}" `)}</div>`;
+  const box = invBatchSelectHtml(itemId, dir, '', false);
+  wrap.innerHTML = box ? `<div class="form-group"><label class="form-label">${dir === 'in' ? 'Which batch?' : 'Take from which batch?'}</label>${box.replace('<select ', `<select id="${selId}" `)}</div>` : '';
 }
 // A chosen batch with too little in it, said before saving ('' when fine).
 function invBatchShort(itemId, n, sheets) {
