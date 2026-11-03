@@ -803,7 +803,8 @@
   /* Stock In / Stock Out list — text stays 13px; only the air around it
      shrinks, and long values (job-card lists, notes) wrap onto another
      line instead of forcing the table into a sideways scroll. */
-  .sm-compact th, .sm-compact td { padding: 5px 7px !important; }
+  .sm-compact th, .sm-compact td { padding: 5px 5px !important; }   /* tight enough for the Batch column on a laptop */
+  .bulk-batch-cell select, .bulkout-batch-cell select { width: 100%; min-width: 0; max-width: 170px; font-size: 11.5px; padding: 4px; }
   .sm-compact td { word-break: break-word; }
   .ledger-compact { font-size: 12px; }
   .ledger-compact th, .ledger-compact td { padding: 6px 6px; }
@@ -12359,13 +12360,14 @@ function openInvAddStock(id) {
     <div class="form-row">
       <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stock-challan" placeholder="e.g. CH-2026-042"></div>
       <div class="form-group"><label class="form-label">Reason</label>
-        <select id="stock-reason">
+        <select id="stock-reason" onchange="stockInReasonChanged()">
           <option value="delivery">Delivery</option>
           <option value="adjustment">Manual adjustment</option>
           <option value="return">Return / unused stock</option>
         </select>
       </div>
     </div>
+    <div id="stock-batch-wrap"></div>
     ${stockEntryDateHtml('stock-date')}
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stock-notes" placeholder="e.g. Delivered by XYZ Suppliers"></div>
     <div class="modal-actions">
@@ -12373,6 +12375,7 @@ function openInvAddStock(id) {
       <button class="btn btn-primary" style="background:#166534;border-color:#166534;color:#fff;" onclick="saveInvAddStock(${id})">Add</button>
     </div>
   </div>`);
+  invFillBatchBox('stock-batch-wrap', id, 'in', 'stock-batch');
 }
 // Two-way sync in the Add Stock modal — same idea as invOpeningSync.
 function stockQtySync(source, ps) {
@@ -12398,6 +12401,8 @@ async function saveInvAddStock(id) {
     reason: document.getElementById('stock-reason').value,
     notes:  document.getElementById('stock-notes').value.trim(),
     challan_no: (document.getElementById('stock-challan').value || '').trim() || null,
+    // Only a delivery opens / adds to a batch; a return or adjustment counts in the 1st.
+    batch: document.getElementById('stock-reason').value === 'delivery' ? (parseInt((document.getElementById('stock-batch') || {}).value, 10) || null) : null,
   };
   showSaving(true);
   try {
@@ -12451,6 +12456,7 @@ function openInvRemoveStock(id, opts) {
         </select>
       </div>
     </div>
+    <div id="stockout-batch-wrap"></div>
     ${stockEntryDateHtml('stockout-date')}
     <div id="stockout-jobchips-wrap" style="margin-bottom:8px;"></div>
     <div id="stockout-manual-wrap" style="display:none;margin-bottom:8px;">
@@ -12470,6 +12476,7 @@ function openInvRemoveStock(id, opts) {
     </div>
   </div>`);
   stockOutReasonChanged(id);
+  invFillBatchBox('stockout-batch-wrap', id, 'out', 'stockout-batch');
 }
 // Live over/partial warning for the Remove Stock dialog — same banner
 // style + rules as the bulk stock-out row warning. Only fires when the
@@ -12615,6 +12622,9 @@ async function saveInvRemoveStock(id) {
   const entryDate = await readStockEntryDate('stockout-date');
   if (entryDate === false) return;
   const notes = document.getElementById('stockout-notes').value.trim();
+  const batch = parseInt((document.getElementById('stockout-batch') || {}).value, 10) || null;
+  const batchShort = invBatchShort(id, batch, qty);
+  if (batchShort) { await alertDialog({ title: 'Not enough in that batch', message: batchShort, kind: 'warn' }); return; }
 
   // Job Card (pending) reason — route through /api/jobs/:id/issue-stock
   // per selected chip, mirroring the bulk-out job-card branch. This
@@ -12675,10 +12685,10 @@ async function saveInvRemoveStock(id) {
           // a normal issue and failed on jobs already issued).
           const result = (j.source === 'topup' && j.topupId)
             ? await api('POST', `/api/jobs/${j.jobId}/packets-topup/${encodeURIComponent(j.topupId)}/approve`, {
-                splits: [{ item_id: id, sheets: share }], challan_no: challanNo, entry_date: entryDate,
+                splits: [{ item_id: id, sheets: share, batch }], challan_no: challanNo, entry_date: entryDate,
               })
             : await api('POST', `/api/jobs/${j.jobId}/issue-stock`, {
-                splits: [{ item_id: id, sheets: share }],
+                splits: [{ item_id: id, sheets: share, batch }],
                 challan_no: challanNo,
                 entry_date: entryDate,
                 source: j.source || 'primary',
@@ -12722,6 +12732,7 @@ async function saveInvRemoveStock(id) {
     job_card: jobCard,
     challan_no: challanNo,
     entry_date: entryDate,
+    batch,
   };
   showSaving(true);
   try {
@@ -12892,6 +12903,8 @@ function bulkComboPick(prefix, idx, itemId, groupPick) {
   // the numbers match whatever the user has already typed.
   const syncFn = prefix === 'bulk' ? bulkRowSync : bulkOutRowSync;
   if (typeof syncFn === 'function') syncFn(idx, 'packets');
+  if (prefix === 'bulk') bulkInRefreshBatch(idx);
+  else bulkOutRefreshBatches(idx);
   // For bulkout Job Card rows, refresh the multi-select of matching
   // pending jobs so the user sees only jobs waiting on THIS paper group.
   if (prefix === 'bulkout' && typeof bulkOutRefreshJobsForRow === 'function') {
@@ -12930,6 +12943,7 @@ function bulkRowHtml(idx) {
       <td>${bulkComboRowHtml('bulk', idx, false)}</td>
       <td class="col-qty"><input type="number" class="bulk-packets" placeholder="0" min="0" step="any" oninput="bulkRowSync(${idx}, 'packets')"></td>
       <td class="col-qty"><input type="number" class="bulk-qty" placeholder="0" min="1" oninput="bulkRowSync(${idx}, 'sheets')"></td>
+      <td class="bulk-batch-cell"></td>
       <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkRemoveRow(${idx})" title="Remove row">×</button></td>
     </tr>`;
 }
@@ -12969,6 +12983,7 @@ function openBulkStockIn() {
           <th>Paper (search)</th>
           <th style="text-align:right;">Packets / Reams</th>
           <th style="text-align:right;">Sheets</th>
+          <th>Batch</th>
           <th></th>
         </tr>
       </thead>
@@ -13031,7 +13046,8 @@ async function saveBulkStockInRun() {
     if (!qty || qty <= 0) {
       await alertDialog({ title: 'Quantity required', message: 'Every row needs a positive Quantity (or remove the row).', kind: 'warn' }); return;
     }
-    rows.push({ itemId, qty });
+    const bsel = tr.querySelector('.bulk-batch');
+    rows.push({ itemId, qty, batch: bsel && bsel.value ? parseInt(bsel.value, 10) : null });
   }
   if (!rows.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
 
@@ -13040,7 +13056,7 @@ async function saveBulkStockInRun() {
   for (const r of rows) {
     try {
       await api('POST', `/api/inventory/${r.itemId}/transactions`, {
-        change: r.qty, reason: 'delivery', notes: sharedNote, challan_no: ref || null, entry_date: entryDate,
+        change: r.qty, reason: 'delivery', notes: sharedNote, challan_no: ref || null, entry_date: entryDate, batch: r.batch,
       });
       saved++;
     } catch (e) {
@@ -13083,7 +13099,7 @@ function bulkOutRowHtml(idx) {
         </select>
       </td>
       <td>
-        <div class="bulkout-jobchips" data-row="${idx}" style="display:flex;flex-wrap:wrap;gap:4px;min-width:220px;max-width:320px;">
+        <div class="bulkout-jobchips" data-row="${idx}" style="display:flex;flex-wrap:wrap;gap:4px;min-width:170px;max-width:300px;">
           <span style="color:var(--text3);font-size:11px;">(pick a paper first)</span>
         </div>
         <input type="text" class="bulkout-jobcard" placeholder="E-85 or ABC-123" style="display:none;width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
@@ -13091,6 +13107,7 @@ function bulkOutRowHtml(idx) {
       <td class="col-qty">
         <input type="number" class="bulkout-packets" placeholder="0" min="0" step="any" oninput="bulkOutRowSync(${idx}, 'packets')">
         <div class="bulkout-brand-splits" data-row="${idx}" style="display:none;margin-top:6px;font-size:11px;"></div>
+        <div class="bulkout-batch-cell" style="margin-top:6px;"></div>
       </td>
       <td class="col-qty"><input type="number" class="bulkout-qty" placeholder="0" min="1" oninput="bulkOutRowSync(${idx}, 'sheets')"></td>
       <td class="col-del"><button type="button" class="bulk-row-del" onclick="bulkOutRemoveRow(${idx})" title="Remove row">×</button></td>
@@ -13546,6 +13563,7 @@ function bulkOutRemoveRow(idx) {
   if (chips) chips.innerHTML = `<span style="color:var(--text3);font-size:11px;">(pick a paper first)</span>`;
   const splits = row.querySelector('.bulkout-brand-splits');
   if (splits) { splits.style.display = 'none'; splits.innerHTML = ''; }
+  const bc = row.querySelector('.bulkout-batch-cell'); if (bc) bc.innerHTML = '';
   const pkt = row.querySelector('.bulkout-packets'); if (pkt) pkt.readOnly = false;
   const sht = row.querySelector('.bulkout-qty');     if (sht) sht.readOnly = false;
   if (warnRow) warnRow.style.display = 'none';
@@ -13606,7 +13624,7 @@ async function saveBulkStockOutRun() {
         sheets: boxSheets(el, psRow),   // exact sheets when the app filled it
       }))
       .filter(s => Number.isFinite(s.item_id) && Number.isFinite(s.pkts) && s.pkts > 0)
-      .map(s => ({ item_id: s.item_id, sheets: s.sheets }));
+      .map(s => ({ item_id: s.item_id, sheets: s.sheets, batch: bulkOutBatchOf(tr, s.item_id) }));
     if (!itemId && !qty && !jobCard && !selectedJobs.length) continue;
     if (!itemId) {
       await alertDialog({ title: `${rowLabel}: paper required`, message: 'Pick an existing paper for every row (or remove the row).', kind: 'warn' }); return;
@@ -13636,7 +13654,12 @@ async function saveBulkStockOutRun() {
         await alertDialog({ title: `${rowLabel}: not enough stock`, message: `${label}\nOn hand: ${have.toLocaleString()} sheets · Requested: ${qty.toLocaleString()} sheets`, kind: 'warn' }); return;
       }
     }
-    plan.push({ match, reason, jobCard, qty, selectedJobs, brandSplits });
+    const batch = brandSplits.length ? null : bulkOutBatchOf(tr, itemId);
+    const batchShort = brandSplits.length
+      ? brandSplits.map(x => invBatchShort(x.item_id, x.batch, x.sheets)).filter(Boolean).join('\n')
+      : invBatchShort(itemId, batch, qty);
+    if (batchShort) { await alertDialog({ title: `${rowLabel}: not enough in that batch`, message: batchShort, kind: 'warn' }); return; }
+    plan.push({ match, reason, jobCard, qty, selectedJobs, brandSplits, batch });
   }
   if (!plan.length) { await alertDialog({ title: 'Add at least one row with a quantity.', kind: 'warn' }); return; }
   // Manual Job Card / Adjustment rows naming an app job in Pending Stock.
@@ -13710,12 +13733,13 @@ async function saveBulkStockOutRun() {
             const ratio = jobShare / rowTotalSheets;
             jobSplits = p.brandSplits.map((s, i) => ({
               item_id: s.item_id,
+              batch: s.batch,
               sheets: (i === p.brandSplits.length - 1)
                 ? (jobShare - p.brandSplits.slice(0, i).reduce((a, x) => a + Math.round(x.sheets * ratio), 0))
                 : Math.round(s.sheets * ratio),
             })).filter(s => s.sheets > 0);
           } else {
-            jobSplits = [{ item_id: p.match.id, sheets: jobShare }];
+            jobSplits = [{ item_id: p.match.id, sheets: jobShare, batch: p.batch }];
           }
           const result = j.source === 'topup'
             ? await api('POST', `/api/jobs/${j.jobId}/packets-topup/${encodeURIComponent(j.topupId)}/approve`, { splits: jobSplits, challan_no: ref || null, entry_date: entryDate })
@@ -13739,8 +13763,8 @@ async function saveBulkStockOutRun() {
         // reference matches one, and otherwise tags notes with "Job Card:
         // X" itself, same as the single-item Remove Stock flow.
         const txSet = p.brandSplits.length
-          ? p.brandSplits.map(s => ({ item_id: s.item_id, sheets: s.sheets }))
-          : [{ item_id: p.match.id, sheets: p.qty }];
+          ? p.brandSplits.map(s => ({ item_id: s.item_id, sheets: s.sheets, batch: s.batch }))
+          : [{ item_id: p.match.id, sheets: p.qty, batch: p.batch }];
         for (const s of txSet) {
           await api('POST', `/api/inventory/${s.item_id}/transactions`, {
             change: -s.sheets,
@@ -13749,6 +13773,7 @@ async function saveBulkStockOutRun() {
             job_card: p.jobCard || null,
             challan_no: ref || null,
             entry_date: entryDate,
+            batch: s.batch,
           });
         }
         saved++;
@@ -14090,6 +14115,7 @@ async function renderInvHistory(id) {
         ${showBrand ? `<td style="font-weight:600;">${[...new Set(t._parts.map(p => p.item_brand || 'no brand'))].map(esc).join(' + ')}</td>` : ''}
         ${beforeTd}
         <td class="${cls}" style="font-weight:600;${hasBeenReversed?'text-decoration:line-through;':''}">${sign}${packets} ${unit}</td>
+        <td>${t._parts.map(x => txBatchHtml({ ...x, paper_type: x.paper_type || (it && it.paper_type) })).join('')}</td>
         ${afterTd}
         <td>${reasonHtml}${archivedTag}</td>
         <td class="lh-wrap">${challan}</td>
@@ -14106,7 +14132,7 @@ async function renderInvHistory(id) {
     if (!box) return;
     box.innerHTML = txs.length
       ? `<table class="ledger-table ledger-compact ledger-hist">
-           <tr><th>When</th>${showBrand ? '<th>Brand</th>' : ''}<th title="Balance before this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">Before</th><th>Change</th><th title="Balance after this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th class="lh-notes">Notes</th><th></th></tr>
+           <tr><th>When</th>${showBrand ? '<th>Brand</th>' : ''}<th title="Balance before this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">Before</th><th>Change</th><th>Batch</th><th title="Balance after this entry${showBrand ? ' - top: this brand, below: total of all brands' : ''}">After</th><th>Reason</th><th>Challan</th><th>Job</th><th>By</th><th class="lh-notes">Notes</th><th></th></tr>
            ${rows}
          </table>`
       : '<div class="empty">No transactions yet.</div>';
@@ -14425,7 +14451,7 @@ async function reverseStockTxGroup(txIds, itemId) {
 function ordinalN(n) { const v = n % 100, sx = ['th', 'st', 'nd', 'rd']; return n + (sx[(v - 20) % 10] || sx[v] || sx[0]); }
 // As written on a sticker: the batch's number and the year it came in, 02-2026.
 function invBatchNo(n, at) { return String(n).padStart(2, '0') + '-' + localDateISO(at ? new Date(at) : new Date()).slice(0, 4); }
-function invBatchShown(b, at) { return (b && b.batch_label) || invBatchNo(b.n != null ? b.n : b.batch, at || b.first_at || b.created_at); }
+function invBatchShown(b, at) { return (b && (b.label || b.batch_label)) || invBatchNo(b.n != null ? b.n : b.batch, at || b.first_at || b.created_at); }
 function invQtyHtml(sheets, it) {
   const ps = packetSize(it.paper_type || ''), u = packetUnitLabel(it.paper_type || '').toLowerCase();
   const p = sheets / ps;
@@ -14686,6 +14712,92 @@ function invStickerDocHtml(d) {
     window.addEventListener('load',fitAll);
   `;
   return '<!doctype html><html><head><meta charset="utf-8"><title>Paper sticker</title><style>' + css + '</style></head><body>' + d.stickers.map(one).join('') + '<scr' + 'ipt>' + script + '</scr' + 'ipt></body></html>';
+}
+
+// Batch-wise stock in / out (owner, 2026-11-03). The stock forms ask which batch:
+// a Stock In opens a new one or adds to one, a stock-out names one or takes the
+// oldest first. Every entry then records its batch(es) - the Batch column.
+const _invBatchCache = new Map();   // item id -> its batches, for the forms open now
+async function invBatchesOf(itemId) {
+  try { const l = (await api('GET', `/api/inventory/${itemId}/batches`)).batches || []; _invBatchCache.set(itemId, l); return l; }
+  catch (e) { console.error('Batches not loaded', itemId, e); _invBatchCache.set(itemId, []); return []; }
+}
+function invPkts(sheets, paperType) { const p = sheets / packetSize(paperType || ''); return (Number.isInteger(p) ? p : +p.toFixed(2)).toLocaleString(); }
+// The batch picker. in: New batch (default) or Add to one. out: Oldest first
+// (default) or one with stock. withItem: data-item-id for a brand line.
+function invBatchSelectHtml(itemId, dir, cls, withItem) {
+  const it = inventoryAll.find(x => x.id === itemId);
+  const list = _invBatchCache.get(itemId) || [];
+  const u = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
+  const left = b => `${invPkts(b.left, it && it.paper_type)} ${u} left`;
+  const attr = `class="${cls}"${withItem ? ` data-item-id="${itemId}"` : ''}`;
+  if (dir === 'in') {
+    const nextN = list.length ? list[list.length - 1].n + 1 : 1;
+    return `<select ${attr} title="Which batch this stock goes into"><option value="">New batch &mdash; ${ordinalN(nextN)} (${esc(invBatchNo(nextN))})</option>`
+      + list.map(b => `<option value="${b.n}">Add to the ${ordinalN(b.n)} (${esc(b.label)}) &middot; ${left(b)}</option>`).join('') + '</select>';
+  }
+  const have = list.filter(b => b.left > 0);
+  return `<select ${attr} title="Which batch to take it from"><option value="">Oldest batch first</option>`
+    + have.map(b => `<option value="${b.n}">${ordinalN(b.n)} batch (${esc(b.label)}) &middot; ${left(b)}</option>`).join('') + '</select>';
+}
+// Fills a form's batch box once that paper's batches are in.
+async function invFillBatchBox(wrapId, itemId, dir, selId) {
+  const wrap = document.getElementById(wrapId); if (!wrap) return;
+  await invBatchesOf(itemId);
+  if (!document.getElementById(wrapId)) return;   // the form was closed meanwhile
+  wrap.innerHTML = `<div class="form-group"><label class="form-label">${dir === 'in' ? 'Which batch?' : 'Take from which batch?'}</label>${invBatchSelectHtml(itemId, dir, '', false).replace('<select ', `<select id="${selId}" `)}</div>`;
+}
+// A chosen batch with too little in it, said before saving ('' when fine).
+function invBatchShort(itemId, n, sheets) {
+  if (!n) return '';
+  const b = (_invBatchCache.get(itemId) || []).find(x => x.n === +n);
+  if (!b || b.left >= sheets) return '';
+  const it = inventoryAll.find(x => x.id === itemId);
+  return `The ${ordinalN(b.n)} batch (${b.label}) has ${Math.round(b.left).toLocaleString()} sheets left, less than the ${sheets.toLocaleString()} asked for${it ? ' of ' + [it.paper_type, it.size, it.brand].filter(Boolean).join(' · ') : ''}.`;
+}
+// The Batch cell of a ledger row: each batch it moved, with the amount when more than one.
+function txBatchHtml(t) {
+  let alloc = t && t.batch_alloc;
+  if (typeof alloc === 'string') { try { alloc = JSON.parse(alloc); } catch (e) { alloc = null; } }
+  if (Array.isArray(alloc) && alloc.length) {
+    const u = packetUnitLabel(t.paper_type || t.item_paper_type || '').toLowerCase();
+    return alloc.map(a => `<div style="white-space:nowrap;font-weight:700;line-height:1.2;">${esc(a.label || invBatchNo(a.n))}${alloc.length > 1 ? `<div style="font-weight:500;color:var(--text2);font-size:10.5px;margin-bottom:2px;">${invPkts(+a.sheets || 0, t.paper_type || t.item_paper_type)} ${u}</div>` : ''}</div>`).join('');
+  }
+  if (t && t.batch) return `<div style="white-space:nowrap;font-weight:700;">${esc(invBatchShown(t))}</div>`;
+  return '<span style="color:var(--text3)">&mdash;</span>';
+}
+function stockInReasonChanged() {
+  const w = document.getElementById('stock-batch-wrap');
+  if (w) w.style.display = document.getElementById('stock-reason').value === 'delivery' ? '' : 'none';
+}
+// Bulk rows: the batch box once a paper is picked.
+async function bulkInRefreshBatch(idx) {
+  const tr = document.querySelector(`#bulk-rows tr[data-row="${idx}"]`); if (!tr) return;
+  const cell = tr.querySelector('.bulk-batch-cell');
+  const itemId = parseInt(tr.querySelector('.bulk-item').value, 10);
+  if (!cell) return;
+  if (!itemId) { cell.innerHTML = ''; return; }
+  await invBatchesOf(itemId);
+  cell.innerHTML = invBatchSelectHtml(itemId, 'in', 'bulk-batch', false);
+}
+async function bulkOutRefreshBatches(idx) {
+  const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`); if (!tr) return;
+  const cell = tr.querySelector('.bulkout-batch-cell');
+  const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
+  if (!cell) return;
+  const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
+  if (!it) { cell.innerHTML = ''; return; }
+  const members = paperGroupMembers(it);
+  const ids = members.length > 1 ? [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0)).map(m => m.id) : [itemId];
+  await Promise.all(ids.map(invBatchesOf));
+  // One box per brand line when the paper has several brands, in the brand lines' order.
+  cell.innerHTML = ids.length > 1
+    ? ids.map(id => { const m = inventoryAll.find(x => x.id === id); return `<div style="margin-top:3px;"><div style="font-size:10px;font-weight:600;text-transform:uppercase;color:var(--text2);">${esc((m && m.brand) || 'no brand')}</div>${invBatchSelectHtml(id, 'out', 'bulkout-batch', true)}</div>`; }).join('')
+    : invBatchSelectHtml(itemId, 'out', 'bulkout-batch', true);
+}
+function bulkOutBatchOf(tr, itemId) {
+  const el = tr.querySelector(`.bulkout-batch[data-item-id="${itemId}"]`);
+  return el && el.value ? parseInt(el.value, 10) : null;
 }
 
 // ── Stock Report ─────────────────────────────────────────────
@@ -25759,6 +25871,7 @@ function collapseSplitIssuances(rows) {
       // Every brand's total after the LAST part of the split.
       group_balance_after: [...arr].sort((a, b) => (new Date(b.created_at) - new Date(a.created_at)) || (b.id - a.id))[0].group_balance_after,
       history_item_id: first.item_id, // any member opens the shared group history
+      split_parts: [...arr].sort((a, b) => a.id - b.id),   // each brand's own Batch cell
       notes: first.notes,
       split_note: splitNote,
     });
@@ -25881,9 +25994,10 @@ function renderStockMovement(direction, from, to) {
         : date}${lateEntryTagHtml(t)}</td>
       <td style="padding:8px 10px;min-width:120px;">${item || '<span style="color:var(--text3)">(deleted item)</span>'}${groupBadge}</td>
       <td style="padding:8px 10px;font-weight:600;white-space:nowrap;" class="${cls}">${fmt(Math.abs(pkts))} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
+      <td style="padding:8px 10px;">${isGroup && t.split_parts ? t.split_parts.map(x => `<div style="font-size:10px;color:var(--text2);text-transform:uppercase;">${esc(x.item_brand || 'no brand')}</div>${txBatchHtml(x)}`).join('') : txBatchHtml(t)}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${balCell}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${weightCell}</td>
-      <td style="padding:8px 10px;max-width:95px;">${esc(t.reason||'')}${direction === 'in' && !isGroup && t.batch ? `<div style="font-size:11px;font-weight:700;white-space:nowrap;">Batch ${esc(invBatchShown(t))}</div>` : ''}</td>
+      <td style="padding:8px 10px;max-width:95px;">${esc(t.reason||'')}</td>
       ${direction === 'out' ? `<td style="padding:8px 10px;"><div style="min-width:60px;max-width:110px;">${job}</div></td>` : ''}
       <td style="padding:8px 10px;">${canEditRef
         ? wrapEditHtml(t.challan_no || '', '—', `saveTxRef('${direction}', [${ids.join(',')}], 'challan_no', this.value)`, "Challan No. — edit and press Enter; the change is logged in this paper's History", 55, 90)
@@ -25891,7 +26005,7 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;">${canEditRef
         ? wrapEditHtml(txNotesShown(t), '—', `saveTxRef('${direction}', [${ids.join(',')}], 'notes', this.value)`, "Notes — edit and press Enter; the change is logged in this paper's History", 90, 170)
         : `<div style="max-width:170px;">${esc(txNotesShown(t))}</div>`}${smOffcutNoteHtml(direction, t)}</td>
-      <td style="padding:8px 10px;white-space:nowrap;">${direction === 'in' && !isGroup && t.batch && t.item_id && seeBtn('inv_btn_batches') ? `<button class="btn btn-sm" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); openInvSticker(${t.item_id}, ${t.batch})" title="Print this batch's stickers">&#128424; Sticker</button> ` : ''}${reverseCell}</td>
+      <td style="padding:8px 10px;white-space:nowrap;"><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch;">${direction === 'in' && !isGroup && t.batch && t.item_id && seeBtn('inv_btn_batches') ? `<button class="btn btn-sm" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); openInvSticker(${t.item_id}, ${t.batch})" title="Print this batch's stickers">&#128424; Sticker</button>` : ''}${reverseCell}</div></td>
     </tr>`;
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -25908,7 +26022,7 @@ function renderStockMovement(direction, from, to) {
          <thead>
            <tr style="background:var(--bg2);">
              <th class="bulk-th"><input type="checkbox" id="sm-${direction}-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleStockMovementAll('${direction}', this.checked)" title="Select all visible"></th>
-             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th} title="Right after this entry - top: this brand, below: total of every brand of this paper">Balance After</th><th ${th}>Weight</th><th ${th}>Reason</th>${direction === 'out' ? `<th ${th}>Job</th>` : ''}<th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
+             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Batch</th><th ${th} title="Right after this entry - top: this brand, below: total of every brand of this paper">Balance After</th><th ${th}>Weight</th><th ${th}>Reason</th>${direction === 'out' ? `<th ${th}>Job</th>` : ''}<th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
            </tr>
          </thead>
          <tbody>${rows}</tbody>
