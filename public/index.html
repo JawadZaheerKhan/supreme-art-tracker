@@ -6179,7 +6179,7 @@ function ceoDashUsedJobs(sb) {
       + packetTopupsApproved(j).reduce((a, t) => a + (parseFloat(t.qty) || 0), 0);
     if (!pk) continue;
     const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
-    const x = { j, ms, pk, ream: !!(it && isReamPaper(it.paper_type)) };
+    const x = { j, ms, pk, ream: !!(it && isReamPaper(it.paper_type)), offcut: !!(it && it.is_offcut) };
     ((j.particulars || {}).paper_waived ? waived : used).push(x);
   }
   return { used, waived };
@@ -6410,7 +6410,8 @@ function ceoDashFigures() {
   // Packets issued vs used (owner, 2026-11-03), like for like: the jobs that left
   // Printing in the period (now in Coating or later, Ready, Delivered). Used = their
   // job-card packets (+ approved extra packets); Issued = the paper issued to those same
-  // jobs, any date, fresh and offcut. Jobs processed without paper are listed apart.
+  // jobs from the store, any date - fresh paper only (offcut left the store as fresh paper
+  // already; a job printed on offcut still counts in Used). Jobs processed without paper are listed apart.
   // Board counts in packets, paper in reams.
   const uj = ceoDashUsedJobs(ceoDash.sLoaded);
   const iu = { loaded: !!ceoDash.jobIssued, issued: { pkts: 0, reams: 0 }, used: { pkts: 0, reams: 0 }, usedJobs: [], waived: uj.waived.sort(newest) };
@@ -6613,9 +6614,9 @@ function renderCeoDash() {
         const sub = !iu.loaded ? 'loading…' : `${fmt(iu.usedJobs.length)} job${iu.usedJobs.length === 1 ? '' : 's'} printed · ` + (dTxt ? 'issued − used: ' + dTxt : 'issued and used are the same');
         const gap = x => { const d = (x.issued.pkts + x.issued.reams) - x.pk; return Math.abs(d) < 0.005 ? '' : ` · <b style="color:${d > 0 ? '#b45309' : '#b91c1c'};">${d > 0 ? '+' : ''}${fmt(d)}</b>`; };
         return tile('issued-used', 'stock cd-wide', 'Packets issued vs used', value, sub, iu.loaded ? () =>
-          `<div class="cd-sub">The jobs that left Printing in the period (now in Coating or later, Ready or Delivered). Used = their job-card packets (+ approved extra packets). Issued = the paper issued to those same jobs, on any date, fresh and offcut. A job with more issued than its card shows the extra in orange, less in red.</div>`
+          `<div class="cd-sub">The jobs that left Printing in the period (now in Coating or later, Ready or Delivered). Used = their job-card packets (+ approved extra packets). Issued = the fresh paper issued to those same jobs from the store, on any date. Offcut is not counted as issued (it left the store as fresh paper already), but a job printed on offcut counts in Used. A job with more issued than its card shows the extra in orange, less in red.</div>`
           + head(`Jobs · ${fmt(iu.usedJobs.length)} · issued ${u(iu.issued)} · used ${u(iu.used)}`)
-          + list(iu.usedJobs.map(x => row(job(x.j), `issued ${u(x.issued)} · card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'}${gap(x)} · left Printing ${date(x.ms)}`)), 'No job left Printing in this period')
+          + list(iu.usedJobs.map(x => row(job(x.j) + (x.offcut ? ' <small style="color:var(--text2);">(offcut)</small>' : ''), `issued ${u(x.issued)} · card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'}${gap(x)} · left Printing ${date(x.ms)}`)), 'No job left Printing in this period')
           + (iu.waived.length ? head(`Processed without paper · ${fmt(iu.waived.length)} (not counted)`) + list(iu.waived.map(x => row(job(x.j), `card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'} · left Printing ${date(x.ms)}`)), '') : '') : null);
       })()}
       ${tile('paper', 'stock', 'Paper issued', paperVal, f.paperLoaded ? fmt(f.paperKg) + ' kg (fresh paper)' : 'loading…', f.paperLoaded ? () => list(f.paperBy.map(e => row(esc(e.label), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
