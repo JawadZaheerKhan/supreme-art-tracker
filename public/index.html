@@ -6115,7 +6115,7 @@ function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 // (buildSaleReportRows), job states = the Jobs tab's views, production =
 // the Production Report (with its own date filter). "Right now" tiles
 // ignore the date filter. View only.
-const ceoDash = { range: 'this-month', dfrom: '', dto: '', prange: 'today', pdfrom: '', pdto: '', txs: null, imports: null, prod: null, err: '', open: '' };
+const ceoDash = { range: 'this-month', dfrom: '', dto: '', prange: 'today', pdfrom: '', pdto: '', srange: 'this-month', sdfrom: '', sdto: '', txs: null, imports: null, prod: null, err: '', open: '' };
 const CEO_DASH_RANGES = [['today', 'Today'], ['this-week', 'This week'], ['this-month', 'This month'], ['last-month', 'Last month'], ['this-year', 'This year'], ['', 'All time'], ['custom', 'Custom range…']];
 function ceoDashRangeBounds(range, dfrom, dto) {
   if (range === 'today') { const d = localDateISO(); return resolveDateFilterBounds('custom', d, d); }
@@ -6123,12 +6123,35 @@ function ceoDashRangeBounds(range, dfrom, dto) {
 }
 function ceoDashBounds() { return ceoDashRangeBounds(ceoDash.range, ceoDash.dfrom, ceoDash.dto); }
 function ceoDashProdBounds() { return ceoDashRangeBounds(ceoDash.prange, ceoDash.pdfrom, ceoDash.pdto); }
+function ceoDashStockBounds() { return ceoDashRangeBounds(ceoDash.srange, ceoDash.sdfrom, ceoDash.sdto); }
 function ceoDashIso(ms) { return ms == null ? '' : localDateISO(new Date(ms)); }
 function ceoDashRangeText(b) {
   return !b ? 'All time' : (b.from != null && b.to != null && ceoDashIso(b.from) === ceoDashIso(b.to)) ? fmtDMY(ceoDashIso(b.from))
     : `${b.from != null ? fmtDMY(ceoDashIso(b.from)) : '…'} – ${b.to != null ? fmtDMY(ceoDashIso(b.to)) : '…'}`;
 }
-function enterCeoDashboard() { renderCeoDash(); loadCeoDash(); }
+function enterCeoDashboard() { renderCeoDash(); loadCeoDash(); loadCeoDashStock(); }
+// Paper issued has its own date filter (owner, 2026-11-03).
+function setCeoDashStockRange(v) { ceoDash.srange = v; if (v !== 'custom') { ceoDash.sdfrom = ''; ceoDash.sdto = ''; } renderCeoDash(); if (v !== 'custom') loadCeoDashStock(); }
+function setCeoDashStockCustom() {
+  ceoDash.sdfrom = (document.getElementById('cd-sdfrom') || {}).value || '';
+  ceoDash.sdto   = (document.getElementById('cd-sdto')   || {}).value || '';
+  loadCeoDashStock();
+}
+let ceoDashStockSeq = 0;
+async function loadCeoDashStock() {
+  const b = ceoDashStockBounds(), seq = ++ceoDashStockSeq;
+  const qs = new URLSearchParams({ direction: 'out' });
+  if (b && b.from != null) qs.set('from', ceoDashIso(b.from));
+  if (b && b.to != null)   qs.set('to', ceoDashIso(b.to));
+  ceoDash.txs = null; ceoDash.err = '';
+  if (mode === 'dashboard') renderCeoDash();
+  try {
+    const txs = await api('GET', '/api/inventory/transactions?' + qs.toString());
+    if (seq !== ceoDashStockSeq) return;
+    ceoDash.txs = Array.isArray(txs) ? txs : [];
+  } catch (e) { if (seq !== ceoDashStockSeq) return; ceoDash.err = e.message; ceoDash.txs = []; }
+  if (mode === 'dashboard') renderCeoDash();
+}
 function setCeoDashRange(v) { ceoDash.range = v; if (v !== 'custom') { ceoDash.dfrom = ''; ceoDash.dto = ''; } renderCeoDash(); if (v !== 'custom') loadCeoDash(false); }
 function setCeoDashCustom() {
   ceoDash.dfrom = (document.getElementById('cd-dfrom') || {}).value || '';
@@ -6143,21 +6166,10 @@ function setCeoDashProdCustom() {
 }
 // withProd false = only the main date filter changed (Production keeps its own).
 async function loadCeoDash(withProd) {
-  const b = ceoDashBounds();
-  const qs = new URLSearchParams({ direction: 'out' });
-  if (b && b.from != null) qs.set('from', ceoDashIso(b.from));
-  if (b && b.to != null)   qs.set('to', ceoDashIso(b.to));
-  ceoDash.txs = null; ceoDash.err = '';
   renderCeoDash();
   if (withProd !== false) loadCeoDashProd();
-  try {
-    const [txs, imports] = await Promise.all([
-      api('GET', '/api/inventory/transactions?' + qs.toString()),
-      api('GET', '/api/imports').catch(() => []),
-    ]);
-    ceoDash.txs = Array.isArray(txs) ? txs : [];
-    ceoDash.imports = Array.isArray(imports) ? imports : [];
-  } catch (e) { ceoDash.err = e.message; ceoDash.txs = []; }
+  const imports = await api('GET', '/api/imports').catch(() => []);
+  ceoDash.imports = Array.isArray(imports) ? imports : [];
   if (mode === 'dashboard') renderCeoDash();
 }
 // Production = the Production Report's own figures (Daily Production
@@ -6210,7 +6222,10 @@ function ceoDashFigures() {
   const createdMs = j => j.created_at ? new Date(j.created_at).getTime() : (j.dateissued ? new Date(j.dateissued + 'T12:00:00').getTime() : null);
   f.createdList = all.map(j => ({ j, ms: createdMs(j) })).filter(x => inRange(x.ms)).sort(newest);
   f.newJobs = f.createdList.length;
-  f.deliveredList = all.filter(j => isDone(j)).map(j => ({ j, ms: jobDeliveredAnchorMs(j) })).filter(x => inRange(x.ms)).sort(newest);
+  const deliveredAll = all.filter(j => isDone(j)).map(j => ({ j, ms: jobDeliveredAnchorMs(j) })).filter(x => inRange(x.ms)).sort(newest);
+  // Shade cards are not sales, UC or wastage - counted apart, so the jobs match those tiles.
+  f.deliveredList = deliveredAll.filter(x => !x.j.is_shade_card);
+  f.deliveredShade = deliveredAll.filter(x => x.j.is_shade_card);
   f.deliveredJobs = f.deliveredList.length;
   f.uc = 0; f.shipments = 0; f.shipList = [];
   for (const j of all) {
@@ -6350,10 +6365,12 @@ function ceoDashFigures() {
     e[ream ? 'reams' : 'pkts'] += units;
     iu.issuedJobs.set(k, e);
   }
+  const sb = ceoDashStockBounds();
+  const inStock = ms => ms != null && Number.isFinite(ms) && (!sb || ((sb.from == null || ms >= sb.from) && (sb.to == null || ms <= sb.to)));
   for (const j of all) {
     if (j.is_shade_card || (j.stage_index || 0) < 2) continue;
     const ms = jobLeftPrintingMs(j);
-    if (!inRange(ms)) continue;
+    if (!inStock(ms)) continue;
     const pk = (parseFloat((j.particulars || {}).quantity_of_packets) || 0)
       + packetTopupsApproved(j).reduce((a, t) => a + (parseFloat(t.qty) || 0), 0);
     if (!pk) continue;
@@ -6493,7 +6510,8 @@ function renderCeoDash() {
     <div class="cd-sec">Headline <small>· for the period</small></div>
     <div class="cd-grid">
       ${tile('created', 'new', 'Jobs created', fmt(f.newJobs), 'new job cards', () => list(f.createdList.map(x => row(job(x.j), date(x.ms))), 'No jobs created'))}
-      ${tile('delivered', 'del', 'Jobs delivered', fmt(f.deliveredJobs), 'fully delivered', () => list(f.deliveredList.map(x => row(job(x.j), date(x.ms))), 'No jobs delivered'))}
+      ${tile('delivered', 'del', 'Jobs delivered', fmt(f.deliveredJobs), 'fully delivered' + (f.deliveredShade.length ? ` · + ${fmt(f.deliveredShade.length)} shade card${f.deliveredShade.length === 1 ? '' : 's'}` : ''), () => list(f.deliveredList.map(x => row(job(x.j), date(x.ms))), 'No jobs delivered')
+          + (f.deliveredShade.length ? head(`Shade cards · ${fmt(f.deliveredShade.length)} (not in sales, UC or wastage)`) + list(f.deliveredShade.map(x => row(job(x.j), date(x.ms))), '') : ''))}
       ${tile('uc', 'ship', 'UC delivered', fmt(f.uc), `${fmt(f.shipments)} shipment${f.shipments === 1 ? '' : 's'}`, () => list(f.shipList.map(x => row(job(x.j), `${fmt(x.cartons)} · ${date(x.ms)}`)), 'No deliveries'))}
       ${seeMoney ? tile('sales', 'money', 'Sales', fmtRate(f.salesTotal), 'excl. tax', () =>
           head('By company · highest first') + list(f.salesByCompany.map(([k, v]) => row(esc(k), fmtRate(v))), 'No sales')
@@ -6535,7 +6553,8 @@ function renderCeoDash() {
 
     <div class="cd-zone cd-zone-4">
     <div class="cd-sec">Stock</div>
-    <div class="cd-subsec">Paper issued <small>· for the period (top date filter)</small></div>
+    <div class="cd-subsec">Paper issued <small>· its own date filter</small></div>
+    ${ceoDashRangeBar('cd-s', ceoDash.srange, ceoDash.sdfrom, ceoDash.sdto, 'setCeoDashStockRange', 'setCeoDashStockCustom', 'loadCeoDashStock')}
     <div class="cd-grid cd-fill">
       ${(() => {
         const iu = f.issuedUsed;
