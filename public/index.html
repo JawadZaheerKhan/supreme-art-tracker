@@ -6364,6 +6364,35 @@ function ceoDashFigures() {
     byType.set(type, k);
   }
   f.paperByType = [...byType.values()].sort((x, y) => y.kg - x.kg || y.units - x.units);
+  // Packets issued vs used (owner, 2026-11-03). Issued = paper issued to jobs in the
+  // period. Used = the packets on the job card (+ approved extra packets) of every job
+  // that left Printing in the period - now in Coating or any later stage, Ready or
+  // Delivered. Board counts in packets, paper in reams.
+  const iu = { issued: { pkts: 0, reams: 0 }, used: { pkts: 0, reams: 0 }, issuedJobs: new Map(), usedJobs: [] };
+  for (const t of (ceoDash.txs || [])) {
+    if (!(t.change < 0) || t.reason !== 'job-consumed') continue;
+    const units = Math.abs(t.change) / packetSize(t.paper_type || ''), ream = isReamPaper(t.paper_type);
+    iu.issued[ream ? 'reams' : 'pkts'] += units;
+    const k = t.job_id || ('tx' + t.id);
+    const e = iu.issuedJobs.get(k) || { id: t.job_id, name: t.job_name || '', pkts: 0, reams: 0 };
+    e[ream ? 'reams' : 'pkts'] += units;
+    iu.issuedJobs.set(k, e);
+  }
+  for (const j of all) {
+    if (j.is_shade_card || (j.stage_index || 0) < 2) continue;
+    const ms = jobLeftPrintingMs(j);
+    if (!inRange(ms)) continue;
+    const pk = (parseFloat((j.particulars || {}).quantity_of_packets) || 0)
+      + packetTopupsApproved(j).reduce((a, t) => a + (parseFloat(t.qty) || 0), 0);
+    if (!pk) continue;
+    const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+    const ream = !!(it && isReamPaper(it.paper_type));
+    iu.used[ream ? 'reams' : 'pkts'] += pk;
+    iu.usedJobs.push({ j, ms, pk, ream });
+  }
+  iu.usedJobs.sort(newest);
+  iu.issuedJobs = [...iu.issuedJobs.values()].sort((x, y) => (y.pkts + y.reams) - (x.pkts + x.reams));
+  f.issuedUsed = iu;
   // Over-issued: more paper went out than the job needs, decision pending.
   f.overIssued = typeof hasOverIssuePending === 'function' ? live.filter(j => hasOverIssuePending(j)) : [];
   f.prod = ceoDashProduction(ceoDash.prod);
@@ -6375,6 +6404,21 @@ function ceoDashFigures() {
 // machine for See more. null = loading, { error } = could not load (e.g. no
 // Production Report access).
 const CEO_DASH_STAGES = [['printing', 'Printing', 'sheets', 'sheets printed'], ['coatings', 'Coating', 'sheets', 'sheets coated'], ['diecut', 'Die Cutting', 'sheets', 'sheets die-cut'], ['pasting', 'Pasting', 'units', 'units pasted']];
+// When a job left Printing: the moment it reached the next stage it got to (Coating,
+// or later when Coating was skipped). null when no stage after Printing is stamped.
+function jobLeftPrintingMs(j) {
+  for (let i = 2; i < STAGES.length; i++) {
+    const r = j.stages && j.stages[i];
+    if (!r) continue;
+    let ms = r.at ? new Date(r.at).getTime() : NaN;
+    if (!isFinite(ms) && r.time) {
+      const m = String(fmtStageTime(r.time)).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+      if (m) ms = new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0)).getTime();
+    }
+    if (isFinite(ms)) return ms;
+  }
+  return null;
+}
 function ceoDashProduction(data) {
   if (!data) return null;
   if (data.error) return { error: data.error };
@@ -6521,6 +6565,20 @@ function renderCeoDash() {
     <div class="cd-sec">Stock</div>
     <div class="cd-subsec">Paper issued <small>· for the period (top date filter)</small></div>
     <div class="cd-grid cd-fill">
+      ${(() => {
+        const iu = f.issuedUsed;
+        const u = x => [x.pkts ? fmt(x.pkts) + ' pkts' : '', x.reams ? fmt(x.reams) + ' reams' : ''].filter(Boolean).join(' + ') || '0';
+        const diff = { pkts: iu.issued.pkts - iu.used.pkts, reams: iu.issued.reams - iu.used.reams };
+        const dTxt = [diff.pkts ? (diff.pkts > 0 ? '+' : '') + fmt(diff.pkts) + ' pkts' : '', diff.reams ? (diff.reams > 0 ? '+' : '') + fmt(diff.reams) + ' reams' : ''].filter(Boolean).join(' · ');
+        const value = !f.paperLoaded ? '…' : `<span class="cd-pair"><span><b style="color:#1d4ed8;">${u(iu.issued)}</b> <small>issued</small></span><span><b style="color:#15803d;">${u(iu.used)}</b> <small>used</small></span></span>`;
+        const sub = !f.paperLoaded ? 'loading…' : (dTxt ? 'issued − used: ' + dTxt : 'issued and used are the same');
+        return tile('issued-used', 'stock cd-wide', 'Packets issued vs used', value, sub, f.paperLoaded ? () =>
+          `<div class="cd-sub">Issued = paper issued to jobs in the period. Used = the packets on the job card (+ approved extra packets) of the jobs that left Printing in the period: now in Coating or a later stage, Ready or Delivered.</div>`
+          + head(`Used · ${fmt(iu.usedJobs.length)} job${iu.usedJobs.length === 1 ? '' : 's'} · ${u(iu.used)}`)
+          + list(iu.usedJobs.map(x => row(job(x.j), `${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'} · ${esc(STAGES[x.j.stage_index || 0] || '')} · left Printing ${date(x.ms)}`)), 'No job left Printing in this period')
+          + head(`Issued · ${fmt(iu.issuedJobs.length)} job${iu.issuedJobs.length === 1 ? '' : 's'} · ${u(iu.issued)}`)
+          + list(iu.issuedJobs.map(e => row(e.id ? `<a onclick="ceoDashOpenJob(${e.id})">E-${e.id}</a> ${esc(e.name)}` : esc(e.name || '—'), u(e))), 'No paper issued to jobs in this period') : null);
+      })()}
       ${tile('paper', 'stock', 'Paper issued', paperVal, f.paperLoaded ? fmt(f.paperKg) + ' kg (fresh paper)' : 'loading…', f.paperLoaded ? () => list(f.paperBy.map(e => row(esc(e.label), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
       ${tile('paper-type', 'stock', 'Paper by type', f.paperLoaded ? fmt(f.paperByType.length) : '…', f.paperLoaded ? 'paper types issued' : 'loading…', f.paperLoaded ? () => list(f.paperByType.map(e => row(esc(e.type), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
     </div>
