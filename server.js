@@ -4651,6 +4651,25 @@ app.get('/api/reports/job-numbers', requirePermission('rpt_job_number_register',
   }
 });
 
+// Paper issued to these jobs, any date, fresh and offcut, net of reversals - the
+// Dashboard's "Packets issued vs used" (owner, 2026-11-03). Per job and paper type.
+app.post('/api/reports/job-issued', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const ids = [...new Set((Array.isArray(req.body && req.body.ids) ? req.body.ids : []).map(x => parseInt(x, 10)).filter(x => x > 0))].slice(0, 5000);
+    if (!ids.length) return res.json([]);
+    const rows = await sql`
+      SELECT t.job_id, i.paper_type, SUM(-t.change)::float AS sheets
+        FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id
+       WHERE t.job_id = ANY(${ids}) AND t.reason IN ('job-consumed', 'job-auto-offcut') AND t.change < 0
+         AND t.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+       GROUP BY t.job_id, i.paper_type`;
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/reports/production', requirePermission('rpt_production_report', 'view'), async (req, res) => {
   try {
     await dbReady;
