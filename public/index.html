@@ -6584,13 +6584,34 @@ function renderCeoDash() {
       ${(() => {
         const iu = f.issuedUsed;
         const u = x => [x.pkts ? fmt(x.pkts) + ' pkts' : '', x.reams ? fmt(x.reams) + ' reams' : ''].filter(Boolean).join(' + ') || '0';
-        const diff = { pkts: iu.issued.pkts - iu.used.pkts, reams: iu.issued.reams - iu.used.reams };
-        const dTxt = [diff.pkts ? (diff.pkts > 0 ? '+' : '') + fmt(diff.pkts) + ' pkts' : '', diff.reams ? (diff.reams > 0 ? '+' : '') + fmt(diff.reams) + ' reams' : ''].filter(Boolean).join(' · ');
+        // Jobs printed on offcut were issued no fresh paper: left out of the difference, shown apart.
+        const offOf = list => list.reduce((a, x) => { if (x.offcut) a[x.ream ? 'reams' : 'pkts'] += x.pk; return a; }, { pkts: 0, reams: 0 });
+        const signed = (d, un) => Math.abs(d) < 0.005 ? '' : (d > 0 ? '+' : '') + fmt(d) + ' ' + un;
+        const off = offOf(iu.usedJobs);
+        const diff = { pkts: iu.issued.pkts - (iu.used.pkts - off.pkts), reams: iu.issued.reams - (iu.used.reams - off.reams) };
+        const dTxt = [signed(diff.pkts, 'pkts'), signed(diff.reams, 'reams')].filter(Boolean).join(' · ');
+        const offTxt = (off.pkts || off.reams) ? ` · ${u(off)} on offcut` : '';
         const value = !iu.loaded ? '…' : `<span class="cd-pair"><span><b style="color:#1d4ed8;">${u(iu.issued)}</b> <small>issued</small></span><span><b style="color:#15803d;">${u(iu.used)}</b> <small>used</small></span></span>`;
-        const sub = !iu.loaded ? 'loading…' : `${fmt(iu.usedJobs.length)} job${iu.usedJobs.length === 1 ? '' : 's'} printed · ` + (dTxt ? 'issued − used: ' + dTxt : 'issued and used are the same');
-        const gap = x => { const d = (x.issued.pkts + x.issued.reams) - x.pk; return Math.abs(d) < 0.005 ? '' : ` · <b style="color:${d > 0 ? '#b45309' : '#b91c1c'};">${d > 0 ? '+' : ''}${fmt(d)}</b>`; };
+        const sub = !iu.loaded ? 'loading…' : `${fmt(iu.usedJobs.length)} job${iu.usedJobs.length === 1 ? '' : 's'} printed · ` + (dTxt ? 'issued − used: ' + dTxt : 'issued and used are the same') + offTxt;
+        // A job printed on offcut was issued no fresh paper: not short, so no red.
+        const gap = x => { if (x.offcut) return ''; const d = (x.issued.pkts + x.issued.reams) - x.pk; return Math.abs(d) < 0.005 ? '' : ` · <b style="color:${d > 0 ? '#b45309' : '#b91c1c'};">${d > 0 ? '+' : ''}${fmt(d)}</b>`; };
+        // By company (owner, 2026-11-03): issued vs used per company, most used first.
+        const byCo = new Map();
+        for (const x of iu.usedJobs) {
+          const name = String(x.j.client || '').trim() || '—', k = name.toLowerCase();
+          const e = byCo.get(k) || { name, jobs: 0, issued: { pkts: 0, reams: 0 }, used: { pkts: 0, reams: 0 }, off: { pkts: 0, reams: 0 } };
+          e.jobs++; e.issued.pkts += x.issued.pkts; e.issued.reams += x.issued.reams; e.used[x.ream ? 'reams' : 'pkts'] += x.pk;
+          if (x.offcut) e.off[x.ream ? 'reams' : 'pkts'] += x.pk;
+          byCo.set(k, e);
+        }
+        const coDiff = e => { const d = { pkts: e.issued.pkts - (e.used.pkts - e.off.pkts), reams: e.issued.reams - (e.used.reams - e.off.reams) };
+          return [d.pkts, d.reams].some(v => Math.abs(v) >= 0.005) ? ' · ' + [['pkts', d.pkts], ['reams', d.reams]].filter(([, v]) => Math.abs(v) >= 0.005).map(([un, v]) => `<b style="color:${v > 0 ? '#b45309' : '#b91c1c'};">${v > 0 ? '+' : ''}${fmt(v)} ${un}</b>`).join(' ') : ''; };
+        const coRows = [...byCo.values()].sort((a, b) => (b.used.pkts + b.used.reams) - (a.used.pkts + a.used.reams))
+          .map(e => row(`${esc(e.name)} <small style="color:var(--text2);">${fmt(e.jobs)} job${e.jobs === 1 ? '' : 's'}</small>`, `issued ${u(e.issued)} · used ${u(e.used)}${coDiff(e)}${(e.off.pkts || e.off.reams) ? ` · <span style="color:var(--text2);font-weight:500;">${u(e.off)} on offcut</span>` : ''}`));
         return tile('issued-used', 'stock cd-wide', 'Packets issued vs used', value, sub, iu.loaded ? () =>
-          `<div class="cd-sub">The jobs that left Printing in the period (now in Coating or later, Ready or Delivered). Used = their job-card packets (+ approved extra packets). Issued = the fresh paper issued to those same jobs from the store, on any date. Offcut is not counted as issued (it left the store as fresh paper already), but a job printed on offcut counts in Used. A job with more issued than its card shows the extra in orange, less in red.</div>`
+          `<div class="cd-sub">The jobs that left Printing in the period (now in Coating or later, Ready or Delivered). Used = their job-card packets (+ approved extra packets). Issued = the fresh paper issued to those same jobs from the store, on any date. Offcut is not counted as issued (it left the store as fresh paper already), but a job printed on offcut counts in Used. A job with more issued than its card shows the extra in orange, less in red; jobs printed on offcut are left out of the difference and shown as "on offcut".</div>`
+          + head(`By company · ${fmt(byCo.size)}`)
+          + list(coRows, 'No job left Printing in this period')
           + head(`Jobs · ${fmt(iu.usedJobs.length)} · issued ${u(iu.issued)} · used ${u(iu.used)}`)
           + list(iu.usedJobs.map(x => row(job(x.j) + (x.offcut ? ' <small style="color:var(--text2);">(offcut)</small>' : ''), `issued ${u(x.issued)} · card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'}${gap(x)} · left Printing ${date(x.ms)}`)), 'No job left Printing in this period')
           + (iu.waived.length ? head(`Processed without paper · ${fmt(iu.waived.length)} (not counted)`) + list(iu.waived.map(x => row(job(x.j), `card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'} · left Printing ${date(x.ms)}`)), '') : '') : null);
