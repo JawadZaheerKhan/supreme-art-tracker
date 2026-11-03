@@ -6003,6 +6003,7 @@ const BTN_FN_ROWS = {
   openAdjustModal: ['job_btn_adjust', 'yes'], removeAdjustment: ['job_btn_adjust', 'yes'],
   // Inventory
   openInvHistory: ['inv_btn_history', 'view'], openInvHistoryAt: ['inv_btn_history', 'view'],
+  openInvBatches: ['inv_btn_batches', 'view'], openInvSticker: ['inv_btn_batches', 'yes'],
   openInvEdit: ['inv_btn_edit', 'yes'], invBalanceAdjust: ['inv_btn_edit', 'yes'],
   deleteInvItem: ['inv_btn_delete', 'yes'],
   openInvAddStock: ['inv_btn_stock_in', 'yes'], openBulkStockIn: ['inv_btn_stock_in', 'yes'], receiveImport: ['inv_btn_stock_in', 'yes'], bulkReceiveImports: ['inv_btn_stock_in', 'yes'],
@@ -11156,6 +11157,7 @@ function renderInvCardHtml(it) {
         <button class="btn btn-sm btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was corrected today — a manual edit or a Reverse.', it.id) : ''}</button>
+        ${seeBtn('inv_btn_batches') ? `<button class="btn btn-sm" onclick="openInvBatches(${it.id})" title="Batches of this paper and their stickers">Batches</button>` : ''}
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${seeBtn('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
@@ -11188,6 +11190,7 @@ function renderInvBrandRow(it) {
       <div class="ibr-actions">
         <button class="btn btn-sm btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
+        ${seeBtn('inv_btn_batches') ? `<button class="btn btn-sm" onclick="openInvBatches(${it.id})" title="Batches of this brand and their stickers">Batches</button>` : ''}
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${seeBtn('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
       </div>
@@ -14366,6 +14369,278 @@ async function reverseStockTxGroup(txIds, itemId) {
     notify('Reverse failed: ' + e.message);
   }
   showSaving(false);
+}
+
+// ── Paper batches & stickers (owner, 2026-11-03; as the employee app's store) ──
+// The stock already in a paper (one brand) is its 1st batch; each Stock In opens
+// the next. Stock is used oldest batch first, so the server works out what is left
+// in each (GET /api/inventory/:id/batches). A 4 x 3 in sticker per packet / ream:
+// batch no., received date, paper, supplier, brand, P.O. / DC / Invoice, the
+// sheets in each packet and which packet of how many.
+function ordinalN(n) { const v = n % 100, sx = ['th', 'st', 'nd', 'rd']; return n + (sx[(v - 20) % 10] || sx[v] || sx[0]); }
+// As written on a sticker: the batch's number and the year it came in, 02-2026.
+function invBatchNo(n, at) { return String(n).padStart(2, '0') + '-' + localDateISO(at ? new Date(at) : new Date()).slice(0, 4); }
+function invBatchShown(b, at) { return (b && b.batch_label) || invBatchNo(b.n != null ? b.n : b.batch, at || b.first_at || b.created_at); }
+function invQtyHtml(sheets, it) {
+  const ps = packetSize(it.paper_type || ''), u = packetUnitLabel(it.paper_type || '').toLowerCase();
+  const p = sheets / ps;
+  return `<b>${(Number.isInteger(p) ? p : +p.toFixed(2)).toLocaleString()}</b> ${u}<div style="font-size:11px;color:var(--text2);">${Math.round(sheets).toLocaleString()} sheets</div>`;
+}
+async function openInvBatches(id) {
+  const it = inventoryAll.find(x => x.id === id); if (!it) return;
+  let list;
+  try { list = (await api('GET', `/api/inventory/${id}/batches`)).batches || []; }
+  catch (e) { notify('Could not load the batches: ' + e.message); return; }
+  const label = `${it.paper_type}${it.size ? ' · ' + it.size : ''}${it.gsm ? ' · ' + it.gsm + 'gsm' : ''}${it.brand ? ' · ' + it.brand : ''}`;
+  const td = 'padding:7px 9px;border-bottom:1px solid var(--border);vertical-align:top;';
+  const th = 'padding:7px 9px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;background:var(--bg2);';
+  const rows = list.length ? list.map(b => `<tr>
+      <td style="${td}white-space:nowrap;"><b style="font-size:14px;">${esc(invBatchShown(b))}</b><div style="font-size:11px;color:var(--text2);">${ordinalN(b.n)} batch${b.n === 1 && !b.tx_id ? ' · the stock already in the store' : ''}</div></td>
+      <td style="${td}white-space:nowrap;">${b.first_at ? esc(fmtDMY(b.first_at)) : '—'}</td>
+      <td style="${td}white-space:nowrap;text-align:right;">${b.received != null ? invQtyHtml(b.received, it) : '—'}</td>
+      <td style="${td}white-space:nowrap;text-align:right;color:#993C1D;">${b.received != null ? invQtyHtml(Math.max(0, b.received - b.left), it) : '—'}</td>
+      <td style="${td}white-space:nowrap;text-align:right;${b.left > 0 ? 'color:#166534;' : 'color:var(--text3);'}">${b.left > 0 ? invQtyHtml(b.left, it) : 'used up'}</td>
+      <td style="${td}">${[b.challan_no ? 'DC ' + esc(b.challan_no) : '', b.po_no ? 'P.O. ' + esc(b.po_no) : '', b.invoice_no ? 'Inv. ' + esc(b.invoice_no) : ''].filter(Boolean).join('<br>') || '—'}</td>
+      <td style="${td}white-space:nowrap;">${seeBtn('inv_btn_batches') && (b.received != null || b.left > 0) ? `<button class="btn btn-sm" onclick="openInvSticker(${it.id}, ${b.n})" title="Print the stickers for this batch">&#128424; Sticker</button>` : ''}</td>
+    </tr>`).join('')
+    : `<tr><td colspan="7" style="padding:18px;text-align:center;color:var(--text2);">No stock yet. The first Stock In will be the 1st batch.</td></tr>`;
+  openModal(`<div class="modal" style="max-width:900px;" onclick="event.stopPropagation()">
+    <h2>Batches</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:10px;"><b style="color:var(--text)">${esc(label)}</b> · on hand <b>${(+((it.current_balance || 0) / packetSize(it.paper_type || '')).toFixed(2)).toLocaleString()}</b> ${packetUnitLabel(it.paper_type || '').toLowerCase()} (${(it.current_balance || 0).toLocaleString()} sheets)</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">Each Stock In is a new batch. Stock is used oldest batch first.</div>
+    <div class="report-scroll-wrap"><table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr><th style="${th}">Batch No.</th><th style="${th}">Received on</th><th style="${th}text-align:right;">Received</th><th style="${th}text-align:right;">Used</th><th style="${th}text-align:right;">Left</th><th style="${th}">DC / P.O. / Invoice</th><th style="${th}"></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
+}
+
+const _ist = { itemId: 0, n: 1, txId: 0, po: '', inv: '', label: '', autoBatch: '', ref: 0, rows: [] };
+const istVal = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+async function openInvSticker(itemId, n) {
+  const it = inventoryAll.find(x => x.id === itemId); if (!it) return;
+  let b;
+  try { b = ((await api('GET', `/api/inventory/${itemId}/batches`)).batches || []).find(x => x.n === n); }
+  catch (e) { notify('Could not load the batch: ' + e.message); return; }
+  if (!b) { notify('That batch is not there any more.'); return; }
+  const ps = packetSize(it.paper_type || '');
+  const unit = packetUnitLabel(it.paper_type || '').replace(/s$/, '');
+  const total = Math.round(b.received != null && b.received > 0 ? b.received : b.left) || 0;
+  // Whole packets of the usual size, and one more line for a part packet.
+  const full = Math.floor(total / ps), part = total - full * ps;
+  const rows = [];
+  if (full) rows.push({ q: String(ps), n: String(full) });
+  if (part) rows.push({ q: String(part), n: '1' });
+  if (!rows.length) rows.push({ q: String(ps), n: '1' });
+  const date = b.first_at ? localDateISO(new Date(b.first_at)) : localDateISO();
+  Object.assign(_ist, { itemId, n, txId: b.tx_id || 0, po: b.po_no || '', inv: b.invoice_no || '', label: b.batch_label || '', ref: total, rows, autoBatch: invBatchNo(n, b.first_at) });
+  const desc = `${it.paper_type || ''}${it.size ? ' ' + it.size : ''}${it.gsm ? ' ' + it.gsm + ' gsm' : ''}`.trim();
+  openModal(`<div class="modal" style="max-width:900px;" onclick="event.stopPropagation()">
+    <h2>Print Sticker</h2>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px;"><b style="color:var(--text)">${esc(desc)}</b>${it.brand ? ' · ' + esc(it.brand) : ''} · <b>${ordinalN(n)} batch</b></div>
+    <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;">
+      <div style="flex:1 1 360px;min-width:0;">
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">Batch No.</label><input type="text" id="ist-batch" value="${esc(_ist.label || _ist.autoBatch)}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">Received on</label><input type="date" id="ist-date" value="${date}" onchange="istDateChanged()"></div>
+        </div>
+        <div class="form-group"><label class="form-label">Description</label><input type="text" id="ist-desc" value="${esc(desc)}" oninput="istRefresh()"></div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">Supplier</label><input type="text" id="ist-supplier" value="${esc(it.supplier || '')}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">Brand</label><input type="text" id="ist-brand" value="${esc(it.brand || '')}" oninput="istRefresh()"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">P.O. #</label><input type="text" id="ist-po" value="${esc(_ist.po)}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">DC #</label><input type="text" id="ist-dc" value="${esc(b.challan_no || '')}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">Invoice #</label><input type="text" id="ist-inv" value="${esc(_ist.inv)}" oninput="istRefresh()"></div>
+        </div>
+        <div class="form-group"><label class="form-label" id="ist-qlabel">Sheets in each ${esc(unit.toLowerCase())} × how many</label>
+          <div id="ist-rows" style="display:flex;flex-direction:column;gap:6px;"></div>
+          <button type="button" class="btn btn-sm" style="margin-top:6px;" onclick="istAddRow()">+ Another quantity</button>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">Each one is a</label><input type="text" id="ist-per" value="${esc(unit)}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">Print from no.</label><input type="number" id="ist-from" min="1" placeholder="1" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">to no.</label><input type="number" id="ist-to" min="1" placeholder="last" oninput="istRefresh()"></div>
+        </div>
+        <div id="ist-hint" style="font-size:12px;color:var(--text2);"></div>
+      </div>
+      <div style="flex:0 0 auto;">
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">Preview (the first sticker)</div>
+        <iframe id="ist-preview" style="width:388px;height:292px;border:1px solid var(--border);background:#fff;" title="Sticker preview"></iframe>
+      </div>
+    </div>
+    <div class="modal-actions" style="position:sticky;bottom:-1px;background:var(--bg);padding-top:10px;z-index:1;">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="printInvSticker()">&#128424; Print</button>
+    </div>
+  </div>`);
+  istRenderRows();
+  istRefresh();
+}
+// Changing the date moves the year in a batch number nobody has typed over.
+function istDateChanged() {
+  const el = document.getElementById('ist-batch');
+  if (el && el.value.trim() === _ist.autoBatch) {
+    _ist.autoBatch = String(_ist.n).padStart(2, '0') + '-' + (istVal('ist-date') || localDateISO()).slice(0, 4);
+    el.value = _ist.autoBatch;
+  }
+  istRefresh();
+}
+function istRenderRows() {
+  const el = document.getElementById('ist-rows'); if (!el) return;
+  el.innerHTML = _ist.rows.map((r, i) => `<div style="display:flex;gap:6px;align-items:center;">
+    <input type="number" min="0" step="any" placeholder="Sheets in each" value="${esc(r.q)}" oninput="istRow(${i}, 'q', this.value)" style="flex:1;min-width:0;">
+    <span style="color:var(--text2);">×</span>
+    <input type="number" min="1" step="1" placeholder="How many" value="${esc(r.n)}" oninput="istRow(${i}, 'n', this.value)" style="max-width:110px;">
+    ${_ist.rows.length > 1 ? `<button type="button" class="btn btn-sm" title="Remove this line" onclick="istRemoveRow(${i})">&#10005;</button>` : ''}
+  </div>`).join('');
+}
+function istRow(i, k, v) { _ist.rows[i][k] = v; istRefresh(); }
+function istAddRow() { _ist.rows.push({ q: '', n: '1' }); istRenderRows(); istRefresh(); }
+function istRemoveRow(i) { _ist.rows.splice(i, 1); istRenderRows(); istRefresh(); }
+// The stickers the window describes: one per packet, numbered on from line to line,
+// then cut to the range. strict (printing): a half-filled line is an error.
+function istPlan(strict) {
+  const rows = _ist.rows.map(r => ({ q: parseFloat(r.q), n: parseInt(r.n, 10) }));
+  const ok = rows.filter(r => r.q > 0 && r.n >= 1);
+  if (strict && ok.length !== rows.length) return { error: 'Every line needs the sheets in each and how many (at least 1), or remove it.' };
+  const all = [];
+  let no = 0;
+  ok.forEach(r => { for (let k = 0; k < r.n; k++) { no++; all.push({ no, qty: r.q }); } });
+  const total = all.length;
+  if (!total) return { error: 'Enter the sheets in each and how many.' };
+  if (total > 500) return { error: `That is ${total} stickers; the most at a time is 500.` };
+  let from = parseInt(istVal('ist-from'), 10), to = parseInt(istVal('ist-to'), 10);
+  if (!(from >= 1)) from = 1;
+  if (!(to >= 1)) to = total;
+  if (from > to || to > total) return { error: `The range has to sit within 1 to ${total}, with From no more than To.` };
+  return { stickers: all.filter(x => x.no >= from && x.no <= to), total, from, to, sum: ok.reduce((t, r) => t + r.q * r.n, 0) };
+}
+function istData(stickers, total) {
+  return { batchNo: istVal('ist-batch'), date: (istVal('ist-date') || '').split('-').reverse().join('-'), desc: istVal('ist-desc'),
+    supplier: istVal('ist-supplier'), brand: istVal('ist-brand'), po: istVal('ist-po'), dc: istVal('ist-dc'), inv: istVal('ist-inv'),
+    per: istVal('ist-per'), stickers, total };
+}
+function istRefresh() {
+  const per = istVal('ist-per') || 'packet';
+  const ql = document.getElementById('ist-qlabel'); if (ql) ql.textContent = `Sheets in each ${per.toLowerCase()} × how many`;
+  const hint = document.getElementById('ist-hint'), prev = document.getElementById('ist-preview');
+  if (!hint || !prev) return;
+  const plan = istPlan(false);
+  if (plan.error) { hint.style.color = 'var(--text2)'; hint.textContent = plan.error; prev.srcdoc = ''; return; }
+  const off = _ist.ref > 0 && Math.abs(plan.sum - _ist.ref) > 0.5;
+  hint.style.color = off ? '#B45309' : 'var(--text2)';
+  hint.textContent = `${plan.stickers.length} sticker${plan.stickers.length === 1 ? '' : 's'}`
+    + (plan.stickers.length !== plan.total ? ` (nos. ${plan.from} to ${plan.to} of ${plan.total})` : '')
+    + `. They add up to ${Math.round(plan.sum).toLocaleString()} sheets`
+    + (_ist.ref > 0 ? (off ? `; this batch is ${_ist.ref.toLocaleString()} sheets, so they do not match.` : ', the same as this batch.') : '.');
+  prev.srcdoc = invStickerDocHtml(istData([plan.stickers[0]], plan.total));
+}
+async function printInvSticker() {
+  if (!istVal('ist-date')) { await alertDialog({ title: 'Date required', message: 'Choose the day the stock was received.', kind: 'warn' }); return; }
+  if (!istVal('ist-desc')) { await alertDialog({ title: 'Description required', message: 'Type what the sticker is for.', kind: 'warn' }); return; }
+  const plan = istPlan(true);
+  if (plan.error) { await alertDialog({ title: 'Check the stickers', message: plan.error, kind: 'warn' }); return; }
+  const n = plan.stickers.length;
+  if (n > 50 && !await confirmDialog({ title: `Print ${n} stickers?`, message: `That is ${n} labels, one page each.`, confirmText: 'Print' })) return;
+  const html = invStickerDocHtml(istData(plan.stickers, plan.total));
+  // The P.O., Invoice and a typed-over Batch No. stay with the Stock In, so a reprint has them.
+  const po = istVal('ist-po'), inv = istVal('ist-inv'), bn = istVal('ist-batch');
+  const label = bn && bn !== _ist.autoBatch ? bn : '';
+  if (_ist.txId && (po !== _ist.po || inv !== _ist.inv || label !== _ist.label)) {
+    try { await api('PUT', `/api/inventory/transactions/${_ist.txId}/sticker`, { po_no: po, invoice_no: inv, batch_label: label }); }
+    catch (e) { console.error('Sticker numbers not kept (printing anyway):', e); }
+  }
+  closeModal();
+  invPrintStickerDoc(html);
+}
+// Printed from a hidden frame, so no pop-up is needed; 4 x 3 in, one sticker a page.
+function invPrintStickerDoc(html) {
+  const old = document.getElementById('inv-sticker-frame'); if (old) old.remove();
+  const fr = document.createElement('iframe');
+  fr.id = 'inv-sticker-frame';
+  fr.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
+  document.body.appendChild(fr);
+  const d = fr.contentWindow.document;
+  d.open(); d.write(html); d.close();
+  const go = () => {
+    try { if (fr.contentWindow.fitAll) fr.contentWindow.fitAll(); fr.contentWindow.focus(); fr.contentWindow.print(); }
+    catch (e) { alertDialog({ title: 'Could not print', message: 'The sticker could not be sent to the printer: ' + e.message, kind: 'warn' }); }
+  };
+  const img = d.querySelector('img');
+  if (img && !img.complete) img.onload = img.onerror = () => setTimeout(go, 100);
+  else setTimeout(go, 200);
+}
+function invStickerDocHtml(d) {
+  const icon = {
+    batch: '<path d="M4 7h16v13H4zM8 7V4h8v3M9 12h6"/>',
+    desc: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 12h7M9 16h7"/>',
+    supplier: '<path d="M2 6h12v10H2zM14 9h4l3 3v4h-7z"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/>',
+    brand: '<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="8.5" r="1.3"/>',
+    po: '<path d="M6 3h12v18H6z"/><path d="M9 8h6M9 12h6M9 16h4"/>',
+    dc: '<path d="M3 7l9-4 9 4v10l-9 4-9-4z"/><path d="M3 7l9 4 9-4M12 11v10"/>',
+    inv: '<path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z"/><path d="M8 8h8M8 12h8"/>',
+    qty: '<path d="M3 8l9-5 9 5v9l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v9"/>',
+    cas: '<rect x="3" y="3" width="8" height="8"/><rect x="13" y="3" width="8" height="8"/><rect x="3" y="13" width="8" height="8"/><rect x="13" y="13" width="8" height="8"/>',
+  };
+  const ic = k => '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="#111" stroke-width="2" stroke-linejoin="round" stroke-linecap="round">' + icon[k] + '</svg>';
+  const cell = (k, label, value, cls) => '<div class="cell ' + (cls || '') + '"><div class="l">' + ic(k) + '<span>' + label + '</span></div><div class="v">' + value + '</div></div>';
+  const per = esc((d.per || 'packet').toUpperCase());
+  const one = s => '<div class="sticker">'
+    + '<div class="head"><div class="logo"><img src="' + location.origin + '/logo-urdu.png" alt=""></div>'
+    + '<div class="batch"><span class="bl">' + ic('batch') + 'BATCH NO.</span><b class="fit0">' + esc(d.batchNo) + '</b></div>'
+    + '<div class="date"><small>RECEIVED ON</small><b>' + esc(d.date) + '</b></div></div>'
+    + '<div class="line desc">' + cell('desc', 'DESCRIPTION', '<span class="clamp">' + esc(d.desc) + '</span>', 'desc') + '</div>'
+    + '<div class="line">' + cell('supplier', 'SUPPLIER', '<span class="fit2">' + esc(d.supplier) + '</span>') + cell('brand', 'BRAND', '<span class="fit2">' + esc(d.brand) + '</span>') + '</div>'
+    + '<div class="line">' + cell('po', 'P.O. #', '<span class="fit2">' + esc(d.po) + '</span>') + cell('dc', 'DC #', '<span class="fit2">' + esc(d.dc) + '</span>') + cell('inv', 'INVOICE #', '<span class="fit2">' + esc(d.inv) + '</span>') + '</div>'
+    + '<div class="line">' + cell('qty', 'QUANTITY / ' + per, '<span class="fit1">' + Math.round(s.qty).toLocaleString() + '<i>sheets</i></span>', 'qty') + cell('cas', per + ' #', '<span class="fit1">' + s.no + ' OF ' + d.total + '</span>') + '</div>'
+    + '</div>';
+  const css = `
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;background:#fff;color:#000;font-family:Arial,Helvetica,sans-serif}
+    .sticker{width:4in;height:3in;background:#fff;border:2px solid #000;display:flex;flex-direction:column;overflow:hidden;break-after:page;page-break-after:always}
+    .sticker:last-child{break-after:auto;page-break-after:auto}
+    .head{height:0.64in;display:flex;align-items:stretch;border-bottom:2px solid #000;flex:none}
+    .logo{width:1.2in;display:flex;align-items:center;justify-content:center;padding:0 6px;border-right:2px solid #000}
+    .logo img{width:100%;height:auto;max-height:0.54in;object-fit:contain}
+    .batch{flex:1;min-width:0;padding:4px 8px 2px;display:flex;flex-direction:column;justify-content:center}
+    .bl{display:flex;align-items:center;gap:4px;font-size:9px;font-weight:700;letter-spacing:.04em;line-height:1.1}
+    .batch b{display:block;font-size:27px;font-weight:900;letter-spacing:.3px;line-height:1.1;white-space:nowrap}
+    .date{border-left:2px solid #000;padding:0 8px;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#111;color:#fff;min-width:1.22in;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .date small{font-size:8.5px;letter-spacing:.1em}
+    .date b{font-size:19px;font-weight:900;margin-top:1px;white-space:nowrap}
+    .line{flex:1;display:flex;border-bottom:1.5px solid #000;min-height:0}
+    .line:last-child{border-bottom:none}
+    .line.desc{flex:1.3}
+    .cell{flex:1;min-width:0;padding:3px 8px 2px;border-right:1.5px solid #000;display:flex;flex-direction:column;justify-content:space-between}
+    .cell:last-child{border-right:none}
+    .l{display:flex;align-items:center;gap:4px;font-size:9px;font-weight:700;letter-spacing:.04em;line-height:1;flex:none;white-space:nowrap}
+    .ic{width:11px;height:11px;flex:none}
+    .v{font-size:18px;font-weight:800;line-height:1.05;overflow:hidden;white-space:nowrap;flex:1;min-height:0;display:flex;align-items:flex-end}
+    .v .fit1{display:inline-block;white-space:nowrap}
+    .v .fit2{display:block;width:100%;white-space:normal;overflow-wrap:anywhere}
+    .cell.desc .v{white-space:normal;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;flex:1;min-height:0;font-size:16px}
+    .cell.desc .clamp{display:block;overflow:hidden;font-size:17px;line-height:1.16;padding-bottom:1px;word-break:break-word}
+    .cell.qty .v{font-size:30px;font-weight:900}
+    .cell.qty .v i{font-style:normal;font-size:.5em;font-weight:700;margin-left:5px}
+    @page{size:4in 3in;margin:0}
+  `;
+  // Long text shrinks to fit its box instead of being cut off.
+  const script = `
+    function fitWidth(el,box,min){el.style.fontSize='';var size=parseFloat(getComputedStyle(el).fontSize);while(el.scrollWidth>box.clientWidth+0.5&&size>min){size-=0.5;el.style.fontSize=size+'px';}}
+    function fitWrap(el,box,min){el.style.fontSize='';var size=parseFloat(getComputedStyle(el).fontSize);while((el.scrollHeight>box.clientHeight+0.5||el.scrollWidth>box.clientWidth+0.5)&&size>min){size-=0.5;el.style.fontSize=size+'px';}}
+    function fitDesc(clamp){var v=clamp.parentElement;clamp.style.fontSize='';var size=parseFloat(getComputedStyle(clamp).fontSize);var room=v.clientHeight-3;while((clamp.scrollHeight>room+0.5||clamp.scrollHeight>size*1.16*3+2)&&size>9){size-=0.5;clamp.style.fontSize=size+'px';}}
+    function fitAll(){document.querySelectorAll('.sticker').forEach(function(s){
+      s.querySelectorAll('.fit0').forEach(function(el){fitWidth(el,el.parentElement,12);});
+      s.querySelectorAll('.fit1').forEach(function(el){fitWidth(el,el.parentElement,8);});
+      s.querySelectorAll('.fit2').forEach(function(el){fitWrap(el,el.parentElement,9);});
+      s.querySelectorAll('.clamp').forEach(fitDesc);
+    });}
+    window.addEventListener('load',fitAll);
+  `;
+  return '<!doctype html><html><head><meta charset="utf-8"><title>Paper sticker</title><style>' + css + '</style></head><body>' + d.stickers.map(one).join('') + '<scr' + 'ipt>' + script + '</scr' + 'ipt></body></html>';
 }
 
 // ── Stock Report ─────────────────────────────────────────────
@@ -25563,7 +25838,7 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;font-weight:600;white-space:nowrap;" class="${cls}">${fmt(Math.abs(pkts))} ${unit}<br><span style="font-weight:500;font-size:11px;opacity:0.85;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
       <td style="padding:8px 10px;white-space:nowrap;">${balCell}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${weightCell}</td>
-      <td style="padding:8px 10px;max-width:95px;">${esc(t.reason||'')}</td>
+      <td style="padding:8px 10px;max-width:95px;">${esc(t.reason||'')}${direction === 'in' && !isGroup && t.batch ? `<div style="font-size:11px;font-weight:700;white-space:nowrap;">Batch ${esc(invBatchShown(t))}</div>` : ''}</td>
       ${direction === 'out' ? `<td style="padding:8px 10px;"><div style="min-width:60px;max-width:110px;">${job}</div></td>` : ''}
       <td style="padding:8px 10px;">${canEditRef
         ? wrapEditHtml(t.challan_no || '', '—', `saveTxRef('${direction}', [${ids.join(',')}], 'challan_no', this.value)`, "Challan No. — edit and press Enter; the change is logged in this paper's History", 55, 90)
@@ -25571,7 +25846,7 @@ function renderStockMovement(direction, from, to) {
       <td style="padding:8px 10px;">${canEditRef
         ? wrapEditHtml(txNotesShown(t), '—', `saveTxRef('${direction}', [${ids.join(',')}], 'notes', this.value)`, "Notes — edit and press Enter; the change is logged in this paper's History", 90, 170)
         : `<div style="max-width:170px;">${esc(txNotesShown(t))}</div>`}${smOffcutNoteHtml(direction, t)}</td>
-      <td style="padding:8px 10px;white-space:nowrap;">${reverseCell}</td>
+      <td style="padding:8px 10px;white-space:nowrap;">${direction === 'in' && !isGroup && t.batch && t.item_id && seeBtn('inv_btn_batches') ? `<button class="btn btn-sm" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); openInvSticker(${t.item_id}, ${t.batch})" title="Print this batch's stickers">&#128424; Sticker</button> ` : ''}${reverseCell}</td>
     </tr>`;
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -39881,6 +40156,7 @@ const ACC_INVENTORY_TAB_ROWS = [
   { key: 'inv_btn_add_import',      type: 'button' },
   { key: 'inv_btn_reverse',         type: 'button-30day' },
   { key: 'inv_btn_dismiss_pending', type: 'button' },
+  { key: 'inv_btn_batches',         type: 'button' },
 ];
 // Reports tab — every row is 2-state (view/hidden). Reports are read-only,
 // so there's no "edit" tier to give any of them.

@@ -323,7 +323,9 @@ function getDb() {
 // Bumped again for the Cost Report: finance.cost_settings and its Access Register rows.
 // Bumped again for the Cost Report's per-job board rates (finance.cost_board_rates).
 // Bumped again for Daily Production's corrected values (daily_production_notes.corrected).
-const SCHEMA_VERSION = 'v2026-11-02-dp-corrected';
+// Bumped again for paper batches (inventory_transactions.batch / po_no / invoice_no /
+// batch_label) and the Access Register row inv_btn_batches (2026-11-03).
+const SCHEMA_VERSION = 'v2026-11-03-batches';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -474,6 +476,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // group already uses, kept as this row's own extra level too.
   inv_btn_reverse:         { label: 'Reverse button', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
   inv_btn_dismiss_pending: { label: 'Pending Stock — Dismiss button (remove a delivered job from the pending queue)', levels: { admin: 'yes' } },
+  inv_btn_batches:         { label: 'Batches button — the Batch window (View) and Print sticker (Edit; also keeps the P.O. / Invoice / Batch No. typed on the sticker)', levels: { admin: 'yes', store_manager: 'yes', ceo: 'view', production_manager: 'view', finance: 'view' } },
 
   // Access Register — Reports tab. All 2-state (view/hidden) — reports are
   // read-only, there's no "edit" concept for any of them. Same "not wired
@@ -1148,6 +1151,12 @@ async function initDb() {
     // it was typed in - the audit trail. NULL = entered on the day itself.
     await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ`;
     await sql`CREATE INDEX IF NOT EXISTS inventory_tx_challan_idx ON inventory_transactions(challan_no) WHERE challan_no IS NOT NULL`;
+    // Paper batches (2026-11-03): the batch a Stock In opened (see BATCH_REASONS), and
+    // the P.O. / Invoice No. and a typed-over Batch No. its sticker carries.
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS batch INTEGER`;
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS po_no TEXT`;
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS invoice_no TEXT`;
+    await sql`ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS batch_label TEXT`;
     // Soft delete: "Delete from history" (Manual Consumption, Stock In/Out
     // bulk delete) moves a row to the Archive instead of wiping it outright,
     // same 30-day-retention pattern as jobs/imports. Never touches
@@ -5370,6 +5379,41 @@ function stockEntryInstant(rawDate) {
   if (v === today) return { at: null };
   return { at: businessInstantForDate(v), date: v };
 }
+// Paper batches (owner, 2026-11-03, as the employee app's store keeps them): the
+// stock already in an item is its 1st batch and each Stock In opens the next one
+// (a brand-new item's first Stock In is the 1st). Nothing is tagged on the way out:
+// stock is used oldest batch first, so what is left sits in the newest batches.
+const BATCH_REASONS = new Set(['delivery', 'import-received']);
+async function itemBatches(sql, itemId) {
+  const [item] = await sql`SELECT id, current_balance FROM inventory_items WHERE id = ${itemId}`;
+  if (!item) return null;
+  const rows = await sql`
+    SELECT t.id, t.batch, t.change, t.created_at, t.challan_no, t.po_no, t.invoice_no, t.batch_label
+      FROM inventory_transactions t
+     WHERE t.item_id = ${itemId} AND t.batch IS NOT NULL AND t.change > 0
+       AND t.reverses_tx_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+     ORDER BY t.batch, t.created_at, t.id`;
+  const byN = new Map();
+  for (const r of rows) {
+    const n = r.batch;
+    if (!byN.has(n)) byN.set(n, { n, tx_id: r.id, received: 0, first_at: r.created_at, challan_no: r.challan_no || '', po_no: r.po_no || '', invoice_no: r.invoice_no || '', batch_label: r.batch_label || '' });
+    byN.get(n).received += parseFloat(r.change) || 0;
+  }
+  const balance = parseFloat(item.current_balance) || 0;
+  if (!byN.size && !(balance > 0)) return [];
+  if (!byN.has(1)) byN.set(1, { n: 1, tx_id: null, received: null, first_at: null, challan_no: '', po_no: '', invoice_no: '', batch_label: '' });
+  const list = [...byN.values()].sort((a, b) => a.n - b.n);
+  // Newest first, each later batch keeps up to what it received; the 1st batch is the rest.
+  let rest = balance;
+  for (const b of [...list].reverse()) {
+    if (b.n === 1) continue;
+    b.left = Math.max(0, Math.min(b.received, rest));
+    rest -= b.left;
+  }
+  list[0].left = Math.max(0, rest);
+  return list;
+}
 async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes, user, reversesTxId, pairedTxId, challanNo, occurredAt }) {
   if (!itemId || !change) return null;
   if (change < 0) {
@@ -5384,11 +5428,17 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
   const challan   = challanNo && String(challanNo).trim() ? String(challanNo).trim() : null;
   // Backdated (occurredAt): created_at = that day, recorded_at = now.
   const occurredIso = occurredAt ? new Date(occurredAt).toISOString() : null;
+  const opensBatch = change > 0 && !reversesTxId && BATCH_REASONS.has(reason);   // see itemBatches
   const inserted = await sql`
-    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, actor_name, reverses_tx_id, paired_tx_id, challan_no, created_at, recorded_at)
+    INSERT INTO inventory_transactions (item_id, change, reason, job_id, notes, user_id, user_email, actor_name, reverses_tx_id, paired_tx_id, challan_no, created_at, recorded_at, batch)
     VALUES (${itemId}, ${change}, ${reason}, ${jobId || null}, ${notes || null}, ${userId}, ${userEmail}, ${actorName}, ${reversesTxId || null}, ${pairedTxId || null}, ${challan},
             COALESCE(${occurredIso}::timestamptz, NOW()),
-            CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
+            CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END,
+            CASE WHEN NOT ${opensBatch}::boolean THEN NULL
+                 WHEN EXISTS (SELECT 1 FROM inventory_transactions x WHERE x.item_id = ${itemId})
+                   OR COALESCE((SELECT current_balance FROM inventory_items WHERE id = ${itemId}), 0) > 0
+                 THEN GREATEST(1, COALESCE((SELECT MAX(batch) FROM inventory_transactions WHERE item_id = ${itemId}), 1)) + 1
+                 ELSE 1 END)
     RETURNING id
   `;
   // Stock coming back into a deleted item (a reversal, a receive) brings it back to Inventory.
@@ -11788,6 +11838,35 @@ app.post('/api/inventory/tx-ref', requireAuth, async (req, res) => {
     }
     const rows = await sql`SELECT id, challan_no, notes, user_notes, created_at, recorded_at FROM inventory_transactions WHERE id = ANY(${ids})`;
     res.json({ ok: true, rows });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Batches of one paper item (Batch window, stickers) - see itemBatches.
+app.get('/api/inventory/:id/batches', requireAuth, async (req, res) => {
+  try {
+    if (!userHasBtn(req.user, 'inv_btn_batches', 'view')) return res.status(403).json({ error: 'Not allowed' });
+    await dbReady;
+    const list = await itemBatches(getDb(), parseInt(req.params.id, 10));
+    if (!list) return res.status(404).json({ error: 'Inventory item not found' });
+    res.json({ batches: list });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// The P.O. / Invoice No. and a typed-over Batch No. from a batch's sticker, kept on
+// the Stock In that opened it so a reprint has them ('' batch_label = the automatic one).
+app.put('/api/inventory/transactions/:id/sticker', requireAuth, async (req, res) => {
+  try {
+    if (!userHasBtn(req.user, 'inv_btn_batches')) return res.status(403).json({ error: 'Not allowed' });
+    await dbReady;
+    const sql = getDb();
+    const txId = parseInt(req.params.id, 10);
+    const clean = v => String(v == null ? '' : v).trim().slice(0, 80) || null;
+    const rows = await sql`
+      UPDATE inventory_transactions
+         SET po_no = ${clean(req.body.po_no)}, invoice_no = ${clean(req.body.invoice_no)}, batch_label = ${clean(req.body.batch_label)}
+       WHERE id = ${txId} AND batch IS NOT NULL
+      RETURNING id`;
+    if (!rows[0]) return res.status(404).json({ error: 'That Stock In has no batch.' });
+    res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
