@@ -14459,9 +14459,9 @@ async function reverseStockTxGroup(txIds, itemId) {
 // ── Paper batches & stickers (owner, 2026-11-03; as the employee app's store) ──
 // The stock already in a paper (one brand) is its 1st batch; each Stock In opens
 // the next. Stock is used oldest batch first, so the server works out what is left
-// in each (GET /api/inventory/:id/batches). A 4 x 3 in sticker per packet / ream:
-// batch no., received date, paper, supplier, brand, P.O. / DC / Invoice, the
-// sheets in each packet and which packet of how many.
+// in each (GET /api/inventory/:id/batches). A 4 x 3 in sticker per pallet: batch
+// no., received date, paper, supplier, brand, DC #, the packets (reams) on the
+// pallet and which pallet of how many.
 function ordinalN(n) { const v = n % 100, sx = ['th', 'st', 'nd', 'rd']; return n + (sx[(v - 20) % 10] || sx[v] || sx[0]); }
 // As written on a sticker: the batch's number and the year it came in, 02-2026.
 function invBatchNo(n, at) { return String(n).padStart(2, '0') + '-' + localDateISO(at ? new Date(at) : new Date()).slice(0, 4); }
@@ -14485,7 +14485,7 @@ async function openInvBatches(id) {
       <td style="${td}white-space:nowrap;text-align:right;">${b.received != null ? invQtyHtml(b.received, it) : '—'}</td>
       <td style="${td}white-space:nowrap;text-align:right;color:#993C1D;">${b.received != null ? invQtyHtml(Math.max(0, b.received - b.left), it) : '—'}</td>
       <td style="${td}white-space:nowrap;text-align:right;${b.left > 0 ? 'color:#166534;' : 'color:var(--text3);'}">${b.left > 0 ? invQtyHtml(b.left, it) : 'used up'}</td>
-      <td style="${td}">${[b.challan_no ? 'DC ' + esc(b.challan_no) : '', b.po_no ? 'P.O. ' + esc(b.po_no) : '', b.invoice_no ? 'Inv. ' + esc(b.invoice_no) : ''].filter(Boolean).join('<br>') || '—'}</td>
+      <td style="${td}">${b.challan_no ? esc(b.challan_no) : '—'}</td>
       <td style="${td}white-space:nowrap;">${seeBtn('inv_btn_batches') && (b.received != null || b.left > 0) ? `<button class="btn btn-sm" onclick="openInvSticker(${it.id}, ${b.n})" title="Print the stickers for this batch">&#128424; Sticker</button>` : ''}</td>
     </tr>`).join('')
     : `<tr><td colspan="7" style="padding:18px;text-align:center;color:var(--text2);">No stock yet. The first Stock In will be the 1st batch.</td></tr>`;
@@ -14494,7 +14494,7 @@ async function openInvBatches(id) {
     <div style="font-size:13px;color:var(--text2);margin-bottom:10px;"><b style="color:var(--text)">${esc(label)}</b> · on hand <b>${(+((it.current_balance || 0) / packetSize(it.paper_type || '')).toFixed(2)).toLocaleString()}</b> ${packetUnitLabel(it.paper_type || '').toLowerCase()} (${(it.current_balance || 0).toLocaleString()} sheets)</div>
     <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">Each Stock In is a new batch. Stock is used oldest batch first.</div>
     <div class="report-scroll-wrap"><table style="width:100%;border-collapse:collapse;font-size:13px;">
-      <thead><tr><th style="${th}">Batch No.</th><th style="${th}">Received on</th><th style="${th}text-align:right;">Received</th><th style="${th}text-align:right;">Used</th><th style="${th}text-align:right;">Left</th><th style="${th}">DC / P.O. / Invoice</th><th style="${th}"></th></tr></thead>
+      <thead><tr><th style="${th}">Batch No.</th><th style="${th}">Received on</th><th style="${th}text-align:right;">Received</th><th style="${th}text-align:right;">Used</th><th style="${th}text-align:right;">Left</th><th style="${th}">DC #</th><th style="${th}"></th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
@@ -14516,16 +14516,13 @@ async function openInvSticker(itemId, n, tx) {
     if (!b) { notify('That batch is not there any more.'); return; }
   }
   const ps = packetSize(it.paper_type || '');
-  const unit = packetUnitLabel(it.paper_type || '').replace(/s$/, '');
-  const total = Math.round(b.received != null && b.received > 0 ? b.received : b.left) || 0;
-  // Whole packets of the usual size, and one more line for a part packet.
-  const full = Math.floor(total / ps), part = total - full * ps;
-  const rows = [];
-  if (full) rows.push({ q: String(ps), n: String(full) });
-  if (part) rows.push({ q: String(part), n: '1' });
-  if (!rows.length) rows.push({ q: String(ps), n: '1' });
+  const units = packetUnitLabel(it.paper_type || '').toLowerCase();   // packets / reams
+  const sheets = Math.round(b.received != null && b.received > 0 ? b.received : b.left) || 0;
+  const total = +(sheets / ps).toFixed(2);
+  // The whole Stock In on one pallet; split it into the real pallets with "+ Another quantity".
+  const rows = [{ q: total > 0 ? String(total) : '', n: '1' }];
   const date = b.first_at ? localDateISO(new Date(b.first_at)) : localDateISO();
-  Object.assign(_ist, { itemId, n, txId: b.tx_id || 0, po: b.po_no || '', inv: b.invoice_no || '', label: b.batch_label || '', ref: total, rows, autoBatch: invBatchNo(n, b.first_at) });
+  Object.assign(_ist, { itemId, n, txId: b.tx_id || 0, label: b.batch_label || '', ref: total, units, rows, autoBatch: invBatchNo(n, b.first_at) });
   const desc = `${it.paper_type || ''}${it.size ? ' ' + it.size : ''}${it.gsm ? ' ' + it.gsm + ' gsm' : ''}`.trim();
   openModal(`<div class="modal" style="max-width:900px;" onclick="event.stopPropagation()">
     <h2>Print Sticker</h2>
@@ -14542,16 +14539,14 @@ async function openInvSticker(itemId, n, tx) {
           <div class="form-group"><label class="form-label">Brand</label><input type="text" id="ist-brand" value="${esc(it.brand || '')}" oninput="istRefresh()"></div>
         </div>
         <div class="form-row">
-          <div class="form-group"><label class="form-label">P.O. #</label><input type="text" id="ist-po" value="${esc(_ist.po)}" oninput="istRefresh()"></div>
           <div class="form-group"><label class="form-label">DC #</label><input type="text" id="ist-dc" value="${esc(b.challan_no || '')}" oninput="istRefresh()"></div>
-          <div class="form-group"><label class="form-label">Invoice #</label><input type="text" id="ist-inv" value="${esc(_ist.inv)}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">Each sticker is a</label><input type="text" id="ist-per" value="Pallet" oninput="istRefresh()"></div>
         </div>
-        <div class="form-group"><label class="form-label" id="ist-qlabel">Sheets in each ${esc(unit.toLowerCase())} × how many</label>
+        <div class="form-group"><label class="form-label" id="ist-qlabel">${esc(units[0].toUpperCase() + units.slice(1))} on each pallet × how many pallets</label>
           <div id="ist-rows" style="display:flex;flex-direction:column;gap:6px;"></div>
           <button type="button" class="btn btn-sm" style="margin-top:6px;" onclick="istAddRow()">+ Another quantity</button>
         </div>
         <div class="form-row">
-          <div class="form-group"><label class="form-label">Each one is a</label><input type="text" id="ist-per" value="${esc(unit)}" oninput="istRefresh()"></div>
           <div class="form-group"><label class="form-label">Print from no.</label><input type="number" id="ist-from" min="1" placeholder="1" oninput="istRefresh()"></div>
           <div class="form-group"><label class="form-label">to no.</label><input type="number" id="ist-to" min="1" placeholder="last" oninput="istRefresh()"></div>
         </div>
@@ -14599,7 +14594,7 @@ function istDateChanged() {
 function istRenderRows() {
   const el = document.getElementById('ist-rows'); if (!el) return;
   el.innerHTML = _ist.rows.map((r, i) => `<div style="display:flex;gap:6px;align-items:center;">
-    <input type="number" min="0" step="any" placeholder="Sheets in each" value="${esc(r.q)}" oninput="istRow(${i}, 'q', this.value)" style="flex:1;min-width:0;">
+    <input type="number" min="0" step="any" placeholder="${esc((_ist.units || 'packets')[0].toUpperCase() + (_ist.units || 'packets').slice(1))} on each" value="${esc(r.q)}" oninput="istRow(${i}, 'q', this.value)" style="flex:1;min-width:0;">
     <span style="color:var(--text2);">×</span>
     <input type="number" min="1" step="1" placeholder="How many" value="${esc(r.n)}" oninput="istRow(${i}, 'n', this.value)" style="max-width:110px;">
     ${_ist.rows.length > 1 ? `<button type="button" class="btn btn-sm" title="Remove this line" onclick="istRemoveRow(${i})">&#10005;</button>` : ''}
@@ -14608,17 +14603,17 @@ function istRenderRows() {
 function istRow(i, k, v) { _ist.rows[i][k] = v; istRefresh(); }
 function istAddRow() { _ist.rows.push({ q: '', n: '1' }); istRenderRows(); istRefresh(); }
 function istRemoveRow(i) { _ist.rows.splice(i, 1); istRenderRows(); istRefresh(); }
-// The stickers the window describes: one per packet, numbered on from line to line,
+// The stickers the window describes: one per pallet, numbered on from line to line,
 // then cut to the range. strict (printing): a half-filled line is an error.
 function istPlan(strict) {
   const rows = _ist.rows.map(r => ({ q: parseFloat(r.q), n: parseInt(r.n, 10) }));
   const ok = rows.filter(r => r.q > 0 && r.n >= 1);
-  if (strict && ok.length !== rows.length) return { error: 'Every line needs the sheets in each and how many (at least 1), or remove it.' };
+  if (strict && ok.length !== rows.length) return { error: `Every line needs the ${_ist.units || 'packets'} on each and how many (at least 1), or remove it.` };
   const all = [];
   let no = 0;
   ok.forEach(r => { for (let k = 0; k < r.n; k++) { no++; all.push({ no, qty: r.q }); } });
   const total = all.length;
-  if (!total) return { error: 'Enter the sheets in each and how many.' };
+  if (!total) return { error: `Enter the ${_ist.units || 'packets'} on each and how many.` };
   if (total > 500) return { error: `That is ${total} stickers; the most at a time is 500.` };
   let from = parseInt(istVal('ist-from'), 10), to = parseInt(istVal('ist-to'), 10);
   if (!(from >= 1)) from = 1;
@@ -14628,22 +14623,22 @@ function istPlan(strict) {
 }
 function istData(stickers, total) {
   return { batchNo: istVal('ist-batch'), date: (istVal('ist-date') || '').split('-').reverse().join('-'), desc: istVal('ist-desc'),
-    supplier: istVal('ist-supplier'), brand: istVal('ist-brand'), po: istVal('ist-po'), dc: istVal('ist-dc'), inv: istVal('ist-inv'),
-    per: istVal('ist-per'), stickers, total };
+    supplier: istVal('ist-supplier'), brand: istVal('ist-brand'), dc: istVal('ist-dc'),
+    per: istVal('ist-per'), units: _ist.units || 'packets', stickers, total };
 }
 function istRefresh() {
-  const per = istVal('ist-per') || 'packet';
-  const ql = document.getElementById('ist-qlabel'); if (ql) ql.textContent = `Sheets in each ${per.toLowerCase()} × how many`;
+  const per = (istVal('ist-per') || 'pallet').toLowerCase(), u = _ist.units || 'packets';
+  const ql = document.getElementById('ist-qlabel'); if (ql) ql.textContent = `${u[0].toUpperCase() + u.slice(1)} on each ${per} × how many ${per}s`;
   const hint = document.getElementById('ist-hint'), prev = document.getElementById('ist-preview');
   if (!hint || !prev) return;
   const plan = istPlan(false);
   if (plan.error) { hint.style.color = 'var(--text2)'; hint.textContent = plan.error; prev.srcdoc = ''; return; }
-  const off = _ist.ref > 0 && Math.abs(plan.sum - _ist.ref) > 0.5;
+  const off = _ist.ref > 0 && Math.abs(plan.sum - _ist.ref) > 0.005;
   hint.style.color = off ? '#B45309' : 'var(--text2)';
   hint.textContent = `${plan.stickers.length} sticker${plan.stickers.length === 1 ? '' : 's'}`
     + (plan.stickers.length !== plan.total ? ` (nos. ${plan.from} to ${plan.to} of ${plan.total})` : '')
-    + `. They add up to ${Math.round(plan.sum).toLocaleString()} sheets`
-    + (_ist.ref > 0 ? (off ? `; this batch is ${_ist.ref.toLocaleString()} sheets, so they do not match.` : ', the same as this batch.') : '.');
+    + `. They add up to ${(+plan.sum.toFixed(2)).toLocaleString()} ${u}`
+    + (_ist.ref > 0 ? (off ? `; this Stock In is ${_ist.ref.toLocaleString()} ${u}, so they do not match.` : ', the same as this Stock In.') : '.');
   prev.srcdoc = invStickerDocHtml(istData([plan.stickers[0]], plan.total));
 }
 async function printInvSticker() {
@@ -14654,11 +14649,11 @@ async function printInvSticker() {
   const n = plan.stickers.length;
   if (n > 50 && !await confirmDialog({ title: `Print ${n} stickers?`, message: `That is ${n} labels, one page each.`, confirmText: 'Print' })) return;
   const html = invStickerDocHtml(istData(plan.stickers, plan.total));
-  // The P.O., Invoice and a typed-over Batch No. stay with the Stock In, so a reprint has them.
-  const po = istVal('ist-po'), inv = istVal('ist-inv'), bn = istVal('ist-batch');
+  // A typed-over Batch No. stays with the Stock In, so a reprint has it.
+  const bn = istVal('ist-batch');
   const label = bn && bn !== _ist.autoBatch ? bn : '';
-  if (_ist.txId && (po !== _ist.po || inv !== _ist.inv || label !== _ist.label)) {
-    try { await api('PUT', `/api/inventory/transactions/${_ist.txId}/sticker`, { po_no: po, invoice_no: inv, batch_label: label }); }
+  if (_ist.txId && label !== _ist.label) {
+    try { await api('PUT', `/api/inventory/transactions/${_ist.txId}/sticker`, { batch_label: label }); }
     catch (e) { console.error('Sticker numbers not kept (printing anyway):', e); }
   }
   closeModal();
@@ -14695,15 +14690,15 @@ function invStickerDocHtml(d) {
   };
   const ic = k => '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="#111" stroke-width="2" stroke-linejoin="round" stroke-linecap="round">' + icon[k] + '</svg>';
   const cell = (k, label, value, cls) => '<div class="cell ' + (cls || '') + '"><div class="l">' + ic(k) + '<span>' + label + '</span></div><div class="v">' + value + '</div></div>';
-  const per = esc((d.per || 'packet').toUpperCase());
+  const per = esc((d.per || 'pallet').toUpperCase());
   const one = s => '<div class="sticker">'
     + '<div class="head"><div class="logo"><img src="' + location.origin + '/logo-urdu.png" alt=""></div>'
     + '<div class="batch"><span class="bl">' + ic('batch') + 'BATCH NO.</span><b class="fit0">' + esc(d.batchNo) + '</b></div>'
     + '<div class="date"><small>RECEIVED ON</small><b>' + esc(d.date) + '</b></div></div>'
     + '<div class="line desc">' + cell('desc', 'DESCRIPTION', '<span class="clamp">' + esc(d.desc) + '</span>', 'desc') + '</div>'
     + '<div class="line">' + cell('supplier', 'SUPPLIER', '<span class="fit2">' + esc(d.supplier) + '</span>') + cell('brand', 'BRAND', '<span class="fit2">' + esc(d.brand) + '</span>') + '</div>'
-    + '<div class="line">' + cell('po', 'P.O. #', '<span class="fit2">' + esc(d.po) + '</span>') + cell('dc', 'DC #', '<span class="fit2">' + esc(d.dc) + '</span>') + cell('inv', 'INVOICE #', '<span class="fit2">' + esc(d.inv) + '</span>') + '</div>'
-    + '<div class="line">' + cell('qty', 'QUANTITY / ' + per, '<span class="fit1">' + Math.round(s.qty).toLocaleString() + '<i>sheets</i></span>', 'qty') + cell('cas', per + ' #', '<span class="fit1">' + s.no + ' OF ' + d.total + '</span>') + '</div>'
+    + '<div class="line">' + cell('dc', 'DC #', '<span class="fit2">' + esc(d.dc) + '</span>') + '</div>'
+    + '<div class="line">' + cell('qty', 'QUANTITY / ' + per, '<span class="fit1">' + (+(+s.qty).toFixed(2)).toLocaleString() + '<i>' + esc(d.units || 'packets') + '</i></span>', 'qty') + cell('cas', per + ' #', '<span class="fit1">' + s.no + ' OF ' + d.total + '</span>') + '</div>'
     + '</div>';
   const css = `
     *{box-sizing:border-box}
