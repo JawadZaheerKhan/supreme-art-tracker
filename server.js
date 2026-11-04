@@ -327,7 +327,9 @@ function getDb() {
 // batch_label) and the Access Register row inv_btn_batches (2026-11-03).
 // Bumped again for inventory_transactions.batch_alloc (batch-wise stock out, 2026-11-03).
 // Bumped again for finance.product_names and the Access Register row products_btn_name (2026-11-03).
-const SCHEMA_VERSION = 'v2026-11-03-product-names';
+// Bumped again for finance.company_settings.tolerance_pct and the Access Register row
+// job_btn_company_settings (company tolerance, 2026-11-04).
+const SCHEMA_VERSION = 'v2026-11-04-company-tolerance';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -439,6 +441,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // Was hard-wired to Admin (2026-10-05); now its own row, Admin by default.
   job_btn_process_without_paper: { label: 'Process without paper — send a job that is waiting for paper into production with no stock issued', levels: { admin: 'yes' } },
   job_btn_duplicate:       { label: 'Duplicate button', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_company_settings: { label: 'Company Settings button (Jobs tab) — add a company and set its tolerance % (how far over or under the PO a delivery may go)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
   // Distinct from the existing wastage_adjustment group above (which also
   // covers the Finalized Jobs tab and the Manual Job Card Consumption
   // report, and keeps enforcing those exactly as before) — this is just
@@ -1760,6 +1763,8 @@ async function initDb() {
         updated_at  TIMESTAMPTZ DEFAULT NOW()
       )
     `;
+    // Tolerance % (2026-11-04): a delivery may go this far over or under the PO.
+    await sql`ALTER TABLE finance.company_settings ADD COLUMN IF NOT EXISTS tolerance_pct NUMERIC`;
     // Board sold as waste never goes through a job card, so the Sale Report's
     // "Waste of Board" tab keeps its own hand-entered rows here. Every value
     // is typed by the user — nothing is derived from jobs.
@@ -9763,6 +9768,38 @@ app.put('/api/product-specials', requirePermission('products_btn_specials'), asy
 // ── Company Settings (Supreme Art Finance only) ───────────────────
 // NTN and Destination per company, matched against jobs.client on the
 // job card (companyInfoLine on the client) — same shape as Product Rate.
+// Company tolerance % - everyone who records deliveries or reads the Jobs Report needs it.
+app.get('/api/company-tolerances', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    res.json(await getDb()`SELECT id, company, tolerance_pct FROM finance.company_settings ORDER BY company ASC`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Add a company, or set its tolerance % (blank = none). Its NTN / Destination are left as they are.
+app.post('/api/company-tolerances', requirePermission('job_btn_company_settings'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const company = String(req.body?.company ?? '').trim().replace(/\s+/g, ' ');
+    const raw = req.body?.tolerance_pct;
+    const pct = (raw === null || raw === undefined || String(raw).trim() === '') ? null : Number(raw);
+    if (!company) return res.status(400).json({ error: 'Company name is required.' });
+    if (pct !== null && (!Number.isFinite(pct) || pct < 0 || pct > 100)) return res.status(400).json({ error: 'Tolerance must be a number from 0 to 100.' });
+    const existing = await sql`SELECT id, tolerance_pct FROM finance.company_settings WHERE lower(company) = lower(${company})`;
+    let row;
+    if (existing.length) {
+      row = (await sql`UPDATE finance.company_settings SET tolerance_pct = ${pct}, updated_by = ${req.user.email}, updated_at = NOW() WHERE id = ${existing[0].id} RETURNING *`)[0];
+    } else {
+      row = (await sql`INSERT INTO finance.company_settings (company, tolerance_pct, updated_by, updated_at) VALUES (${company}, ${pct}, ${req.user.email}, NOW()) RETURNING *`)[0];
+    }
+    await logAudit(sql, req, {
+      action: existing.length ? 'company_settings.update' : 'company_settings.create', entityType: 'company_settings', entityId: row.id,
+      summary: existing.length ? `Tolerance for "${row.company}": ${existing[0].tolerance_pct ?? 'none'}% -> ${pct ?? 'none'}%` : `Company added: "${row.company}"${pct !== null ? ' (tolerance ' + pct + '%)' : ''}`,
+    });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/company-settings', requireFinanceView, async (req, res) => {
   try {
     await dbReady;
