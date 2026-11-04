@@ -1226,6 +1226,7 @@
   .jobs-filter-row { width: 100%; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   /* Row 2: Create Mil Job + Shade Cards on the right, next to Track / Jobs. */
   .jobs-filter-right { margin-left: auto; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .jobs-stack-btns { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
   /* Jobs tab number boxes: thin - label and number on one line (owner, 2026-10-12). */
   #stats-row { gap: 10px; margin-bottom: 0.9rem; }
   #stats-row .stat { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 7px 14px; }
@@ -3607,18 +3608,20 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       </select>
       <span id="date-custom" style="display:none;gap:6px;align-items:center;"><input type="date" id="date-from" class="filter" onchange="setDateCustom()" style="padding:6px;"><span style="color:var(--text2);font-size:12px;">to</span><input type="date" id="date-to" class="filter" onchange="setDateCustom()" style="padding:6px;"></span>
       <div class="jobs-filter-right">
-      <button class="whole-toggle" onclick="openCompanyTolerances()" title="Add a company, and set each company's tolerance %">
-        <span class="whole-toggle-text">&#127970; Company Settings</span>
-      </button>
       <button id="over-issue-alert" class="whole-toggle" style="display:none;" onclick="openOverIssuedList()" title="Jobs with over-issued paper waiting for a decision - click to pick one and go to it">
         <span class="whole-toggle-text">&#9888; <span id="over-issue-alert-label">Over-issued</span></span>
       </button>
       <button id="ready-check-toggle" class="whole-toggle" onclick="toggleReadyCheckFilter()" title="Show only jobs marked Ready - waiting for Record Delivery">
         <span class="whole-toggle-text">&#10004; <span id="ready-check-toggle-label">Mark Ready</span></span>
       </button>
+      <div class="jobs-stack-btns">
+      <button class="whole-toggle" onclick="openCompanyTolerances()" title="Add a company, set each company's tolerance %, and open its jobs">
+        <span class="whole-toggle-text">&#127970; Company Settings</span>
+      </button>
       <button id="shade-card-toggle" class="whole-toggle" onclick="toggleShadeCardFilter()" title="Show only shade-card jobs">
         <span class="whole-toggle-text">&#127912; <span id="shade-card-toggle-label">Shade Cards</span></span>
       </button>
+      </div>
       </div>
     </div>
   </div>
@@ -7178,13 +7181,13 @@ function openCompanyTolerances() {
 }
 // Settings rows, then companies on jobs that have none yet (setting one adds it).
 function companyTolListRows() {
-  const rows = companyTols.map(c => ({ company: String(c.company || '').trim(), pct: c.tolerance_pct, jobs: 0 }));
+  const rows = companyTols.map(c => ({ company: String(c.company || '').trim(), pct: c.tolerance_pct, jobs: 0, ids: [] }));
   for (const j of (jobs || [])) {
     const n = String(j.client || '').trim();
     if (!n) continue;
     const hit = companyTolRow(n);
     const row = hit ? rows.find(r => r.company.toLowerCase() === String(hit.company || '').trim().toLowerCase()) : rows.find(r => r.company.toLowerCase() === n.toLowerCase());
-    if (row) row.jobs++; else rows.push({ company: n, pct: null, jobs: 1 });
+    if (row) { row.jobs++; row.ids.push(j.id); } else rows.push({ company: n, pct: null, jobs: 1, ids: [j.id] });
   }
   return rows.sort((a, b) => a.company.localeCompare(b.company));
 }
@@ -7196,12 +7199,33 @@ function renderCompanyTolList() {
   el.innerHTML = rows.length ? `<table style="width:100%;border-collapse:collapse;font-size:13px;">
     <thead><tr style="background:var(--bg2);"><th style="text-align:left;padding:6px 8px;">Company</th><th style="text-align:right;padding:6px 8px;width:130px;">Tolerance %</th></tr></thead>
     <tbody>${rows.map(r => `<tr style="border-bottom:1px solid var(--border);">
-      <td style="padding:6px 8px;">${esc(r.company)} <small style="color:var(--text2);">${r.jobs} job${r.jobs === 1 ? '' : 's'}</small></td>
+      <td style="padding:6px 8px;">${esc(r.company)} ${r.jobs ? `<a data-company="${esc(r.company)}" onclick="companyJobsList(this.dataset.company)" style="font-size:11.5px;color:#1d4ed8;cursor:pointer;text-decoration:underline;" title="Open this company's jobs">${r.jobs} job${r.jobs === 1 ? '' : 's'} &rsaquo;</a>` : '<small style="color:var(--text2);">0 jobs</small>'}</td>
       <td style="padding:4px 8px;text-align:right;">${can
         ? `<input type="number" min="0" max="100" step="any" value="${r.pct === null || r.pct === undefined ? '' : esc(String(+r.pct))}" placeholder="none" data-company="${esc(r.company)}" onchange="saveCompanyTol(this.dataset.company, this.value)" style="width:90px;padding:4px 6px;text-align:right;">`
         : (r.pct === null || r.pct === undefined ? '<span style="color:var(--text3);">none</span>' : esc(String(+r.pct)) + '%')}</td>
     </tr>`).join('')}</tbody></table>` : '<div style="color:var(--text3);font-style:italic;padding:10px;">No companies match.</div>';
 }
+// A company's jobs, newest first; a job clicked opens its job card (company and the rest editable there).
+function companyJobsList(company) {
+  const row = companyTolListRows().find(r => r.company === company);
+  const list = (row ? row.ids : []).map(id => (jobs || []).find(j => j.id === id)).filter(Boolean).sort((a, b) => b.id - a.id);
+  const body = document.querySelector('#modal-root .modal'); if (!body) return;
+  const td = 'padding:6px 8px;border-bottom:1px solid var(--border);';
+  body.innerHTML = `<h2>&#127970; ${esc(company)}</h2>
+    <div style="margin-bottom:8px;"><button class="btn btn-sm" onclick="openCompanyTolerances()">&lsaquo; All companies</button></div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">${list.length} job${list.length === 1 ? '' : 's'}. Click a job to open its job card - change its Company, or anything else, and save there.</div>
+    <div style="max-height:60vh;overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="background:var(--bg2);"><th style="text-align:left;${td}">Job</th><th style="text-align:left;${td}">Name</th><th style="text-align:left;${td}">Company on the job</th><th style="text-align:left;${td}">Stage</th><th style="text-align:right;${td}">PO Qty</th></tr></thead>
+      <tbody>${list.map(j => `<tr class="cv-summary-row" style="cursor:pointer;" onclick="companyJobOpen(${j.id})">
+        <td style="${td}font-weight:700;color:#1d4ed8;">E-${j.id}</td>
+        <td style="${td}">${esc(j.name || '')}</td>
+        <td style="${td}">${esc(j.client || '')}</td>
+        <td style="${td}">${esc(isDone(j) ? 'Delivered' : (STAGES[j.stage_index || 0] || ''))}</td>
+        <td style="${td}text-align:right;">${esc(String(j.qty || ''))}</td>
+      </tr>`).join('')}</tbody></table></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>`;
+}
+function companyJobOpen(id) { closeModal(); openEdit(id); }
 async function saveCompanyTol(company, value) {
   showSaving(true);
   try {
