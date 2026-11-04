@@ -5500,6 +5500,26 @@ async function itemBatches(sql, itemId) {
 // oldest first, else the oldest with stock first. batch: a number or a list of them.
 async function batchPlan(sql, itemId, change, reason, batch, reversesTxId, occurredAt) {
   if (reversesTxId) return { batch: null, alloc: null };
+  // A stock-out with an amount per batch ([{ n, sheets }], owner 2026-11-04): exactly those.
+  if (change < 0 && Array.isArray(batch) && batch.some(x => x && typeof x === 'object')) {
+    const byN = new Map();
+    for (const x of batch) {
+      const n = parseInt(x && x.n, 10), sh = Math.round(Number(x && x.sheets) || 0);
+      if (n > 0 && sh > 0) byN.set(n, (byN.get(n) || 0) + sh);
+    }
+    const need = -change;
+    const sum = [...byN.values()].reduce((a, v) => a + v, 0);
+    if (sum !== need) throw new Error(`The batch amounts add up to ${sum.toLocaleString()} sheets, not the ${need.toLocaleString()} being issued.`);
+    const list = await itemBatches(sql, itemId) || [];
+    const alloc = [];
+    for (const [n, sh] of [...byN].sort((a, b) => a[0] - b[0])) {
+      const hit = list.find(b => b.n === n);
+      if (!hit) throw new Error(`There is no ${ordinalN(n)} batch of this paper.`);
+      if (hit.left < sh) throw new Error(`Only ${Math.round(hit.left).toLocaleString()} sheets are left in the ${ordinalN(n)} batch (${hit.label}).`);
+      alloc.push({ n, sheets: sh, label: hit.label });
+    }
+    return { batch: null, alloc };
+  }
   const picked = [...new Set((Array.isArray(batch) ? batch : [batch]).map(x => parseInt(x, 10)).filter(x => x > 0))].sort((a, b) => a - b);
   const want = picked.length ? picked[0] : null;
   if (change > 0) {
