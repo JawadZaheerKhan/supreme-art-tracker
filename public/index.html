@@ -3673,6 +3673,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     </button>
     <button class="btn btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
     <button class="btn ceo-hide" onclick="openBulkStockOut()" style="background:#DC2626;color:#fff;border-color:#DC2626;">&#128228; Stock Out (Bulk)</button>
+    <button class="btn" onclick="openInvSticker(0)" title="Print a pallet sticker with every detail typed by hand - no Stock In needed">&#128424; Print Sticker</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -14772,9 +14773,14 @@ async function openInvBatches(id) {
 const _ist = { itemId: 0, n: 1, txId: 0, po: '', inv: '', label: '', autoBatch: '', ref: 0, rows: [] };
 const istVal = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
 async function openInvSticker(itemId, n, tx) {
-  const it = inventoryAll.find(x => x.id === itemId); if (!it) return;
+  // itemId 0: no Stock In and no paper - every detail typed by hand (owner, 2026-11-04).
+  const manual = !itemId;
+  const it = manual ? null : inventoryAll.find(x => x.id === itemId);
+  if (!manual && !it) return;
   let b;
-  if (tx) {
+  if (manual) {
+    b = { n: 0, tx_id: 0, received: null, left: 0, first_at: null, challan_no: '', batch_label: '' };
+  } else if (tx) {
     // One Stock In: its own amount and numbers. An entry from before batches were kept is in the 1st.
     b = { n: n || 1, tx_id: tx.batch ? tx.id : 0, received: Math.abs(+tx.change || 0), left: 0, first_at: tx.created_at,
           challan_no: tx.challan_no || '', po_no: tx.po_no || '', invoice_no: tx.invoice_no || '', batch_label: tx.batch_label || '' };
@@ -14783,18 +14789,18 @@ async function openInvSticker(itemId, n, tx) {
     catch (e) { notify('Could not load the batch: ' + e.message); return; }
     if (!b) { notify('That batch is not there any more.'); return; }
   }
-  const ps = packetSize(it.paper_type || '');
-  const units = packetUnitLabel(it.paper_type || '').toLowerCase();   // packets / reams
+  const ps = packetSize(it ? it.paper_type || '' : '');
+  const units = it ? packetUnitLabel(it.paper_type || '').toLowerCase() : 'packets';   // packets / reams
   const sheets = Math.round(b.received != null && b.received > 0 ? b.received : b.left) || 0;
   const total = +(sheets / ps).toFixed(2);
   // The whole Stock In on one pallet; split it into the real pallets with "+ Another quantity".
   const rows = [{ q: total > 0 ? String(total) : '', n: '1' }];
   const date = b.first_at ? localDateISO(new Date(b.first_at)) : localDateISO();
-  Object.assign(_ist, { itemId, n, txId: b.tx_id || 0, label: b.batch_label || '', ref: total, units, rows, autoBatch: invBatchNo(n, b.first_at) });
-  const desc = `${it.paper_type || ''}${it.size ? ' ' + it.size : ''}${it.gsm ? ' ' + it.gsm + ' gsm' : ''}`.trim();
+  Object.assign(_ist, { itemId, n, txId: b.tx_id || 0, label: b.batch_label || '', ref: total, units, rows, autoBatch: manual ? '' : invBatchNo(n, b.first_at) });
+  const desc = it ? `${it.paper_type || ''}${it.size ? ' ' + it.size : ''}${it.gsm ? ' ' + it.gsm + ' gsm' : ''}`.trim() : '';
   openModal(`<div class="modal" style="max-width:900px;" onclick="event.stopPropagation()">
     <h2>Print Sticker</h2>
-    <div style="font-size:13px;color:var(--text2);margin-bottom:12px;"><b style="color:var(--text)">${esc(desc)}</b>${it.brand ? ' · ' + esc(it.brand) : ''} · <b>${ordinalN(n)} batch</b></div>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px;">${manual ? 'Type every detail by hand - nothing is saved to stock.' : `<b style="color:var(--text)">${esc(desc)}</b>${it.brand ? ' · ' + esc(it.brand) : ''} · <b>${ordinalN(n)} batch</b>`}</div>
     <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;">
       <div style="flex:1 1 360px;min-width:0;">
         <div class="form-row">
@@ -14803,12 +14809,13 @@ async function openInvSticker(itemId, n, tx) {
         </div>
         <div class="form-group"><label class="form-label">Description</label><input type="text" id="ist-desc" value="${esc(desc)}" oninput="istRefresh()"></div>
         <div class="form-row">
-          <div class="form-group"><label class="form-label">Supplier</label><input type="text" id="ist-supplier" value="${esc(it.supplier || '')}" oninput="istRefresh()"></div>
-          <div class="form-group"><label class="form-label">Brand</label><input type="text" id="ist-brand" value="${esc(it.brand || '')}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">Supplier</label><input type="text" id="ist-supplier" value="${esc((it && it.supplier) || '')}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">Brand</label><input type="text" id="ist-brand" value="${esc((it && it.brand) || '')}" oninput="istRefresh()"></div>
         </div>
         <div class="form-row">
           <div class="form-group"><label class="form-label">DC #</label><input type="text" id="ist-dc" value="${esc(b.challan_no || '')}" oninput="istRefresh()"></div>
           <div class="form-group"><label class="form-label">Each sticker is a</label><input type="text" id="ist-per" value="Pallet" oninput="istRefresh()"></div>
+          ${manual ? `<div class="form-group"><label class="form-label">Counted in</label><select id="ist-units" onchange="istSetUnits(this.value)"><option value="packets">Packets</option><option value="reams">Reams</option><option value="sheets">Sheets</option></select></div>` : ''}
         </div>
         <div class="form-group"><label class="form-label" id="ist-qlabel">${esc(units[0].toUpperCase() + units.slice(1))} on each pallet × how many pallets</label>
           <div id="ist-rows" style="display:flex;flex-direction:column;gap:6px;"></div>
@@ -14851,9 +14858,10 @@ function openInvStickerTx(txId) {
   notify('That Stock In is not loaded any more - reopen the report.');
 }
 // Changing the date moves the year in a batch number nobody has typed over.
+function istSetUnits(v) { _ist.units = v || 'packets'; istRenderRows(); istRefresh(); }
 function istDateChanged() {
   const el = document.getElementById('ist-batch');
-  if (el && el.value.trim() === _ist.autoBatch) {
+  if (el && _ist.n && el.value.trim() === _ist.autoBatch) {
     _ist.autoBatch = String(_ist.n).padStart(2, '0') + '-' + (istVal('ist-date') || localDateISO()).slice(0, 4);
     el.value = _ist.autoBatch;
   }
@@ -14971,7 +14979,7 @@ function invStickerDocHtml(d) {
   const css = `
     *{box-sizing:border-box}
     html,body{margin:0;padding:0;background:#fff;color:#000;font-family:Arial,Helvetica,sans-serif}
-    .sticker{width:4in;height:3in;background:#fff;border:2px solid #000;display:flex;flex-direction:column;overflow:hidden;break-after:page;page-break-after:always}
+    .sticker{width:4in;height:2.88in;background:#fff;border:2px solid #000;display:flex;flex-direction:column;overflow:hidden;break-after:page;page-break-after:always}
     .sticker:last-child{break-after:auto;page-break-after:auto}
     .head{height:0.64in;display:flex;align-items:stretch;border-bottom:2px solid #000;flex:none}
     .logo{width:1.2in;display:flex;align-items:center;justify-content:center;padding:0 6px;border-right:2px solid #000}
