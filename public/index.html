@@ -809,6 +809,8 @@
   .batch-tick input[type=checkbox] { width: auto !important; min-width: 0 !important; margin: 2px 0 0; padding: 0; flex: none; }
   .batch-tick span { line-height: 1.25; white-space: nowrap; }
   .batch-tick small { display: block; color: var(--text2); font-size: 11px; }
+  .batch-line { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .batch-line .batch-amt { width: 64px !important; min-width: 0 !important; flex: none; padding: 3px 5px; font-size: 12px; text-align: right; }
   .bulkout-batch-cell .batch-tick { font-size: 11.5px; justify-content: flex-start; text-align: left; }
   .sm-compact td { word-break: break-word; }
   .ledger-compact { font-size: 12px; }
@@ -12935,6 +12937,7 @@ async function saveInvRemoveStock(id) {
 
     showSaving(true);
     let flipped = 0, partials = 0, errored = 0, topupsApproved = 0;
+    const _bpool = new Map();   // the typed batch amounts, shared out job by job
     remaining = qty;
     try {
       for (let ji = 0; ji < selected.length; ji++) {
@@ -12949,10 +12952,10 @@ async function saveInvRemoveStock(id) {
           // a normal issue and failed on jobs already issued).
           const result = (j.source === 'topup' && j.topupId)
             ? await api('POST', `/api/jobs/${j.jobId}/packets-topup/${encodeURIComponent(j.topupId)}/approve`, {
-                splits: [{ item_id: id, sheets: share, batch }], challan_no: challanNo, entry_date: entryDate,
+                splits: [{ item_id: id, sheets: share, batch: invBatchCarve(_bpool, id, batch, share) }], challan_no: challanNo, entry_date: entryDate,
               })
             : await api('POST', `/api/jobs/${j.jobId}/issue-stock`, {
-                splits: [{ item_id: id, sheets: share, batch }],
+                splits: [{ item_id: id, sheets: share, batch: invBatchCarve(_bpool, id, batch, share) }],
                 challan_no: challanNo,
                 entry_date: entryDate,
                 source: j.source || 'primary',
@@ -13974,6 +13977,7 @@ async function saveBulkStockOutRun() {
 
   showSaving(true);
   let saved = 0, errored = 0, flipped = 0, partials = 0, topupsApproved = 0;
+  const _bpool = new Map();   // the typed batch amounts, shared out job by job
   for (const p of plan) {
     try {
       if (p.reason === 'job-card' && p.selectedJobs.length) {
@@ -14005,6 +14009,7 @@ async function saveBulkStockOutRun() {
           } else {
             jobSplits = [{ item_id: p.match.id, sheets: jobShare, batch: p.batch }];
           }
+          jobSplits = jobSplits.map(x => ({ ...x, batch: invBatchCarve(_bpool, x.item_id, x.batch, x.sheets) }));
           const result = j.source === 'topup'
             ? await api('POST', `/api/jobs/${j.jobId}/packets-topup/${encodeURIComponent(j.topupId)}/approve`, { splits: jobSplits, challan_no: ref || null, entry_date: entryDate })
             : await api('POST', `/api/jobs/${j.jobId}/issue-stock`, { splits: jobSplits, challan_no: ref || null, entry_date: entryDate, source: j.source || 'primary' });
@@ -15024,12 +15029,65 @@ function invBatchSelectHtml(itemId, dir, cls, withItem) {
   const have = list.filter(b => b.left > 0);
   if (!have.length) return '';
   return `<div ${attr} data-batch-ticks="1" title="Tick the batches to take it from">`
-    + have.map((b, i) => `<label class="batch-tick"><input type="checkbox" value="${b.n}"${i ? '' : ' checked data-first="1"'}> <span><b>${ordinalN(b.n)}</b> ${esc(b.label)}<small>${left(b)}</small></span></label>`).join('') + '</div>';
+    + have.map((b, i) => `<div class="batch-line"><label class="batch-tick"><input type="checkbox" value="${b.n}"${i ? '' : ' checked data-first="1"'}> <span><b>${ordinalN(b.n)}</b> ${esc(b.label)}<small>${left(b)}</small></span></label>`
+      + `<input type="number" class="batch-amt" data-n="${b.n}" min="0" step="any" placeholder="${esc(u)}" title="How many ${esc(u)} from the ${ordinalN(b.n)} batch (leave blank to use the ticks)" oninput="invBatchAmtChanged(this)"></div>`).join('') + '</div>';
 }
-// What a tick-box picker says to the server: null when only the oldest is ticked (or
-// none) - the oldest first, carrying on into the next - else the batches ticked.
+// What a tick-box picker says to the server: an amount typed on any batch - exactly those
+// amounts ([{ n, sheets }]); else null when only the oldest is ticked (or none) - the oldest
+// first, carrying on into the next - else the batches ticked.
+function invBatchAmounts(box) {
+  if (!box) return [];
+  const it = inventoryAll.find(x => x.id === parseInt(box.dataset.itemId, 10));
+  const ps = packetSize(it ? it.paper_type : '');
+  return [...box.querySelectorAll('.batch-amt')].map(el => ({ n: parseInt(el.dataset.n, 10), sheets: Math.round((parseFloat(el.value) || 0) * ps) })).filter(x => x.sheets > 0);
+}
+// An amount typed on a batch: tick it, and the line's quantity becomes their total.
+function invBatchAmtChanged(el) {
+  const box = el.closest('[data-batch-ticks]'); if (!box) return;
+  const cb = el.closest('.batch-line').querySelector('input[type=checkbox]');
+  if (cb && parseFloat(el.value) > 0) cb.checked = true;
+  const amts = invBatchAmounts(box);
+  if (!amts.length) return;
+  const sheets = amts.reduce((a, x) => a + x.sheets, 0);
+  const itemId = parseInt(box.dataset.itemId, 10);
+  const it = inventoryAll.find(x => x.id === itemId);
+  const ps = packetSize(it ? it.paper_type : '');
+  const pk = +(sheets / ps).toFixed(2);
+  if (box.id === 'stockout-batch') {
+    const q = document.getElementById('stockout-qty'), p = document.getElementById('stockout-packets');
+    if (q) q.value = sheets; if (p) p.value = pk;
+    stockOutRecomputeWarning(itemId);
+    return;
+  }
+  const tr = box.closest('tr[data-row]'); if (!tr) return;
+  const idx = tr.dataset.row;
+  const brand = tr.querySelector(`.bulkout-brand-qty[data-item-id="${itemId}"]`);
+  if (brand) {
+    brand.value = pk; brand.dataset.fillSheets = String(sheets); brand.dataset.fillShown = String(pk);
+    bulkOutBrandSplitChanged(idx);
+  } else {
+    const q = tr.querySelector('.bulkout-qty'), p = tr.querySelector('.bulkout-packets');
+    if (q) q.value = sheets; if (p) p.value = pk;
+    bulkOutRecomputeWarning(idx);
+  }
+}
+// Issuing one line to several jobs: each job's share of the typed batch amounts, in order.
+function invBatchCarve(pool, itemId, batch, sheets) {
+  if (!Array.isArray(batch) || !batch.some(x => x && typeof x === 'object')) return batch;
+  if (!pool.has(itemId)) pool.set(itemId, batch.map(x => ({ ...x })));
+  const left = pool.get(itemId), take = [];
+  let need = sheets;
+  for (const x of left) {
+    if (need <= 0) break;
+    const t = Math.min(x.sheets, need);
+    if (t > 0) { take.push({ n: x.n, sheets: t }); x.sheets -= t; need -= t; }
+  }
+  return take;
+}
 function invBatchPicked(box) {
   if (!box) return null;
+  const amts = invBatchAmounts(box);
+  if (amts.length) return amts;
   const on = [...box.querySelectorAll('input[type=checkbox]:checked')];
   if (!on.length || (on.length === 1 && on[0].dataset.first)) return null;
   return on.map(x => parseInt(x.value, 10));
@@ -15039,11 +15097,18 @@ async function invFillBatchBox(wrapId, itemId, dir, selId) {
   const wrap = document.getElementById(wrapId); if (!wrap) return;
   await invBatchesOf(itemId);
   if (!document.getElementById(wrapId)) return;   // the form was closed meanwhile
-  const box = invBatchSelectHtml(itemId, dir, '', false);
+  const box = invBatchSelectHtml(itemId, dir, '', dir === 'out');
   wrap.innerHTML = box ? `<div class="form-group"><label class="form-label">${dir === 'in' ? 'Which batch?' : 'Take from which batch(es)?'}</label>${box.replace(/^<(select|div) /, `<$1 id="${selId}" `)}</div>` : '';
 }
 // Batches ticked that hold too little together, said before saving ('' when fine).
 function invBatchShort(itemId, n, sheets) {
+  if (Array.isArray(n) && n.some(x => x && typeof x === 'object')) {
+    const list = _invBatchCache.get(itemId) || [];
+    const sum = n.reduce((a, x) => a + x.sheets, 0);
+    if (sum !== sheets) return `The batch amounts add up to ${sum.toLocaleString()} sheets, not the ${sheets.toLocaleString()} being issued. Make them match (or clear the batch amounts).`;
+    const over = n.map(x => ({ x, b: list.find(b => b.n === x.n) })).filter(o => o.b && o.b.left < o.x.sheets);
+    return over.length ? over.map(o => `The ${ordinalN(o.b.n)} batch (${o.b.label}) has ${Math.round(o.b.left).toLocaleString()} sheets left, less than the ${o.x.sheets.toLocaleString()} typed.`).join('\n') : '';
+  }
   const ns = (Array.isArray(n) ? n : [n]).map(Number).filter(x => x > 0);
   if (!ns.length) return '';
   const bs = (_invBatchCache.get(itemId) || []).filter(x => ns.includes(x.n));
