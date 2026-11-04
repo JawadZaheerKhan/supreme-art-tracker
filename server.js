@@ -9800,6 +9800,22 @@ app.post('/api/company-tolerances', requirePermission('job_btn_company_settings'
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Delete a company from Company Settings - only one no job is under (its NTN / Destination go too).
+app.delete('/api/company-tolerances/:id', requirePermission('job_btn_company_settings'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const [row] = await sql`SELECT * FROM finance.company_settings WHERE id = ${id}`;
+    if (!row) return res.status(404).json({ error: 'Company not found.' });
+    const [n] = await sql`SELECT COUNT(*)::int AS c FROM jobs WHERE deleted_at IS NULL AND lower(btrim(client)) = lower(btrim(${row.company}))`;
+    if (n && n.c > 0) return res.status(409).json({ error: `"${row.company}" still has ${n.c} job${n.c === 1 ? '' : 's'} - move them to another company first.` });
+    await sql`DELETE FROM finance.company_settings WHERE id = ${id}`;
+    await logAudit(sql, req, { action: 'company_settings.delete', entityType: 'company_settings', entityId: id, summary: `Company deleted: "${row.company}"` });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/company-settings', requireFinanceView, async (req, res) => {
   try {
     await dbReady;
