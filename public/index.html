@@ -3581,6 +3581,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       </select>
       <span id="date-custom" style="display:none;gap:6px;align-items:center;"><input type="date" id="date-from" class="filter" onchange="setDateCustom()" style="padding:6px;"><span style="color:var(--text2);font-size:12px;">to</span><input type="date" id="date-to" class="filter" onchange="setDateCustom()" style="padding:6px;"></span>
       <div class="jobs-filter-right">
+      <button class="whole-toggle" onclick="openCompanyTolerances()" title="Add a company, and set each company's tolerance %">
+        <span class="whole-toggle-text">&#127970; Company Settings</span>
+      </button>
       <button id="over-issue-alert" class="whole-toggle" style="display:none;" onclick="openOverIssuedList()" title="Jobs with over-issued paper waiting for a decision - click to pick one and go to it">
         <span class="whole-toggle-text">&#9888; <span id="over-issue-alert-label">Over-issued</span></span>
       </button>
@@ -5993,6 +5996,7 @@ function firstVisibleReportPane(groupId, fallback) {
 // button is disabled (row = View) or removed (row = Hidden). 'view' = the action is read-only
 // (History, Print, opening the card), so View is enough for it to work.
 const BTN_FN_ROWS = {
+  openCompanyTolerances: ['job_btn_company_settings', 'view'],
   openRenameProductModal: ['products_btn_name', 'yes'],
   // Jobs
   openEdit: ['job_btn_edit', 'view'], openGroupEdit: ['job_btn_edit', 'view'], openAddToGroupModal: ['job_btn_edit', 'yes'], removeJobFromGroup: ['job_btn_edit', 'yes'], openPacketsTopup: ['job_btn_extra_packets', 'yes'],
@@ -6853,7 +6857,7 @@ async function onGoogleCredential(response) {
     // Operators don't have permission to read inventory; skip the call so it
     // doesn't 403 in their console. Store Manager lands on Inventory; Operator
     // lands on Station; everyone else stays on Jobs (default).
-    const loaders = [loadJobs(), loadProductNames()];
+    const loaders = [loadJobs(), loadProductNames(), loadCompanyTols()];
     if (!isOperator()) loaders.push(loadInventory());
     if (canWastageAdjust()) loaders.push(loadWastageAdjData());
     await Promise.all(loaders);
@@ -7052,6 +7056,144 @@ const RATE_OVERRIDE_STYLE = 'color:#ca8a04;font-weight:700;';
 // Company Settings (NTN, Destination) — Supreme Art Finance only. Loaded
 // once at boot like Product Rate; refreshed after any add/edit/delete on
 // the Company Settings modal (see openCompanySettings, Jobs toolbar).
+// ── Company tolerance % (owner, 2026-11-04) ──
+// How far a delivery may go over or under the PO: 5% on a 10,000 PO = 9,500 to 10,500.
+// Set per company from the Jobs tab's Company Settings; read by everyone who records
+// deliveries or reads the Jobs Report (GET /api/company-tolerances).
+let companyTols = [];
+async function loadCompanyTols() {
+  try { companyTols = await api('GET', '/api/company-tolerances'); } catch (e) { companyTols = []; }
+}
+// The settings row a job's company is: same name, same letters, or every word of one in the other (one match only).
+function companyTolRow(client) {
+  const name = String(client || '').trim().toLowerCase();
+  if (!name) return null;
+  const exact = companyTols.find(c => String(c.company || '').trim().toLowerCase() === name);
+  if (exact) return exact;
+  const sq = companySquash(client);
+  const same = sq && companyTols.find(c => companySquash(c.company) === sq);
+  if (same) return same;
+  const want = companyTokens(client);
+  if (!want.length) return null;
+  const hits = companyTols.filter(c => { const have = companyTokens(c.company); return have.length && companyTokenSubset(want, have); });
+  return hits.length === 1 ? hits[0] : null;
+}
+function companyTolFor(client) {
+  const r = companyTolRow(client);
+  const v = r && r.tolerance_pct !== null && r.tolerance_pct !== undefined && r.tolerance_pct !== '' ? Number(r.tolerance_pct) : null;
+  return Number.isFinite(v) ? v : null;
+}
+// A job's PO band: { po, pct, lo, hi }. null without a PO, for a MIL or shade-card job, or with no
+// tolerance set (zeroIfNone: count it as 0% - exactly the PO).
+function jobTolBand(j, zeroIfNone) {
+  if (!j || j.is_shade_card || j.stock_group_name) return null;
+  const po = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  if (!(po > 0)) return null;
+  let pct = companyTolFor(j.client);
+  if (pct === null) { if (!zeroIfNone) return null; pct = 0; }
+  return { po, pct, lo: Math.round(po * (1 - pct / 100)), hi: Math.round(po * (1 + pct / 100)) };
+}
+// The delivery box's quantity: what is ready and not shipped, but no more than the
+// tolerance still allows (the band's top less what has gone already).
+function deliveryTolPrefill(j, shipped, readyLeft) {
+  if (!(readyLeft > 0)) return '';
+  const band = jobTolBand(j);
+  if (!band) return readyLeft;
+  const v = Math.min(readyLeft, Math.max(0, band.hi - shipped));
+  return v > 0 ? v : '';
+}
+function deliveryTolLine(j, shipped, readyLeft) {
+  const band = jobTolBand(j);
+  if (!band) return '';
+  const room = Math.max(0, band.hi - shipped);
+  const n = v => Math.round(v).toLocaleString();
+  return `<div style="margin-top:4px;font-size:12px;color:#1e40af;">Tolerance <b>&plusmn;${band.pct}%</b>: deliver <b>${n(band.lo)} &ndash; ${n(band.hi)}</b> on the PO of ${n(band.po)}${shipped ? ` &middot; ${n(room)} more allowed` : ''}${readyLeft > 0 ? ` &middot; ready ${n(readyLeft)} &rarr; <b>${n(Math.min(readyLeft, room))}</b> within tolerance` : ''}${readyLeft > room ? ` <span style="color:#b91c1c;font-weight:700;">(${n(readyLeft - room)} over)</span>` : ''}</div>`;
+}
+// Jobs Report: over the band's top = red; a closed job under its bottom = orange.
+function jrDeliveredState(j, SF) {
+  const band = jobTolBand(j, true);
+  if (!band) return { delivState: '', delivTip: '' };
+  const got = totalDeliveredCartons(j);
+  const closed = isDone(j) || (SF && SF.closed);
+  const n = v => Math.round(v).toLocaleString();
+  const tip = `PO ${n(band.po)} ±${band.pct}% = ${n(band.lo)} to ${n(band.hi)} · delivered ${n(got)}`;
+  if (got > band.hi) return { delivState: 'over', delivTip: 'Over-delivered: ' + tip };
+  if (closed && got < band.lo) return { delivState: 'under', delivTip: 'Under-delivered: ' + tip };
+  return { delivState: '', delivTip: '' };
+}
+// Every company name: on jobs and in Company Settings, one each.
+function companyNamesAll() {
+  const seen = new Map();
+  for (const c of companyTols) { const n = String(c.company || '').trim(); if (n && !seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n); }
+  for (const j of (jobs || [])) { const n = String(j.client || '').trim(); if (n && !seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n); }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
+}
+function companyNamesDatalistHtml() {
+  return '<datalist id="company-names-dl">' + companyNamesAll().map(n => `<option value="${esc(n)}">`).join('') + '</datalist>';
+}
+// The Jobs tab's Company Settings: add a company, set each one's tolerance %.
+function openCompanyTolerances() {
+  const can = isSuperAdmin() || hasPerm('job_btn_company_settings', 'yes');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
+    <h2>&#127970; Company Settings</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">Tolerance % = how far a delivery may go over or under the PO. 5% on a PO of 10,000 = 9,500 to 10,500: the delivery box fills up to 10,500, and the Jobs Report shows more in red and a closed job with less in orange.</div>
+    ${can ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px;">
+      <div style="flex:1 1 220px;min-width:0;"><label class="form-label">New company</label><input type="text" id="ct-new-name" list="company-names-dl" autocomplete="off" placeholder="Company name"></div>
+      <div style="flex:0 0 120px;"><label class="form-label">Tolerance %</label><input type="number" id="ct-new-pct" min="0" max="100" step="any" placeholder="e.g. 5"></div>
+      <button class="btn btn-primary" onclick="addCompanyTolerance()">+ Add</button>
+    </div>${companyNamesDatalistHtml()}` : ''}
+    <input type="text" id="ct-search" placeholder="Search company…" oninput="renderCompanyTolList()" style="margin-bottom:8px;">
+    <div id="ct-list" style="max-height:55vh;overflow:auto;"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
+  renderCompanyTolList();
+}
+// Settings rows, then companies on jobs that have none yet (setting one adds it).
+function companyTolListRows() {
+  const rows = companyTols.map(c => ({ company: String(c.company || '').trim(), pct: c.tolerance_pct, jobs: 0 }));
+  for (const j of (jobs || [])) {
+    const n = String(j.client || '').trim();
+    if (!n) continue;
+    const hit = companyTolRow(n);
+    const row = hit ? rows.find(r => r.company.toLowerCase() === String(hit.company || '').trim().toLowerCase()) : rows.find(r => r.company.toLowerCase() === n.toLowerCase());
+    if (row) row.jobs++; else rows.push({ company: n, pct: null, jobs: 1 });
+  }
+  return rows.sort((a, b) => a.company.localeCompare(b.company));
+}
+function renderCompanyTolList() {
+  const el = document.getElementById('ct-list'); if (!el) return;
+  const can = isSuperAdmin() || hasPerm('job_btn_company_settings', 'yes');
+  const q = String((document.getElementById('ct-search') || {}).value || '').trim().toLowerCase();
+  const rows = companyTolListRows().filter(r => !q || searchMatch(r.company, q));
+  el.innerHTML = rows.length ? `<table style="width:100%;border-collapse:collapse;font-size:13px;">
+    <thead><tr style="background:var(--bg2);"><th style="text-align:left;padding:6px 8px;">Company</th><th style="text-align:right;padding:6px 8px;width:130px;">Tolerance %</th></tr></thead>
+    <tbody>${rows.map(r => `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:6px 8px;">${esc(r.company)} <small style="color:var(--text2);">${r.jobs} job${r.jobs === 1 ? '' : 's'}</small></td>
+      <td style="padding:4px 8px;text-align:right;">${can
+        ? `<input type="number" min="0" max="100" step="any" value="${r.pct === null || r.pct === undefined ? '' : esc(String(+r.pct))}" placeholder="none" data-company="${esc(r.company)}" onchange="saveCompanyTol(this.dataset.company, this.value)" style="width:90px;padding:4px 6px;text-align:right;">`
+        : (r.pct === null || r.pct === undefined ? '<span style="color:var(--text3);">none</span>' : esc(String(+r.pct)) + '%')}</td>
+    </tr>`).join('')}</tbody></table>` : '<div style="color:var(--text3);font-style:italic;padding:10px;">No companies match.</div>';
+}
+async function saveCompanyTol(company, value) {
+  showSaving(true);
+  try {
+    await api('POST', '/api/company-tolerances', { company, tolerance_pct: String(value).trim() });
+    await loadCompanyTols();
+    notify(String(value).trim() === '' ? `${company}: no tolerance` : `${company}: tolerance ${value}%`);
+    renderCompanyTolList();
+    if (document.getElementById('jr-content') && typeof renderJobsReport === 'function') renderJobsReport();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function addCompanyTolerance() {
+  const name = String((document.getElementById('ct-new-name') || {}).value || '').trim();
+  const pct = String((document.getElementById('ct-new-pct') || {}).value || '').trim();
+  if (!name) { await alertDialog({ title: 'Company name required', message: 'Type the company name.', kind: 'warn' }); return; }
+  await saveCompanyTol(name, pct);
+  const a = document.getElementById('ct-new-name'), b = document.getElementById('ct-new-pct');
+  if (a) a.value = ''; if (b) b.value = '';
+}
+
 async function loadCompanySettings() {
   try {
     companySettings = await api('GET', '/api/company-settings');
@@ -17519,7 +17661,7 @@ const jobsReportState = { client: '', dfrom: '', dto: '', q: '', poSearch: '', c
   // Excel-style column filters, same machinery as the Sale Report:
   // dropdown pickers for the low-cardinality columns, a search box for
   // the near-unique ones.
-  colFilters: { client: [], paper: [], machine: [], coatings: [] },
+  colFilters: { client: [], paper: [], machine: [], coatings: [], colors: [], plates: [] },
   colSearch: {} };
 
 // Open the Jobs Report full-page view. Same shape as openImportsPage —
@@ -18031,6 +18173,8 @@ const JR_COL_DROPDOWN_FIELDS = {
   paper:    { label: 'Paper',    get: r => r.paper },
   machine:  { label: 'Machine',  get: r => r.machine },
   coatings: { label: 'Coatings', get: r => r.coatings, multi: true },
+  colors:   { label: 'Colors',   get: r => r.colors },
+  plates:   { label: 'Plates',   get: r => r.plates },
 };
 function jrRowPassesColFilters(r) {
   const cf = jobsReportState.colFilters || {};
@@ -18388,6 +18532,9 @@ function buildJobsReportRows() {
       paper,
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
+      colors: String((((j.particulars || {}).no_of_colors) || {}).quantity || '').trim(),
+      plates: String((((j.particulars || {}).plates) || {}).quantity || '').trim(),
+      ...(typeof jrDeliveredState === 'function' ? jrDeliveredState(j, SF) : {}),   // over / under the company's tolerance
       linkPartner,
       shipments,
       stockGroupName: j.stock_group_name || null,
@@ -18762,7 +18909,11 @@ function renderJobsReport() {
     // Partial shipment — Delivered Qty text itself reads amber instead of
     // a separate dot marker, so the flag reads at a glance without extra
     // clutter next to the number.
-    const deliveredStyle = r.isPartial ? 'color:#c2410c;font-weight:700;' : '';
+    // Over the company's tolerance: red; a closed job under it: orange (owner, 2026-11-04).
+    const dState = String(r.delivState || '');
+    const deliveredStyle = dState.includes('over') ? 'color:#dc2626;font-weight:800;'
+      : dState.includes('under') ? 'color:#ea580c;font-weight:800;'
+      : (r.isPartial ? 'color:#c2410c;font-weight:700;' : '');
     const idCell = (r._merged && r._merged.length > 1)
       ? r._merged.map(mid => `<span onclick="event.stopPropagation(); openEdit(${mid})" title="Open Job E-${mid}" style="cursor:pointer;color:#1d4ed8;font-weight:600;text-decoration:underline;text-underline-offset:2px;">E-${mid}</span>`).join(' ')
       : (r.readyConfirmed
@@ -18786,13 +18937,15 @@ function renderJobsReport() {
       ${milQtyCell}
       <td style="padding:8px 10px;text-align:right;" title="${r.stockGroupName?'MIL job — PO Qty shown is what this shipment delivered':''}">${r.stockGroupName && Number.isFinite(+r.poQty) && r.poQty !== '' ? fmt(r.poQty) : esc(r.poQty)}</td>
       <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${ucWithJobTotal(r.cartonQty, r.jobUc, fmt, true)}</td>
-      <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${r.isPartial?'Partial delivery — still owes cartons':''}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
+      <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${esc(r.delivTip || (r.isPartial ? 'Partial delivery — still owes cartons' : ''))}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
       ${wastageCell}
       ${readyCell}
       <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${r.packetsUnit === 'sheets' ? `${fmt(r.packetsShown)} sheets <span style="font-weight:500;font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>` : fmt(r.packets)}</td>
       <td ${td}>${esc(r.paper)}</td>
       <td ${td}>${esc(r.machine)}</td>
       <td ${td}>${esc(r.coatings)}</td>
+      <td ${td}>${esc(r.colors)}</td>
+      <td ${td}>${esc(r.plates)}</td>
     </tr>`;
   }).join('');
   const th = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
@@ -18826,6 +18979,8 @@ function renderJobsReport() {
           <th ${th}>${jrColHeaderHtml('paper', 'Paper')}</th>
           <th ${th}>${jrColHeaderHtml('machine', 'Machine')}</th>
           <th ${th}>${jrColHeaderHtml('coatings', 'Coatings')}</th>
+          <th ${th}>${jrColHeaderHtml('colors', 'Colors')}</th>
+          <th ${th}>${jrColHeaderHtml('plates', 'Plates')}</th>
         </tr>
       </thead>
       <tbody>${tbody}</tbody>
@@ -18841,7 +18996,7 @@ function renderJobsReport() {
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.wastage)}</td>
           <td style="padding:8px 10px;text-align:right;white-space:nowrap;" title="Black: still on the shelf now. Green: the shipped Ready figures shown on the rows, added up.">${fmt(totals.readyQty)}${totals.readyShipped > 0 ? ` <span style="color:#166534;font-weight:700;">(${fmt(totals.readyShipped)} shipped)</span>` : ''}</td>
           <td style="padding:8px 10px;text-align:right;">${[totals.packets ? fmt(totals.packets) + (totals.sheetsCount ? ' pkts' : '') : '', totals.sheetsCount ? `${fmt(totals.sheetsCount)} sheets (${fmt(totals.sheetsPackets)} pkts)` : ''].filter(Boolean).join(' + ')}</td>
-          <td colspan="3"></td>
+          <td colspan="5"></td>
         </tr>
       </tfoot>
     </table>
@@ -18860,7 +19015,7 @@ async function exportJobsReport() {
   const readyMode = jobsReportState.mode === 'ready';
   const header = ['Job ID', 'Job Name', 'Created', readyMode ? 'Ready' : 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
-    'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage UPS', 'Ready Qty', 'Packets / Sheets', 'Paper', 'Machine', 'Coatings'];
+    'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage UPS', 'Ready Qty', 'Packets / Sheets', 'Paper', 'Machine', 'Coatings', 'Colors', 'Plates'];
   const aoa = reportExcelAoa(header);
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
@@ -18890,6 +19045,8 @@ async function exportJobsReport() {
       r.paper,
       r.machine,
       r.coatings,
+      r.colors,
+      r.plates,
     ]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -30735,7 +30892,7 @@ function jobForm(j={}, opts) {
       </tr>
       <tr>
         <td colspan="5"><span class="jc-lbl">Job Name *</span><input type="text" id="f-name" class="lc-input" value="${v(j.name)}" placeholder="e.g. biscuit box 200g" list="product-names-dl" autocomplete="off">${productNamesDatalistHtml()}</td>
-        <td colspan="2"><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods"></td>
+        <td colspan="2"><span class="jc-lbl">Company *</span><input type="text" id="f-client" class="lc-input" value="${v(j.client)}" placeholder="national foods" list="company-names-dl" autocomplete="off">${companyNamesDatalistHtml()}</td>
       </tr>
       <tr>
         <td colspan="2">
@@ -31050,7 +31207,7 @@ function deliveriesSection(j, opts) {
   // for a genuinely partial shipment. Blank (not 0) when there's nothing
   // useful to suggest, so the placeholder shows instead.
   const readyNotYetShipped = Math.max(0, (typeof readyCartonsTotal === 'function' ? readyCartonsTotal(j) : 0) - shipped);
-  const cartonsPrefill = readyNotYetShipped > 0 ? readyNotYetShipped : '';
+  const cartonsPrefill = deliveryTolPrefill(j, shipped, readyNotYetShipped);   // no more than the company's tolerance allows
 
   // Same yellow card the finance layout gives each recorded shipment, so
   // the box reads identically for every role - only the invoicing fields
@@ -31104,6 +31261,7 @@ function deliveriesSection(j, opts) {
   const summaryLine = booked
     ? `Booked: <b>${booked.toLocaleString()}</b> ${countUnit} &middot; Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} &middot; Remaining: <b>${remaining.toLocaleString()}</b> ${countUnit}`
     : `Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} (booked P.O. qty not set)`;
+  const tolLine = deliveryTolLine(j, shipped, readyNotYetShipped);
 
   // Same self-saving draft as the invoicing form: finance may have filled this
   // shipment in there, and whoever records it sees that work here. Not on the
@@ -31161,7 +31319,7 @@ function deliveriesSection(j, opts) {
       <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;">Deliveries</div>
       ${statusPill}
     </div>
-    <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}</div>
+    <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}${tolLine}</div>
     <div>${rows}</div>
     ${addForm}
   </div>`;
@@ -31237,7 +31395,7 @@ function deliveriesSectionFinance(j, opts) {
   // for a genuinely partial shipment. Blank (not 0) when there's nothing
   // useful to suggest, so the placeholder shows instead.
   const readyNotYetShipped = Math.max(0, (typeof readyCartonsTotal === 'function' ? readyCartonsTotal(j) : 0) - shipped);
-  const cartonsPrefill = readyNotYetShipped > 0 ? readyNotYetShipped : '';
+  const cartonsPrefill = deliveryTolPrefill(j, shipped, readyNotYetShipped);   // no more than the company's tolerance allows
   // Rate/Tax ride along with the delivery instead of a separate Save
   // Pricing step — whoever records the shipment confirms (or overrides)
   // the price at the same time. Pre-filled from the job's own saved rate,
@@ -31341,6 +31499,7 @@ function deliveriesSectionFinance(j, opts) {
   const summaryLine = booked
     ? `Booked: <b>${booked.toLocaleString()}</b> ${countUnit} &middot; Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} &middot; Remaining: <b>${remaining.toLocaleString()}</b> ${countUnit}`
     : `Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} (booked P.O. qty not set)`;
+  const tolLine = deliveryTolLine(j, shipped, readyNotYetShipped);
 
   // Rate/Tax are only editable here for whoever actually holds
   // delivery_write — the Station Manager flow (managerMode) reaches
@@ -31419,7 +31578,7 @@ function deliveriesSectionFinance(j, opts) {
       <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;">Deliveries</div>
       ${statusPill}
     </div>
-    <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}</div>
+    <div style="font-size:12px;color:var(--text);margin-bottom:8px;">${summaryLine}${tolLine}</div>
     ${isShadeCard ? '' : `<div style="font-size:12px;color:var(--text);margin-bottom:8px;">${pricingText}</div>`}
     <div>${rows}</div>
     ${addForm}
@@ -40649,6 +40808,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_block',           type: 'button' },
   { key: 'job_btn_delete',          type: 'button' },
   { key: 'job_btn_duplicate',       type: 'button' },
+  { key: 'job_btn_company_settings', type: 'button' },
   { key: 'job_btn_create_mil',      type: 'button' },
   { key: 'job_btn_new_job',         type: 'button' },
   { key: 'job_btn_stage_forward',   type: 'button' },
@@ -42033,7 +42193,7 @@ async function init() {
     renderUserChip();
     // Operators can't read inventory (403), so skip the call for them.
     // Everyone else loads jobs + inventory in parallel.
-    const loaders = [loadJobs(), loadPrintingMachines(), loadMachineRoster(), loadProductNames()];
+    const loaders = [loadJobs(), loadPrintingMachines(), loadMachineRoster(), loadProductNames(), loadCompanyTols()];
     // Finance reference data (Product Rate / aliases / Company Settings), only for roles that can see any of it.
     if (hasPerm('products_tab_access', 'view') || hasPerm('rpt_sale_report', 'view') || hasPerm('job_btn_pricing', 'view')) {
       loaders.push(loadProductRates(), loadProductAliases(), loadCompanySettings(), loadProductSpecials());
