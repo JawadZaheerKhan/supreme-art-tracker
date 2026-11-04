@@ -6164,6 +6164,14 @@ function setCeoDashSalesCustom() {
 }
 // Sales See more: a company clicked shows its deliveries; '' = the company list.
 function ceoDashSaleCo(k) { ceoDash.saleCo = k; renderCeoDash(); }
+// "without a rate" from a tile: open Sales See more on the deliveries with no rate.
+function ceoDashNoRate(ev) { if (ev) ev.stopPropagation(); ceoDash.open = 'sale-ex'; ceoDash.saleCo = '__norate'; renderCeoDash(); }
+// A Rate typed on the Dashboard: saved on that delivery as the Sale Report saves it, then the figures redrawn.
+async function ceoDashSaveRate(jobId, index, value) {
+  if (String(value).trim() === '') return;
+  await saveDeliveryEntryField(jobId, index, 'rate', value);
+  if (mode === 'dashboard') renderCeoDash();
+}
 function ceoDashStockBounds() { return ceoDashRangeBounds(ceoDash.srange, ceoDash.sdfrom, ceoDash.sdto); }
 function ceoDashIso(ms) { return ms == null ? '' : localDateISO(new Date(ms)); }
 function ceoDashRangeText(b) {
@@ -6696,18 +6704,31 @@ function renderCeoDash() {
     </div>
     ${seeMoney ? (() => {
       const red = 'color:#b91c1c;font-weight:700;';
-      const noRateTxt = n => n ? ` · <span style="${red}">${fmt(n)} without a rate</span>` : '';
+      // Clickable: opens the deliveries without a rate, to set them.
+      const noRateTxt = n => n ? ` · <a onclick="ceoDashNoRate(event)" style="${red}cursor:pointer;text-decoration:underline;">${fmt(n)} without a rate</a>` : '';
+      const canRate = isSuperAdmin() || hasPerm('job_btn_pricing', 'yes');
+      // A delivery with no rate: a Rate box to set it (a merged shared-invoice row opens its job instead).
+      const rateBox = r => (!canRate || r._merged) ? `<span style="${red}">no rate</span>`
+        : `<span style="${red}">no rate</span> <input type="number" min="0" step="any" placeholder="Rate" onclick="event.stopPropagation()" onchange="ceoDashSaveRate(${r.id}, ${r.deliveryIndex}, this.value)" style="width:78px;padding:3px 5px;border:1px solid #fca5a5;border-radius:5px;text-align:right;font-size:12px;margin-left:4px;">`;
+      const saleRow = (r, withCo) => {
+        const none = r.rate === null || r.rate === undefined;
+        return row(`<a onclick="ceoDashOpenJob(${r.id})">${esc(r.idDisplay || ('E-' + r.id))}</a> <span style="${none ? red : ''}">${esc(r.name || '')}</span>${withCo ? ` <small style="color:var(--text2);">${esc(r.client || '')}</small>` : ''}`,
+          `${fmt(r.cartons)} UC · ${esc(r.deliveredAt || '')} · ${none ? rateBox(r) : `excl. ${fmtRate(r.amountExTax)} · incl. ${fmtRate(r.amountIncTax)}`}`);
+      };
       // See more: the companies; one clicked shows each of its deliveries, a product with no rate in red.
       const more = () => {
+        if (ceoDash.saleCo === '__norate') {
+          const nr = [].concat(...f.saleCompanies.map(c => c.rows)).filter(r => r.rate === null || r.rate === undefined);
+          return `<div style="margin-bottom:8px;"><button class="btn btn-sm" onclick="ceoDashSaleCo('')">&lsaquo; All companies</button></div>`
+            + head(`Without a rate · ${fmt(nr.length)}`)
+            + (canRate ? '<div class="cd-sub" style="margin-bottom:6px;">Type the rate and press Enter (or click away) - it is saved on that delivery, as in the Sale Report.</div>' : '')
+            + list(nr.map(r => saleRow(r, true)), 'Every delivery in this period has a rate');
+        }
         const co = ceoDash.saleCo && f.saleCompanies.find(c => c.key === ceoDash.saleCo);
         if (co) {
           return `<div style="margin-bottom:8px;"><button class="btn btn-sm" onclick="ceoDashSaleCo('')">&lsaquo; All companies</button></div>`
             + head(`${esc(co.name)} · excl. ${fmtRate(co.ex)} · incl. ${fmtRate(co.inc)}${noRateTxt(co.noRate)}`)
-            + list(co.rows.map(r => {
-                const none = r.rate === null || r.rate === undefined;
-                return row(`<a onclick="ceoDashOpenJob(${r.id})">${esc(r.idDisplay || ('E-' + r.id))}</a> <span style="${none ? red : ''}">${esc(r.name || '')}</span>`,
-                  `${fmt(r.cartons)} UC · ${esc(r.deliveredAt || '')} · ${none ? `<span style="${red}">no rate</span>` : `excl. ${fmtRate(r.amountExTax)} · incl. ${fmtRate(r.amountIncTax)}`}`);
-              }), 'No deliveries');
+            + list(co.rows.map(r => saleRow(r, false)), 'No deliveries');
         }
         return `<div class="cd-sub">Click a company to see its deliveries. A product with no rate is counted as 0 and shown in red.</div>`
           + head(`By company · highest first${noRateTxt(f.saleNoRate)}`)
