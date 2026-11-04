@@ -2991,6 +2991,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 .cd-zone-2 { background:#fff6cc; border-color:#f7dc6f; }
 .cd-zone-3 { background:#fdefb2; border-color:#eecb4d; }
 .cd-zone-4 { background:#fbe9a6; border-color:#e3bd3c; }
+.cd-zone-5 { background:#e9f7ec; border-color:#9fd8ad; }
+.cd-co-row { cursor:pointer; }
+.cd-co-row:hover span:first-child { text-decoration:underline; }
 @media (max-width: 380px) { .cd-zone { padding:8px 8px 10px; } }
 .cd-offcut { --c:#0891b2; --t:#ecfeff; }
 .cd-over   { --c:#9f1239; --t:#ffe4e6; }
@@ -6116,7 +6119,7 @@ function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 // (buildSaleReportRows), job states = the Jobs tab's views, production =
 // the Production Report (with its own date filter). "Right now" tiles
 // ignore the date filter. View only.
-const ceoDash = { range: 'this-month', dfrom: '', dto: '', prange: 'today', pdfrom: '', pdto: '', srange: 'this-month', sdfrom: '', sdto: '', sLoaded: null, jobIssued: null, stalePaper: null, txs: null, imports: null, prod: null, err: '', open: '' };
+const ceoDash = { range: 'this-month', dfrom: '', dto: '', prange: 'today', pdfrom: '', pdto: '', srange: 'this-month', sdfrom: '', sdto: '', mrange: 'this-month', mdfrom: '', mdto: '', saleCo: '', sLoaded: null, jobIssued: null, stalePaper: null, txs: null, imports: null, prod: null, err: '', open: '' };
 const CEO_DASH_RANGES = [['today', 'Today'], ['this-week', 'This week'], ['this-month', 'This month'], ['last-month', 'Last month'], ['this-year', 'This year'], ['', 'All time'], ['custom', 'Custom range…']];
 function ceoDashRangeBounds(range, dfrom, dto) {
   if (range === 'today') { const d = localDateISO(); return resolveDateFilterBounds('custom', d, d); }
@@ -6124,6 +6127,15 @@ function ceoDashRangeBounds(range, dfrom, dto) {
 }
 function ceoDashBounds() { return ceoDashRangeBounds(ceoDash.range, ceoDash.dfrom, ceoDash.dto); }
 function ceoDashProdBounds() { return ceoDashRangeBounds(ceoDash.prange, ceoDash.pdfrom, ceoDash.pdto); }
+function ceoDashSalesBounds() { return ceoDashRangeBounds(ceoDash.mrange, ceoDash.mdfrom, ceoDash.mdto); }
+function setCeoDashSalesRange(v) { ceoDash.mrange = v; if (v !== 'custom') { ceoDash.mdfrom = ''; ceoDash.mdto = ''; } renderCeoDash(); }
+function setCeoDashSalesCustom() {
+  ceoDash.mdfrom = (document.getElementById('cd-mdfrom') || {}).value || '';
+  ceoDash.mdto   = (document.getElementById('cd-mdto')   || {}).value || '';
+  if (ceoDash.mdfrom && ceoDash.mdto) renderCeoDash();
+}
+// Sales See more: a company clicked shows its deliveries; '' = the company list.
+function ceoDashSaleCo(k) { ceoDash.saleCo = k; renderCeoDash(); }
 function ceoDashStockBounds() { return ceoDashRangeBounds(ceoDash.srange, ceoDash.sdfrom, ceoDash.sdto); }
 function ceoDashIso(ms) { return ms == null ? '' : localDateISO(new Date(ms)); }
 function ceoDashRangeText(b) {
@@ -6289,9 +6301,23 @@ function ceoDashFigures() {
   // 3 + 5. sales and wastage (period) - the Sale Report's rows
   const rows = ceoDashSaleRows(b);
   const sumBy = (keyOf, valOf) => { const m = new Map(); for (const r of rows) { const k = keyOf(r); const v = valOf(r); if (!k || v == null) continue; m.set(k, (m.get(k) || 0) + v); } return m; };
-  f.salesTotal = rows.reduce((a, r) => a + (+r.amountExTax || 0), 0);
-  f.salesByCompany = [...sumBy(r => r.client, r => r.amountExTax)].sort((x, y) => y[1] - x[1]);
-  f.salesByProduct = [...sumBy(r => resolveProductKey(String(r.name || '').trim()).name, r => r.amountExTax)].sort((x, y) => y[1] - x[1]);
+  // Sales (own date filter): the Sale Report's rows for that period. A delivery with no
+  // rate adds nothing and is counted, so it can be marked.
+  const saleRows = ceoDashSaleRows(ceoDashSalesBounds());
+  f.saleEx = saleRows.reduce((a, r) => a + (+r.amountExTax || 0), 0);
+  f.saleInc = saleRows.reduce((a, r) => a + (+r.amountIncTax || 0), 0);
+  f.saleNoRate = saleRows.filter(r => r.rate === null || r.rate === undefined).length;
+  const coMap = new Map();
+  for (const r of saleRows) {
+    const name = String(r.client || '').trim() || '—', k = name.toLowerCase();
+    const e = coMap.get(k) || { key: k, name, ex: 0, inc: 0, noRate: 0, rows: [] };
+    e.ex += +r.amountExTax || 0; e.inc += +r.amountIncTax || 0;
+    if (r.rate === null || r.rate === undefined) e.noRate++;
+    e.rows.push(r);
+    coMap.set(k, e);
+  }
+  f.saleCompanies = [...coMap.values()].sort((x, y) => y.ex - x.ex || y.noRate - x.noRate);
+  f.saleRowsCount = saleRows.length;
   const wk = rows.reduce((a, r) => a + (+r.wastageKg || 0), 0), ik = rows.reduce((a, r) => a + (+r.issuedKg || 0), 0);
   f.wastagePct = ik > 0 ? wk * 100 / ik : null; f.wastageKg = wk; f.issuedKg = ik;
   const pctBy = keyOf => {
@@ -6477,8 +6503,8 @@ function ceoDashMilLink() {
   return '<div style="margin-top:10px;"><button class="btn btn-sm" style="background:#7c3aed;border-color:#7c3aed;color:#fff;font-weight:700;" onclick="ceoDashOpenMilReport()">Open the MIL Products report &rarr;</button></div>';
 }
 function ceoDashOpenMilReport() { ceoDash.open = ''; setMode('reports'); openReportsGroup('jobs-group', 'mil-products'); }
-function ceoDashMore(key) { ceoDash.open = key; renderCeoDash(); }
-function ceoDashCloseMore() { ceoDash.open = ''; renderCeoDash(); }
+function ceoDashMore(key) { ceoDash.open = key; ceoDash.saleCo = ''; renderCeoDash(); }
+function ceoDashCloseMore() { ceoDash.open = ''; ceoDash.saleCo = ''; renderCeoDash(); }
 function ceoDashOpenJob(id) { ceoDash.open = ''; renderCeoDash(); openEdit(id); }
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && ceoDash.open && mode === 'dashboard') ceoDashCloseMore(); });
 function ceoDashRangeBar(prefix, range, dfrom, dto, onRange, onCustom, reload) {
@@ -6540,9 +6566,6 @@ function renderCeoDash() {
       ${tile('delivered', 'del', 'Jobs delivered', fmt(f.deliveredJobs), 'fully delivered' + (f.deliveredShade.length ? ` · + ${fmt(f.deliveredShade.length)} shade card${f.deliveredShade.length === 1 ? '' : 's'}` : ''), () => list(f.deliveredList.map(x => row(job(x.j), date(x.ms))), 'No jobs delivered')
           + (f.deliveredShade.length ? head(`Shade cards · ${fmt(f.deliveredShade.length)} (not in sales, UC or wastage)`) + list(f.deliveredShade.map(x => row(job(x.j), date(x.ms))), '') : ''))}
       ${tile('uc', 'ship', 'UC delivered', fmt(f.uc), `${fmt(f.shipments)} shipment${f.shipments === 1 ? '' : 's'}`, () => list(f.shipList.map(x => row(job(x.j), `${fmt(x.cartons)} · ${date(x.ms)}`)), 'No deliveries'))}
-      ${seeMoney ? tile('sales', 'money', 'Sales', fmtRate(f.salesTotal), 'excl. tax', () =>
-          head('By company · highest first') + list(f.salesByCompany.map(([k, v]) => row(esc(k), fmtRate(v))), 'No sales')
-          + head('By product · highest first') + list(f.salesByProduct.map(([k, v]) => row(esc(k), fmtRate(v))), 'No sales')) : ''}
       ${tile('waste', 'waste', 'Wastage', f.wastagePct == null ? '—' : fmt(f.wastagePct) + '%', f.issuedKg ? `${fmt(f.wastageKg)} of ${fmt(f.issuedKg)} kg` : 'no deliveries', () =>
           `<div class="cd-sub">Wastage Weight × 100 ÷ Packets Issued Weight</div>`
           + head('By company · highest first') + list(f.wasteByCompany.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded')
@@ -6642,7 +6665,36 @@ function renderCeoDash() {
       })()}
       ${tile('over-issued', 'over', 'Over-issued paper', fmt(f.overIssued.length), 'waiting for a decision', jobList(f.overIssued, j => { const p = overIssuePending(j) || {}; return `${esc(String(p.total_packets ?? ''))} ${esc(p.unit || 'packets')}${p.challan_no ? ' · challan ' + esc(p.challan_no) : ''}`; }, 'Nothing over-issued'))}
     </div>
+    </div>
+    ${seeMoney ? (() => {
+      const red = 'color:#b91c1c;font-weight:700;';
+      const noRateTxt = n => n ? ` · <span style="${red}">${fmt(n)} without a rate</span>` : '';
+      // See more: the companies; one clicked shows each of its deliveries, a product with no rate in red.
+      const more = () => {
+        const co = ceoDash.saleCo && f.saleCompanies.find(c => c.key === ceoDash.saleCo);
+        if (co) {
+          return `<div style="margin-bottom:8px;"><button class="btn btn-sm" onclick="ceoDashSaleCo('')">&lsaquo; All companies</button></div>`
+            + head(`${esc(co.name)} · excl. ${fmtRate(co.ex)} · incl. ${fmtRate(co.inc)}${noRateTxt(co.noRate)}`)
+            + list(co.rows.map(r => {
+                const none = r.rate === null || r.rate === undefined;
+                return row(`<a onclick="ceoDashOpenJob(${r.id})">${esc(r.idDisplay || ('E-' + r.id))}</a> <span style="${none ? red : ''}">${esc(r.name || '')}</span>`,
+                  `${fmt(r.cartons)} UC · ${esc(r.deliveredAt || '')} · ${none ? `<span style="${red}">no rate</span>` : `excl. ${fmtRate(r.amountExTax)} · incl. ${fmtRate(r.amountIncTax)}`}`);
+              }), 'No deliveries');
+        }
+        return `<div class="cd-sub">Click a company to see its deliveries. A product with no rate is counted as 0 and shown in red.</div>`
+          + head(`By company · highest first${noRateTxt(f.saleNoRate)}`)
+          + `<div class="cd-list">` + f.saleCompanies.map(c => `<div class="cd-co-row" onclick="ceoDashSaleCo('${esc(c.key).replace(/'/g, '&#39;')}')"><span>${esc(c.name)} <small style="color:var(--text2);">${fmt(c.rows.length)} deliver${c.rows.length === 1 ? 'y' : 'ies'}</small>${c.noRate ? ` <small style="${red}">${fmt(c.noRate)} no rate</small>` : ''}</span><b>excl. ${fmtRate(c.ex)} · incl. ${fmtRate(c.inc)} &rsaquo;</b></div>`).join('') + `</div>`
+          + (f.saleCompanies.length ? '' : '<div class="cd-sub">No sales</div>');
+      };
+      return `<div class="cd-zone cd-zone-5">
+    <div class="cd-sec">Sales <small>· its own date filter</small></div>
+    ${ceoDashRangeBar('cd-m', ceoDash.mrange, ceoDash.mdfrom, ceoDash.mdto, 'setCeoDashSalesRange', 'setCeoDashSalesCustom', 'renderCeoDash')}
+    <div class="cd-grid cd-fill">
+      ${tile('sale-ex', 'money', 'Sale excl. tax', fmtRate(f.saleEx), `${fmt(f.saleRowsCount)} deliver${f.saleRowsCount === 1 ? 'y' : 'ies'}${noRateTxt(f.saleNoRate)}`, more)}
+      ${tile('sale-inc', 'money', 'Sale incl. tax', fmtRate(f.saleInc), `with sales tax${noRateTxt(f.saleNoRate)}`, more)}
+    </div>
     </div>`;
+    })() : ''}`;
   const open = ceoDash.open && details[ceoDash.open];
   const pop = !open ? '' : `<div class="cd-pop-bg" onclick="if (event.target === this) ceoDashCloseMore()">
       <div class="cd-pop cd-${open.fam}"><div class="cd-pop-top"><b>${open.label}</b><button class="cd-pop-x" onclick="ceoDashCloseMore()" title="Close">&#10005;</button></div>
