@@ -25559,20 +25559,26 @@ function _crPaperKey(paperType, brand) {
   const norm = v => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
   return `paper:${norm(paperType)}|${norm(brand)}`;
 }
-// A job's board Rs/kg from Cost Settings: the brands its main paper was issued from,
-// weighted by sheets (brands with no rate left out). Not issued yet: its paper item's brand.
-function _crJobBoardRate(j, paperType) {
+// A job's board cost per packet (ream) from Cost Settings: the brands its main paper was
+// issued from, weighted by sheets (brands with no rate left out). A brand priced per kg
+// counts its net rate x the packet's kg; one priced per packet (owner, 2026-11-05) its net
+// rate as it is. Not issued yet: its paper item's brand.
+function _crBoardPerPack(entry, kgPerPack) {
+  const net = _crNetRate(entry);
+  return entry && entry.unit === 'rs_per_packet' ? net : net * (kgPerPack || 0);
+}
+function _crJobBoardPerPack(j, paperType, kgPerPack) {
   let num = 0, den = 0;
   for (const x of (Array.isArray(j.issued_items) ? j.issued_items : [])) {
     if (!x || x.source === 'secondary' || x.source === 'third') continue;
     const sh = parseFloat(x.sheets) || 0;
     const it = x.item_id && inventoryAll ? inventoryAll.find(i => Number(i.id) === Number(x.item_id)) : null;
-    const eff = _crNetRate(_costRates.get(_crPaperKey((it && it.paper_type) || paperType, x.brand != null ? x.brand : (it && it.brand))));
-    if (sh > 0 && eff > 0) { num += sh * eff; den += sh; }
+    const pp = _crBoardPerPack(_costRates.get(_crPaperKey((it && it.paper_type) || paperType, x.brand != null ? x.brand : (it && it.brand))), kgPerPack);
+    if (sh > 0 && pp > 0) { num += sh * pp; den += sh; }
   }
   if (den > 0) return num / den;
   const it = j.inventory_item_id && inventoryAll ? inventoryAll.find(i => Number(i.id) === Number(j.inventory_item_id)) : null;
-  return it ? _crNetRate(_costRates.get(_crPaperKey(it.paper_type || paperType, it.brand))) : 0;
+  return it ? _crBoardPerPack(_costRates.get(_crPaperKey(it.paper_type || paperType, it.brand)), kgPerPack) : 0;
 }
 function _crCoatingKey(name) {
   return `coating:${String(name || '').trim().toLowerCase()}`;
@@ -25694,9 +25700,10 @@ function costReportRows() {
     const kgPerPack = (l && w && gsm) ? (l * w * gsm) / (isRe ? 3100 : 15500) : 0;
     const totalKg = kgPerPack * packets;
     const boardRateOverride = _costBoardRates.get(j.id) || 0;
-    const paperEff = _crJobBoardRate(j, paperType);
+    const boardPerPack = _crJobBoardPerPack(j, paperType, kgPerPack);
+    const paperEff = kgPerPack > 0 ? boardPerPack / kgPerPack : 0;   // shown as Rs/kg
     const boardRate = boardRateOverride > 0 ? boardRateOverride : paperEff;
-    const boardRateSource = boardRateOverride > 0 ? 'override' : (paperEff > 0 ? 'settings' : '');
+    const boardRateSource = boardRateOverride > 0 ? 'override' : (boardPerPack > 0 ? 'settings' : '');
     const jsheets = parseFloat(String(j.sheets || '').replace(/[^0-9.\-]/g, ''));
     const sheetsFromJob = Number.isFinite(jsheets) && jsheets > 0;
     const sheets = sheetsFromJob ? jsheets : packets * packSize;
@@ -25722,7 +25729,7 @@ function costReportRows() {
       coatings: coatingList.join(', '), coatingBreakdown, coatingCost: coatingBreakdown.reduce((a, c) => a + c.cost, 0),
       paperType, size: (l && w) ? `${l}×${w}` : '', gsm, ups: j.ups || '',
       packets, packUnit: isRe ? 'reams' : 'pkts', packSize, sheets, sheetsFromJob, kgPerPack, totalKg,
-      boardRate, boardRateOverride, boardRateSource, boardCost: totalKg * boardRate,
+      boardRate, boardRateOverride, boardRateSource, boardCost: boardRateOverride > 0 ? totalKg * boardRateOverride : packets * boardPerPack,
       qty, revenue, rate: qty > 0 ? revenue / qty : 0,
       baseRate: cartonsPriced > 0 ? rateSum / cartonsPriced : 0,
       taxPct: { avg: cartonsPriced > 0 ? taxSum / cartonsPriced : 0, mixed },
@@ -25902,7 +25909,11 @@ function costRateCells(key, unitWord, canEdit, withGst) {
   const eff = _crEffRate(e);
   const fmt4 = n => n ? n.toLocaleString('en-IN', { maximumFractionDigits: 4 }) : '—';
   return `<td style="padding:6px 10px;text-align:right;"><input type="number" step="0.01" min="0" value="${e ? e.rate : ''}" placeholder="0" class="hg-cs-rate" onchange="costSaveRow(this)" style="${COST_RATE_STYLE}"${dis}></td>
-    <td style="padding:6px 10px;text-align:right;"><input type="number" step="0.01" min="0.01" value="${(e && e.per_qty) || 1}" placeholder="1" class="hg-cs-per" onchange="costSaveRow(this)" style="${COST_PER_STYLE}"${dis}></td>
+    <td style="padding:6px 10px;text-align:right;white-space:nowrap;"><input type="number" step="0.01" min="0.01" value="${(e && e.per_qty) || 1}" placeholder="1" class="hg-cs-per" onchange="costSaveRow(this)" style="${COST_PER_STYLE}"${dis}>${withGst ? `
+      <select class="hg-cs-unit" onchange="costSaveRow(this)" title="Priced per kg or per packet (ream)" style="margin-left:4px;padding:5px 4px;border:1px solid var(--border);border-radius:6px;font-size:12px;"${dis}>
+        <option value="rs_per_kg"${e && e.unit === 'rs_per_packet' ? '' : ' selected'}>kg</option>
+        <option value="rs_per_packet"${e && e.unit === 'rs_per_packet' ? ' selected' : ''}>packet</option>
+      </select>` : ''}</td>
     <td style="padding:6px 10px;text-align:right;color:var(--text2);font-variant-numeric:tabular-nums;" class="hg-cs-eff">${fmt4(eff)}</td>${withGst ? `
     <td style="padding:6px 10px;text-align:right;"><input type="number" step="0.01" min="0" max="100" value="${e && Number(e.gst_pct) ? Number(e.gst_pct) : ''}" placeholder="0" class="hg-cs-gst" onchange="costSaveRow(this)" style="${COST_RATE_STYLE};width:64px;"${dis}></td>
     <td style="padding:6px 10px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums;" class="hg-cs-net">${fmt4(_crNetRate(e))}</td>` : ''}`;
@@ -25952,9 +25963,9 @@ function openCostSettings() {
       Cost Report &rarr; Board Cost (at the board's Net Rs / kg, GST included) + Coating Cost columns read from here.
     </div>
     <div style="margin-bottom:22px;">
-      <h3 style="margin:0 0 8px;font-size:14px;color:var(--text2);letter-spacing:0.06em;text-transform:uppercase;">&#128230; Board / Paper &mdash; Rate per <span style="color:var(--brand);">kg</span></h3>
+      <h3 style="margin:0 0 8px;font-size:14px;color:var(--text2);letter-spacing:0.06em;text-transform:uppercase;">&#128230; Board / Paper &mdash; Rate per <span style="color:var(--brand);">kg or packet</span></h3>
       <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">
-        ${paperRows.length ? `One rate per paper type and brand - every size and GSM of that brand uses it. ${paperRows.length} from Inventory.` : 'No inventory rows yet.'}
+        ${paperRows.length ? `One rate per paper type and brand - every size and GSM of that brand uses it. Pick kg or packet (ream) for how the vendor prices it. ${paperRows.length} from Inventory.` : 'No inventory rows yet.'}
       </div>
       <div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
         <table style="width:100%;font-size:13px;border-collapse:collapse;">
@@ -25962,10 +25973,10 @@ function openCostSettings() {
             <th style="text-align:left;padding:8px 10px;">Paper Type</th>
             <th style="text-align:left;padding:8px 10px;">Brand</th>
             <th style="text-align:right;padding:8px 10px;">Rate (Rs)</th>
-            <th style="text-align:right;padding:8px 10px;">Per (kg)</th>
-            <th style="text-align:right;padding:8px 10px;color:var(--text2);font-weight:500;">= Rs / kg</th>
+            <th style="text-align:right;padding:8px 10px;">Per (kg / packet)</th>
+            <th style="text-align:right;padding:8px 10px;color:var(--text2);font-weight:500;">= Rs each</th>
             <th style="text-align:right;padding:8px 10px;">GST %</th>
-            <th style="text-align:right;padding:8px 10px;">Net Rs / kg</th>
+            <th style="text-align:right;padding:8px 10px;">Net Rs</th>
           </tr></thead>
           <tbody>
             ${paperRows.length ? paperRows.map(p => {
@@ -26023,7 +26034,8 @@ async function costSaveRow(el) {
   let per = Number(row.querySelector('.hg-cs-per').value);
   if (!Number.isFinite(per) || per <= 0) per = 1;
   const gstEl = row.querySelector('.hg-cs-gst');
-  const body = { category: row.dataset.cat, label: row.dataset.label, rate, unit: row.dataset.unit, per_qty: per };
+  const unitEl = row.querySelector('.hg-cs-unit');
+  const body = { category: row.dataset.cat, label: row.dataset.label, rate, unit: unitEl ? unitEl.value : row.dataset.unit, per_qty: per };
   if (gstEl) body.gst_pct = Math.min(100, Math.max(0, Number(gstEl.value) || 0));
   const prev = _costRates.get(key) || null;
   _costRates.set(key, { key, ...body });
