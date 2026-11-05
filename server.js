@@ -329,7 +329,8 @@ function getDb() {
 // Bumped again for finance.product_names and the Access Register row products_btn_name (2026-11-03).
 // Bumped again for finance.company_settings.tolerance_pct and the Access Register row
 // job_btn_company_settings (company tolerance, 2026-11-04).
-const SCHEMA_VERSION = 'v2026-11-04-company-tolerance';
+// Bumped again for finance.cost_settings.gst_pct (board GST % and net value, 2026-11-05).
+const SCHEMA_VERSION = 'v2026-11-05-cost-gst';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1765,6 +1766,8 @@ async function initDb() {
     `;
     // Tolerance % (2026-11-04): a delivery may go this far over or under the PO.
     await sql`ALTER TABLE finance.company_settings ADD COLUMN IF NOT EXISTS tolerance_pct NUMERIC`;
+    // Board / paper GST % in Cost Settings (owner, 2026-11-05): net = rate per kg + GST.
+    await sql`ALTER TABLE finance.cost_settings ADD COLUMN IF NOT EXISTS gst_pct NUMERIC NOT NULL DEFAULT 0`;
     // Board sold as waste never goes through a job card, so the Sale Report's
     // "Waste of Board" tab keeps its own hand-entered rows here. Every value
     // is typed by the user — nothing is derived from jobs.
@@ -2846,7 +2849,7 @@ app.post('/api/users/:id/unblock', requirePermission('user_btn_block'), async (r
 // board rates. key = 'paper:<type>|<brand>' (was <type>|<size>|<gsm> until 2026-11-05), 'coating:<name>',
 // 'printing:<label>', 'diecutting:<label>', 'pasting:<label>', 'plate:<label>'.
 const COST_CATEGORIES = new Set(['paper', 'coating', 'printing', 'diecutting', 'pasting', 'plate']);
-const costRow = r => ({ key: r.key, category: r.category, label: r.label, rate: Number(r.rate) || 0, per_qty: Number(r.per_qty) || 1, unit: r.unit, updated_at: r.updated_at });
+const costRow = r => ({ key: r.key, category: r.category, label: r.label, rate: Number(r.rate) || 0, per_qty: Number(r.per_qty) || 1, gst_pct: Number(r.gst_pct) || 0, unit: r.unit, updated_at: r.updated_at });
 app.get('/api/cost-settings', requirePermission('rpt_cost_report', 'view'), async (req, res) => {
   try {
     await dbReady;
@@ -2859,21 +2862,23 @@ app.put('/api/cost-settings/:key', requirePermission('rpt_cost_settings'), async
     await dbReady;
     const sql = getDb();
     const key = String(req.params.key || '').trim();
-    const { category, label, rate, per_qty, unit } = req.body || {};
+    const { category, label, rate, per_qty, unit, gst_pct } = req.body || {};
     if (!COST_CATEGORIES.has(category) || !key.startsWith(category + ':')) return res.status(400).json({ error: 'Unknown rate.' });
     if (!['rs_per_kg', 'rs_per_sheet', 'rs_per_plate'].includes(unit)) return res.status(400).json({ error: 'Unknown unit.' });
     if (!String(label || '').trim()) return res.status(400).json({ error: 'A rate needs a name.' });
     const rateNum = Number(rate), perNum = Number(per_qty);
     if (!Number.isFinite(rateNum) || rateNum < 0) return res.status(400).json({ error: 'Rate must be zero or more.' });
     if (!Number.isFinite(perNum) || perNum <= 0) return res.status(400).json({ error: 'Per must be more than zero.' });
+    const gstNum = gst_pct === undefined || gst_pct === null || gst_pct === '' ? 0 : Number(gst_pct);
+    if (!Number.isFinite(gstNum) || gstNum < 0 || gstNum > 100) return res.status(400).json({ error: 'GST must be 0 to 100%.' });
     const rows = await sql`
-      INSERT INTO finance.cost_settings (key, category, label, rate, per_qty, unit, updated_by)
-      VALUES (${key}, ${category}, ${String(label).trim()}, ${rateNum}, ${perNum}, ${unit}, ${req.user?.email || null})
-      ON CONFLICT (key) DO UPDATE SET label = EXCLUDED.label, rate = EXCLUDED.rate, per_qty = EXCLUDED.per_qty,
+      INSERT INTO finance.cost_settings (key, category, label, rate, per_qty, gst_pct, unit, updated_by)
+      VALUES (${key}, ${category}, ${String(label).trim()}, ${rateNum}, ${perNum}, ${gstNum}, ${unit}, ${req.user?.email || null})
+      ON CONFLICT (key) DO UPDATE SET label = EXCLUDED.label, rate = EXCLUDED.rate, per_qty = EXCLUDED.per_qty, gst_pct = EXCLUDED.gst_pct,
         unit = EXCLUDED.unit, updated_by = EXCLUDED.updated_by, updated_at = NOW()
       RETURNING *`;
     await logAudit(sql, req, { action: 'cost_setting.update', entityType: 'cost_setting', entityId: null,
-      summary: `Cost Settings: ${String(label).trim()} = Rs ${rateNum} per ${perNum} (${unit})` });
+      summary: `Cost Settings: ${String(label).trim()} = Rs ${rateNum} per ${perNum} (${unit})${gstNum ? ' + GST ' + gstNum + '%' : ''}` });
     res.json(costRow(rows[0]));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
