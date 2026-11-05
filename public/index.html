@@ -7182,8 +7182,11 @@ function jrDeliveredState(j, SF) {
   const closed = isDone(j) || (SF && SF.closed);
   const n = v => Math.round(v).toLocaleString();
   const tip = `PO ${n(band.po)} ±${band.pct}% = ${n(band.lo)} to ${n(band.hi)} · delivered ${n(got)}`;
-  if (got > band.hi) return { delivState: 'over', delivTip: 'Over-delivered: ' + tip };
-  if (closed && got < band.lo) return { delivState: 'under', delivTip: 'Under-delivered: ' + tip };
+  // Jobs Report colours (owner, 2026-11-05): above the band green; a delivered job below it red,
+  // short of the PO but within it yellow.
+  if (got > band.hi) return { delivState: 'over', delivTip: 'Above the tolerance: ' + tip };
+  if (closed && got < band.lo) return { delivState: 'under', delivTip: 'Below the tolerance: ' + tip };
+  if (closed && got < band.po) return { delivState: 'short', delivTip: 'Less than the PO, within the tolerance: ' + tip };
   return { delivState: '', delivTip: '' };
 }
 // Every company name: on jobs and in Company Settings, one each.
@@ -19026,10 +19029,12 @@ function renderJobsReport() {
     // Partial shipment — Delivered Qty text itself reads amber instead of
     // a separate dot marker, so the flag reads at a glance without extra
     // clutter next to the number.
-    // Over the company's tolerance: red; a closed job under it: orange (owner, 2026-11-04).
+    // Above the company's tolerance: green; a delivered job below it: red; short of the PO
+    // but within it: yellow (owner, 2026-11-05).
     const dState = String(r.delivState || '');
-    const deliveredStyle = dState.includes('over') ? 'color:#dc2626;font-weight:800;'
-      : dState.includes('under') ? 'color:#ea580c;font-weight:800;'
+    const deliveredStyle = dState.includes('over') ? 'color:#16a34a;font-weight:800;'
+      : dState.includes('under') ? 'color:#dc2626;font-weight:800;'
+      : dState.includes('short') ? 'color:#ca8a04;font-weight:800;'
       : (r.isPartial ? 'color:#c2410c;font-weight:700;' : '');
     const idCell = (r._merged && r._merged.length > 1)
       ? r._merged.map(mid => `<span onclick="event.stopPropagation(); openEdit(${mid})" title="Open Job E-${mid}" style="cursor:pointer;color:#1d4ed8;font-weight:600;text-decoration:underline;text-underline-offset:2px;">E-${mid}</span>`).join(' ')
