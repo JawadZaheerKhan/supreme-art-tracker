@@ -8873,9 +8873,10 @@ async function companyTolerancePct(sql, client) {
   const v = hit && hit.tolerance_pct !== null && hit.tolerance_pct !== undefined ? Number(hit.tolerance_pct) : null;
   return Number.isFinite(v) ? v : null;
 }
-// Puts the company's tolerance on the job (once) for deliveryTargetQty. MIL and shade-card jobs have none.
+// Puts the company's tolerance on the job (once) for deliveryTargetQty. MIL jobs (in a MIL group, or a MIL
+// group's own job) and shade cards have none (owner, 2026-11-05).
 async function withTolerance(sql, job) {
-  if (job && job._tolPct === undefined) job._tolPct = (job.is_shade_card || job.stock_group_name) ? null : await companyTolerancePct(sql, job.client);
+  if (job && job._tolPct === undefined) job._tolPct = (job.is_shade_card || job.stock_group_name || job.group_job_id) ? null : await companyTolerancePct(sql, job.client);
   return job;
 }
 function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail, pricing, cartonsPackets }) {
