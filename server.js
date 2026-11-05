@@ -2843,7 +2843,7 @@ app.post('/api/users/:id/unblock', requirePermission('user_btn_block'), async (r
 });
 
 // Cost Report (owner, 2026-10-31): the Hamza Guide's Cost Settings and per-job
-// board rates. key = 'paper:<type>|<size>|<gsm>', 'coating:<name>',
+// board rates. key = 'paper:<type>|<brand>' (was <type>|<size>|<gsm> until 2026-11-05), 'coating:<name>',
 // 'printing:<label>', 'diecutting:<label>', 'pasting:<label>', 'plate:<label>'.
 const COST_CATEGORIES = new Set(['paper', 'coating', 'printing', 'diecutting', 'pasting', 'plate']);
 const costRow = r => ({ key: r.key, category: r.category, label: r.label, rate: Number(r.rate) || 0, per_qty: Number(r.per_qty) || 1, unit: r.unit, updated_at: r.updated_at });

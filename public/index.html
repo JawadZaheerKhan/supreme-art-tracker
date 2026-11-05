@@ -25625,11 +25625,26 @@ function _crEffRate(entry) {
   const p = Number(entry.per_qty) || 1;
   return p > 0 ? r / p : 0;
 }
-function _crPaperKey(paperType, size, gsm) {
-  const pt   = String(paperType || '').trim();
-  const sz   = String(size      || '').trim().replace(/×/g, 'x').replace(/\s+/g, '');
-  const g    = String(gsm != null ? gsm : '').trim();
-  return `paper:${pt.toLowerCase()}|${sz.toLowerCase()}|${g}`;
+// Board rate per kg goes by paper type + brand (owner, 2026-11-05): bleach board of every
+// size and GSM costs the same per kg; Ningbo and Indo differ.
+function _crPaperKey(paperType, brand) {
+  const norm = v => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return `paper:${norm(paperType)}|${norm(brand)}`;
+}
+// A job's board Rs/kg from Cost Settings: the brands its main paper was issued from,
+// weighted by sheets (brands with no rate left out). Not issued yet: its paper item's brand.
+function _crJobBoardRate(j, paperType) {
+  let num = 0, den = 0;
+  for (const x of (Array.isArray(j.issued_items) ? j.issued_items : [])) {
+    if (!x || x.source === 'secondary' || x.source === 'third') continue;
+    const sh = parseFloat(x.sheets) || 0;
+    const it = x.item_id && inventoryAll ? inventoryAll.find(i => Number(i.id) === Number(x.item_id)) : null;
+    const eff = _crEffRate(_costRates.get(_crPaperKey((it && it.paper_type) || paperType, x.brand != null ? x.brand : (it && it.brand))));
+    if (sh > 0 && eff > 0) { num += sh * eff; den += sh; }
+  }
+  if (den > 0) return num / den;
+  const it = j.inventory_item_id && inventoryAll ? inventoryAll.find(i => Number(i.id) === Number(j.inventory_item_id)) : null;
+  return it ? _crEffRate(_costRates.get(_crPaperKey(it.paper_type || paperType, it.brand))) : 0;
 }
 function _crCoatingKey(name) {
   return `coating:${String(name || '').trim().toLowerCase()}`;
@@ -25638,21 +25653,12 @@ function _crUniquePaperTuples(inventory) {
   const seen = new Map();
   for (const it of inventory) {
     if (!it || !it.paper_type) continue;
-    const key = _crPaperKey(it.paper_type, it.size, it.gsm);
+    const key = _crPaperKey(it.paper_type, it.brand);
     if (seen.has(key)) continue;
-    seen.set(key, {
-      paper_type: it.paper_type,
-      size: it.size || '',
-      gsm: it.gsm || '',
-    });
+    seen.set(key, { paper_type: String(it.paper_type).trim(), brand: String(it.brand || '').trim() });
   }
-  return [...seen.values()].sort((a, b) => {
-    const t = a.paper_type.localeCompare(b.paper_type, undefined, { sensitivity: 'base' });
-    if (t) return t;
-    const s = a.size.localeCompare(b.size, undefined, { numeric: true, sensitivity: 'base' });
-    if (s) return s;
-    return (parseFloat(a.gsm) || 0) - (parseFloat(b.gsm) || 0);
-  });
+  return [...seen.values()].sort((a, b) =>
+    a.paper_type.localeCompare(b.paper_type, undefined, { sensitivity: 'base' }) || a.brand.localeCompare(b.brand, undefined, { sensitivity: 'base' }));
 }
 const costReportState = { company: '', type: '', period: 'today', from: '', to: '', q: '', po: '', ch: '' };
 let _costRates = null;        // Map: key -> { key, category, label, rate, per_qty, unit }
@@ -25760,7 +25766,7 @@ function costReportRows() {
     const kgPerPack = (l && w && gsm) ? (l * w * gsm) / (isRe ? 3100 : 15500) : 0;
     const totalKg = kgPerPack * packets;
     const boardRateOverride = _costBoardRates.get(j.id) || 0;
-    const paperEff = _crEffRate(_costRates.get(_crPaperKey(paperType, (l && w) ? `${l}x${w}` : '', gsm)));
+    const paperEff = _crJobBoardRate(j, paperType);
     const boardRate = boardRateOverride > 0 ? boardRateOverride : paperEff;
     const boardRateSource = boardRateOverride > 0 ? 'override' : (paperEff > 0 ? 'settings' : '');
     const jsheets = parseFloat(String(j.sheets || '').replace(/[^0-9.\-]/g, ''));
@@ -26017,28 +26023,26 @@ function openCostSettings() {
     <div style="margin-bottom:22px;">
       <h3 style="margin:0 0 8px;font-size:14px;color:var(--text2);letter-spacing:0.06em;text-transform:uppercase;">&#128230; Board / Paper &mdash; Rate per <span style="color:var(--brand);">kg</span></h3>
       <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">
-        ${paperRows.length ? `Auto-populated from ${paperRows.length} unique paper/size/GSM combinations in Inventory.` : 'No inventory rows yet.'}
+        ${paperRows.length ? `One rate per paper type and brand - every size and GSM of that brand uses it. ${paperRows.length} from Inventory.` : 'No inventory rows yet.'}
       </div>
       <div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
         <table style="width:100%;font-size:13px;border-collapse:collapse;">
           <thead style="position:sticky;top:0;background:var(--bg2);z-index:1;"><tr>
             <th style="text-align:left;padding:8px 10px;">Paper Type</th>
-            <th style="text-align:left;padding:8px 10px;">Size</th>
-            <th style="text-align:right;padding:8px 10px;">GSM</th>
+            <th style="text-align:left;padding:8px 10px;">Brand</th>
             <th style="text-align:right;padding:8px 10px;">Rate (Rs)</th>
             <th style="text-align:right;padding:8px 10px;">Per (kg)</th>
             <th style="text-align:right;padding:8px 10px;color:var(--text2);font-weight:500;">= Rs / kg</th>
           </tr></thead>
           <tbody>
             ${paperRows.length ? paperRows.map(p => {
-              const key = _crPaperKey(p.paper_type, p.size, p.gsm);
-              const label = `${p.paper_type}${p.size ? ' · ' + p.size : ''}${p.gsm ? ' · ' + p.gsm + 'gsm' : ''}`;
+              const key = _crPaperKey(p.paper_type, p.brand);
+              const label = `${p.paper_type} · ${p.brand || 'no brand'}`;
               return `<tr style="border-top:1px solid var(--border);" data-key="${esc(key)}" data-cat="paper" data-label="${esc(label)}" data-unit="rs_per_kg">
                 <td style="padding:6px 10px;">${esc(p.paper_type)}</td>
-                <td style="padding:6px 10px;">${esc(p.size || '—')}</td>
-                <td style="padding:6px 10px;text-align:right;">${esc(p.gsm || '—')}</td>
+                <td style="padding:6px 10px;">${p.brand ? esc(p.brand) : '<span style="color:var(--text2);">no brand</span>'}</td>
                 ${costRateCells(key, 'kg', canEdit)}</tr>`;
-            }).join('') : `<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text2);font-style:italic;">Nothing to show.</td></tr>`}
+            }).join('') : `<tr><td colspan="5" style="text-align:center;padding:16px;color:var(--text2);font-style:italic;">Nothing to show.</td></tr>`}
           </tbody>
         </table>
       </div>
