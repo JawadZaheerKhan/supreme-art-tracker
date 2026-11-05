@@ -5999,7 +5999,7 @@ function firstVisibleReportPane(groupId, fallback) {
 // button is disabled (row = View) or removed (row = Hidden). 'view' = the action is read-only
 // (History, Print, opening the card), so View is enough for it to work.
 const BTN_FN_ROWS = {
-  openInvBrands: ['inv_btn_brands', 'view'], invRenameValue: ['inv_btn_brands', 'yes'], invSetItemValue: ['inv_btn_brands', 'yes'],
+  openInvBrands: ['inv_btn_brands', 'view'], invBrandsGoToItem: ['inv_btn_brands', 'view'], invRenameValue: ['inv_btn_brands', 'yes'], invSetItemValue: ['inv_btn_brands', 'yes'],
   setSrBillOnly: ['rpt_sale_report_bill', 'view'],
   openCompanyTolerances: ['job_btn_company_settings', 'view'], deleteCompanyTol: ['job_btn_company_settings', 'yes'],
   openRenameProductModal: ['products_btn_name', 'yes'],
@@ -10948,15 +10948,16 @@ function renderInvReturnBar() {
   bar.innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);border-left:4px solid ${backTone('stock')};border-radius:var(--radius);padding:9px 12px;margin-bottom:12px;">
       <button ${backBtnAttrs('stock')} onclick="invReturnToReport()">&#8592; Back to ${esc(invReturn.reportLabel)}</button>
-      <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(invReturn.label)}</b>, opened from that report.</span>
+      <span style="font-size:12px;color:var(--text2);">Showing <b style="color:var(--text);">${esc(invReturn.label)}</b>, opened from ${invReturn.mode === 'inventory' ? 'there' : 'that report'}.</span>
     </div>`;
 }
 function invReturnToReport() {
   const back = invReturn;
   invClearReturn();                       // filters restored before we leave
   if (!back) return;
-  setMode('reports');
-  if (back.reopen) back.reopen();         // a page that rebuilds itself (Imports)
+  setMode(back.mode || 'reports');
+  if (back.mode === 'inventory') renderInventory();   // filters restored above
+  if (back.reopen) back.reopen();         // a page that rebuilds itself (Imports), or a window (Brands & Suppliers)
   else openReportsGroup(back.group, back.pane);
   // Put the report back where they were reading it, once it has redrawn.
   requestAnimationFrame(() => window.scrollTo(0, back.scrollY || 0));
@@ -12388,17 +12389,19 @@ function openInvBrands(field) {
     const its = groups.get(v).sort((a, b) => invItemName(a).localeCompare(invItemName(b), undefined, { numeric: true }));
     const isOpen = invBrandsState.open === v;
     const vArg = esc(JSON.stringify(v));
+    const types = [...new Set(its.map(i => String(i.paper_type || '').trim()).filter(Boolean))].sort();
+    const typesHtml = types.length ? `<div style="font-size:11px;color:var(--text2);margin-top:3px;">${types.map(esc).join(' &middot; ')}</div>` : '';
     const head = `<tr style="border-top:1px solid var(--border);${isOpen ? 'background:var(--bg2);' : ''}">
       <td style="padding:7px 10px;">${v
         ? (can ? `<input type="text" value="${esc(v)}" data-from="${esc(v)}" onchange="invRenameValue('${f}', this.dataset.from, this.value, this)" title="Type the right spelling - every item with this ${label.toLowerCase()} changes" style="width:100%;max-width:260px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;">` : `<b>${esc(v)}</b>`)
-        : `<i style="color:var(--text2);">no ${label.toLowerCase()}</i>`}</td>
-      <td style="padding:7px 10px;text-align:right;white-space:nowrap;"><button class="btn btn-sm" onclick='invBrandsToggle(${vArg})'>${its.length} item${its.length === 1 ? '' : 's'} ${isOpen ? '&#9650;' : '&#9660;'}</button></td>
+        : `<i style="color:var(--text2);">no ${label.toLowerCase()}</i>`}${typesHtml}</td>
+      <td style="padding:7px 10px;text-align:right;white-space:nowrap;vertical-align:top;"><button class="btn btn-sm" onclick='invBrandsToggle(${vArg})'>${its.length} item${its.length === 1 ? '' : 's'} ${isOpen ? '&#9650;' : '&#9660;'}</button></td>
     </tr>`;
     if (!isOpen) return head;
     return head + `<tr><td colspan="2" style="padding:0 10px 10px 22px;background:var(--bg2);">
       <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
         ${its.map(i => `<tr style="border-top:1px solid var(--border);">
-          <td style="padding:5px 6px;">${esc(invItemName(i))}</td>
+          <td style="padding:5px 6px;">${tabAllowed('inventory') ? `<a href="#" onclick="event.preventDefault(); invBrandsGoToItem(${i.id})" title="Open this item in Inventory - a Back bar brings you here again" style="color:var(--brand);font-weight:600;text-decoration:underline;">${esc(invItemName(i))}</a>` : esc(invItemName(i))}${f === 'supplier' && i.brand ? ` <span style="color:var(--text2);">&middot; ${esc(i.brand)}</span>` : ''}</td>
           <td style="padding:5px 6px;text-align:right;color:var(--text2);white-space:nowrap;">${fmtN(i.current_balance)} sheets</td>
           <td style="padding:5px 6px;text-align:right;">${can
             ? `<input type="text" list="${listId}" value="${esc(i[f] || '')}" placeholder="no ${label.toLowerCase()}" onchange="invSetItemValue(${i.id}, '${f}', this.value, this)" title="This item's ${label.toLowerCase()} only" style="width:170px;padding:4px 7px;border:1px solid var(--border);border-radius:6px;font-size:12px;">`
@@ -12428,6 +12431,35 @@ function openInvBrands(field) {
     </div>
     <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Done</button></div>
   </div>`);
+}
+// Open one item in Inventory, filtered down to it, with a Back bar to this window.
+function invBrandsGoToItem(id) {
+  const item = (inventory || []).find(i => i.id === id);
+  if (!item || !tabAllowed('inventory')) return;
+  closeModal();
+  invReturn = {
+    filters: { text: invFilterText, type: invFilterType, size: invFilterSize,
+               gsm: invFilterGsm, stock: invFilterStock, offcut: invFilterOffcut,
+               viewMode: invViewMode },
+    mode: 'inventory',
+    reopen: () => openInvBrands(),
+    reportLabel: 'Brands & Suppliers',
+    label: [item.paper_type, item.size, item.gsm ? item.gsm + ' gsm' : '', item.is_offcut ? 'offcut' : '', item.brand]
+      .filter(Boolean).join(' \u00b7 '),
+    scrollY: window.scrollY || 0,
+  };
+  invFilterText   = item.brand || '';
+  invFilterType   = item.paper_type || '';
+  invFilterSize   = item.size || '';
+  invFilterGsm    = item.gsm  || '';
+  invFilterOffcut = item.is_offcut ? 'offcut' : 'fresh';
+  invFilterStock  = '';
+  invViewMode     = 'items';
+  const box = document.getElementById('inv-search-input');
+  if (box) box.value = invFilterText;
+  setMode('inventory');
+  renderInvReturnBar();
+  window.scrollTo(0, 0);
 }
 function invBrandsToggle(v) {
   invBrandsState.open = invBrandsState.open === v ? '' : v;
