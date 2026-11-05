@@ -2866,7 +2866,8 @@ app.put('/api/cost-settings/:key', requirePermission('rpt_cost_settings'), async
     const key = String(req.params.key || '').trim();
     const { category, label, rate, per_qty, unit, gst_pct } = req.body || {};
     if (!COST_CATEGORIES.has(category) || !key.startsWith(category + ':')) return res.status(400).json({ error: 'Unknown rate.' });
-    if (!['rs_per_kg', 'rs_per_sheet', 'rs_per_plate'].includes(unit)) return res.status(400).json({ error: 'Unknown unit.' });
+    if (!['rs_per_kg', 'rs_per_packet', 'rs_per_sheet', 'rs_per_plate'].includes(unit)) return res.status(400).json({ error: 'Unknown unit.' });
+    if (unit === 'rs_per_packet' && category !== 'paper') return res.status(400).json({ error: 'Per packet is for board / paper only.' });
     if (!String(label || '').trim()) return res.status(400).json({ error: 'A rate needs a name.' });
     const rateNum = Number(rate), perNum = Number(per_qty);
     if (!Number.isFinite(rateNum) || rateNum < 0) return res.status(400).json({ error: 'Rate must be zero or more.' });
