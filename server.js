@@ -331,7 +331,8 @@ function getDb() {
 // job_btn_company_settings (company tolerance, 2026-11-04).
 // Bumped again for finance.cost_settings.gst_pct (board GST % and net value, 2026-11-05).
 // Bumped again for the Access Register row rpt_sale_report_bill (Sale Report Bill button, 2026-11-05).
-const SCHEMA_VERSION = 'v2026-11-05-sale-bill';
+// Bumped again for the Access Register row inv_btn_brands (Brands & Suppliers window, 2026-11-05).
+const SCHEMA_VERSION = 'v2026-11-05-inv-brands';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -483,6 +484,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // group already uses, kept as this row's own extra level too.
   inv_btn_reverse:         { label: 'Reverse button', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
   inv_btn_dismiss_pending: { label: 'Pending Stock — Dismiss button (remove a delivered job from the pending queue)', levels: { admin: 'yes' } },
+  inv_btn_brands:          { label: 'Brands & Suppliers button — see every brand and supplier (View); fix a spelling or change an item\'s brand / supplier (Edit)', levels: { admin: 'yes', store_manager: 'yes', production_manager: 'view', finance: 'view', ceo: 'view' } },
   inv_btn_batches:         { label: 'Batches button — the Batch window (View) and Print sticker (Edit; also keeps the P.O. / Invoice / Batch No. typed on the sticker)', levels: { admin: 'yes', store_manager: 'yes', ceo: 'view', production_manager: 'view', finance: 'view' } },
 
   // Access Register — Reports tab. All 2-state (view/hidden) — reports are
@@ -11560,6 +11562,110 @@ const INVENTORY_DIFF_FIELDS = [
   ['paper_type', 'Paper Type'], ['size', 'Size'], ['gsm', 'GSM'], ['brand', 'Brand'],
   ['reorder_threshold', 'Reorder Threshold'], ['supplier', 'Supplier'],
 ];
+
+// Brands & Suppliers (owner, 2026-11-05). A new spelling renames the value on every
+// item and import; for a brand also on the jobs' issued paper and its Cost Settings rate.
+// Stored lowercase, like every other inventory name. An item that would then match
+// another item exactly (same paper, size, GSM, offcut-or-not and brand) is refused -
+// two items can never share all of those.
+const normInvName = v => String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ' ');
+async function brandClashes(sql, ids, to) {
+  if (!ids.length) return [];
+  return sql`
+    SELECT a.id, a.paper_type, a.size, a.gsm, a.is_offcut FROM inventory_items a
+      JOIN inventory_items b ON b.id <> a.id AND COALESCE(b.brand,'') = ${to}
+       AND b.paper_type = a.paper_type AND COALESCE(b.size,'') = COALESCE(a.size,'')
+       AND COALESCE(b.gsm,'') = COALESCE(a.gsm,'') AND b.is_offcut = a.is_offcut
+     WHERE a.id = ANY(${ids})`;
+}
+const clashText = rows => rows.slice(0, 5).map(r => `${r.paper_type}${r.size ? ' ' + r.size : ''}${r.gsm ? ' ' + r.gsm + 'gsm' : ''}${r.is_offcut ? ' (offcut)' : ''}`).join(', ') + (rows.length > 5 ? ' and ' + (rows.length - 5) + ' more' : '');
+app.post('/api/inventory/rename-value', requirePermission('inv_btn_brands'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const field = req.body && req.body.field;
+    if (!['brand', 'supplier'].includes(field)) return res.status(400).json({ error: 'Brand or supplier only.' });
+    const from = normInvName(req.body.from), to = normInvName(req.body.to);
+    if (!from) return res.status(400).json({ error: 'Pick the ' + field + ' to rename.' });
+    if (!to) return res.status(400).json({ error: 'Type the new spelling.' });
+    if (from === to) return res.json({ ok: true, items: 0 });
+    const items = field === 'brand'
+      ? await sql`SELECT id FROM inventory_items WHERE brand = ${from}`
+      : await sql`SELECT id FROM inventory_items WHERE supplier = ${from}`;
+    if (field === 'brand') {
+      const clash = await brandClashes(sql, items.map(r => r.id), to);
+      if (clash.length) return res.status(409).json({ error: `"${to}" already has the same paper as "${from}": ${clashText(clash)}. Change those items one by one (or delete the duplicate) first.` });
+    }
+    const q = [];
+    if (field === 'brand') {
+      q.push(sql`UPDATE inventory_items SET brand = ${to} WHERE brand = ${from}`);
+      q.push(sql`UPDATE inventory_imports SET brand = ${to} WHERE brand = ${from}`);
+      q.push(sql`
+        UPDATE jobs SET issued_items = (
+          SELECT jsonb_agg(CASE WHEN lower(trim(e->>'brand')) = ${from} THEN jsonb_set(e, '{brand}', to_jsonb(${to}::text)) ELSE e END ORDER BY o)
+            FROM jsonb_array_elements(issued_items) WITH ORDINALITY AS t(e, o))
+        WHERE jsonb_typeof(issued_items) = 'array'
+          AND EXISTS (SELECT 1 FROM jsonb_array_elements(issued_items) x WHERE lower(trim(x->>'brand')) = ${from})`);
+      // Its board rate moves with it (unless the new spelling already has one).
+      q.push(sql`
+        UPDATE finance.cost_settings c SET key = split_part(c.key, '|', 1) || '|' || ${to},
+               label = split_part(c.label, ' · ', 1) || ' · ' || ${to}
+         WHERE c.category = 'paper' AND split_part(c.key, '|', 2) = ${from} AND split_part(c.key, '|', 3) = ''
+           AND NOT EXISTS (SELECT 1 FROM finance.cost_settings d WHERE d.key = split_part(c.key, '|', 1) || '|' || ${to})`);
+    } else {
+      q.push(sql`UPDATE inventory_items SET supplier = ${to} WHERE supplier = ${from}`);
+      q.push(sql`UPDATE inventory_imports SET supplier = ${to} WHERE supplier = ${from}`);
+    }
+    q.push(sql`DELETE FROM dropdown_hidden WHERE field = ${field} AND value = ${from}`);
+    q.push(sql`INSERT INTO audit_log (user_id, user_email, action, entity_type, entity_id, summary)
+                VALUES (${req.user?.id || null}, ${req.user?.email || null}, 'inventory.rename-value', 'inventory', NULL,
+                        ${`${field === 'brand' ? 'Brand' : 'Supplier'} renamed: "${from}" -> "${to}" (${items.length} item${items.length === 1 ? '' : 's'})`}::text)`);
+    await sql.transaction(q);
+    res.json({ ok: true, items: items.length });
+  } catch (err) {
+    if (err && err.code === '23505') return res.status(409).json({ error: 'Another item already has that exact paper and brand - change the items one by one.' });
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+// One item's brand or supplier. A brand change also corrects that item's
+// issues on the jobs (issued_items[].brand of this item).
+app.patch('/api/inventory/:id/brand-supplier', requirePermission('inv_btn_brands'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const field = req.body && req.body.field;
+    if (!['brand', 'supplier'].includes(field)) return res.status(400).json({ error: 'Brand or supplier only.' });
+    const value = normInvName(req.body.value) || null;
+    const [item] = await sql`SELECT * FROM inventory_items WHERE id = ${id}`;
+    if (!item) return res.status(404).json({ error: 'Item not found.' });
+    if ((item[field] || null) === value) return res.json(item);
+    const label = `${item.paper_type}${item.size ? ' ' + item.size : ''}${item.gsm ? ' ' + item.gsm + 'gsm' : ''}${item.is_offcut ? ' (offcut)' : ''}`;
+    const q = [];
+    if (field === 'brand') {
+      const clash = await brandClashes(sql, [id], value || '');
+      if (clash.length) return res.status(409).json({ error: `${label} already exists with brand "${value || 'no brand'}" - it can't be two items.` });
+      q.push(sql`UPDATE inventory_items SET brand = ${value} WHERE id = ${id}`);
+      q.push(sql`
+        UPDATE jobs SET issued_items = (
+          SELECT jsonb_agg(CASE WHEN e->>'item_id' = ${String(id)} THEN jsonb_set(e, '{brand}', to_jsonb(${value || ''}::text)) ELSE e END ORDER BY o)
+            FROM jsonb_array_elements(issued_items) WITH ORDINALITY AS t(e, o))
+        WHERE jsonb_typeof(issued_items) = 'array'
+          AND EXISTS (SELECT 1 FROM jsonb_array_elements(issued_items) x WHERE x->>'item_id' = ${String(id)})`);
+    } else {
+      q.push(sql`UPDATE inventory_items SET supplier = ${value} WHERE id = ${id}`);
+    }
+    q.push(sql`INSERT INTO audit_log (user_id, user_email, action, entity_type, entity_id, summary)
+                VALUES (${req.user?.id || null}, ${req.user?.email || null}, 'inventory.edit', 'inventory', ${id},
+                        ${`${label}: ${field} "${item[field] || 'none'}" -> "${value || 'none'}"`}::text)`);
+    await sql.transaction(q);
+    const [after] = await sql`SELECT * FROM inventory_items WHERE id = ${id}`;
+    res.json(after);
+  } catch (err) {
+    if (err && err.code === '23505') return res.status(409).json({ error: 'That item already exists with this brand - it can\'t be two items.' });
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
 
 app.put('/api/inventory/:id', requirePermission('inv_btn_edit'), async (req, res) => {
   try {

@@ -3736,6 +3736,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="btn btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
     <button class="btn ceo-hide" onclick="openBulkStockOut()" style="background:#DC2626;color:#fff;border-color:#DC2626;">&#128228; Stock Out (Bulk)</button>
     <button class="btn" onclick="openInvSticker(0)" title="Print a pallet sticker with every detail typed by hand - no Stock In needed">&#128424; Print Sticker</button>
+    <button class="btn" id="inv-brands-btn" data-acc="inv_btn_brands" data-acc-need="view" onclick="openInvBrands()" title="Every brand and supplier - fix a spelling, or change an item's brand / supplier">&#127991; Brands &amp; Suppliers</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -6026,6 +6027,7 @@ function firstVisibleReportPane(groupId, fallback) {
 // button is disabled (row = View) or removed (row = Hidden). 'view' = the action is read-only
 // (History, Print, opening the card), so View is enough for it to work.
 const BTN_FN_ROWS = {
+  openInvBrands: ['inv_btn_brands', 'view'], invRenameValue: ['inv_btn_brands', 'yes'], invSetItemValue: ['inv_btn_brands', 'yes'],
   setSrBillOnly: ['rpt_sale_report_bill', 'view'],
   openCompanyTolerances: ['job_btn_company_settings', 'view'], deleteCompanyTol: ['job_btn_company_settings', 'yes'],
   openRenameProductModal: ['products_btn_name', 'yes'],
@@ -12402,6 +12404,115 @@ async function deleteInvFieldValue(field, value) {
     notify(`"${value}" hidden from ${fieldLabel} list`);
   } catch (e) {
     notify('Failed to hide: ' + e.message);
+  }
+}
+
+// ── Brands & Suppliers (owner, 2026-11-05) ──
+// Every brand / supplier with its items. Type a new spelling to rename it on every
+// item, or change one item's brand / supplier in its own box.
+const invBrandsState = { field: 'brand', open: '' };
+function invItemName(i) {
+  return `${i.paper_type || ''}${i.size ? ' ' + i.size : ''}${i.gsm ? ' ' + i.gsm + 'gsm' : ''}${i.is_offcut ? ' (offcut)' : ''}`;
+}
+function openInvBrands(field) {
+  if (field) { invBrandsState.field = field; invBrandsState.open = ''; }
+  const f = invBrandsState.field, label = f === 'brand' ? 'Brand' : 'Supplier';
+  const can = hasPerm('inv_btn_brands', 'yes');
+  const items = (inventory || []).filter(i => i && !i.deleted_at);
+  const groups = new Map();
+  for (const i of items) {
+    const v = String(i[f] || '').trim();
+    if (!groups.has(v)) groups.set(v, []);
+    groups.get(v).push(i);
+  }
+  const names = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b));
+  const all = names.filter(Boolean);
+  const listId = 'inv-brands-dl';
+  const fmtN = n => (Number(n) || 0).toLocaleString();
+  const rows = names.map(v => {
+    const its = groups.get(v).sort((a, b) => invItemName(a).localeCompare(invItemName(b), undefined, { numeric: true }));
+    const isOpen = invBrandsState.open === v;
+    const vArg = esc(JSON.stringify(v));
+    const head = `<tr style="border-top:1px solid var(--border);${isOpen ? 'background:var(--bg2);' : ''}">
+      <td style="padding:7px 10px;">${v
+        ? (can ? `<input type="text" value="${esc(v)}" data-from="${esc(v)}" onchange="invRenameValue('${f}', this.dataset.from, this.value, this)" title="Type the right spelling - every item with this ${label.toLowerCase()} changes" style="width:100%;max-width:260px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;">` : `<b>${esc(v)}</b>`)
+        : `<i style="color:var(--text2);">no ${label.toLowerCase()}</i>`}</td>
+      <td style="padding:7px 10px;text-align:right;white-space:nowrap;"><button class="btn btn-sm" onclick='invBrandsToggle(${vArg})'>${its.length} item${its.length === 1 ? '' : 's'} ${isOpen ? '&#9650;' : '&#9660;'}</button></td>
+    </tr>`;
+    if (!isOpen) return head;
+    return head + `<tr><td colspan="2" style="padding:0 10px 10px 22px;background:var(--bg2);">
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
+        ${its.map(i => `<tr style="border-top:1px solid var(--border);">
+          <td style="padding:5px 6px;">${esc(invItemName(i))}</td>
+          <td style="padding:5px 6px;text-align:right;color:var(--text2);white-space:nowrap;">${fmtN(i.current_balance)} sheets</td>
+          <td style="padding:5px 6px;text-align:right;">${can
+            ? `<input type="text" list="${listId}" value="${esc(i[f] || '')}" placeholder="no ${label.toLowerCase()}" onchange="invSetItemValue(${i.id}, '${f}', this.value, this)" title="This item's ${label.toLowerCase()} only" style="width:170px;padding:4px 7px;border:1px solid var(--border);border-radius:6px;font-size:12px;">`
+            : esc(i[f] || '')}</td>
+        </tr>`).join('')}
+      </table></td></tr>`;
+  }).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
+      <h2 style="margin:0;">&#127991; Brands &amp; Suppliers</h2>
+      <button class="btn btn-sm" onclick="closeModal()" style="padding:2px 8px;font-size:14px;line-height:1;" title="Close">&times;</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:10px;">
+      ${['brand', 'supplier'].map(k => `<button class="btn btn-sm${k === f ? ' btn-primary' : ''}" onclick="openInvBrands('${k}')">${k === 'brand' ? 'Brands' : 'Suppliers'} (${new Set(items.map(i => String(i[k] || '').trim()).filter(Boolean)).size})</button>`).join('')}
+    </div>
+    <div style="font-size:11.5px;color:var(--text2);margin-bottom:10px;line-height:1.45;">
+      ${can ? `Type the right spelling in a ${label.toLowerCase()}'s box to change it on every item${f === 'brand' ? ' (its jobs and its board rate in Cost Settings follow)' : ''}. Open its items to change one item's ${label.toLowerCase()}.` : `Every ${label.toLowerCase()} in the inventory and its items.`}
+    </div>
+    <datalist id="${listId}">${all.map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+    <div style="max-height:60vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead style="position:sticky;top:0;background:var(--bg2);z-index:1;"><tr>
+          <th style="text-align:left;padding:8px 10px;">${label}</th><th style="text-align:right;padding:8px 10px;">Items</th>
+        </tr></thead>
+        <tbody>${rows || `<tr><td colspan="2" style="padding:16px;text-align:center;color:var(--text2);">Nothing yet.</td></tr>`}</tbody>
+      </table>
+    </div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Done</button></div>
+  </div>`);
+}
+function invBrandsToggle(v) {
+  invBrandsState.open = invBrandsState.open === v ? '' : v;
+  openInvBrands();
+}
+async function invRenameValue(field, from, to, el) {
+  const label = field === 'brand' ? 'brand' : 'supplier';
+  const next = String(to || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!next) { notify('Type the new spelling.'); if (el) el.value = from; return; }
+  if (next === from) { if (el) el.value = from; return; }
+  const n = (inventory || []).filter(i => i && !i.deleted_at && String(i[field] || '').trim() === from).length;
+  const merging = (inventory || []).some(i => i && !i.deleted_at && String(i[field] || '').trim() === next);
+  const ok = await confirmDialog({
+    title: `Rename ${label} "${from}" to "${next}"?`,
+    message: `${n} item${n === 1 ? '' : 's'} change${merging ? ` - "${next}" already exists, so the two become one ${label}` : ''}.${field === 'brand' ? ' The jobs issued from it and its board rate in Cost Settings follow.' : ''}`,
+    confirmText: 'Rename',
+  });
+  if (!ok) { if (el) el.value = from; return; }
+  try {
+    await api('POST', '/api/inventory/rename-value', { field, from, to: next });
+    if (invBrandsState.open === from) invBrandsState.open = next;
+    await Promise.all([loadInventory(), loadJobs()]);
+    notify(`${label === 'brand' ? 'Brand' : 'Supplier'} renamed to "${next}"`);
+    openInvBrands();
+  } catch (e) {
+    if (el) el.value = from;
+    await alertDialog({ title: 'Could not rename', message: e.message, kind: 'warn' });
+  }
+}
+async function invSetItemValue(id, field, value, el) {
+  const it = (inventory || []).find(i => i.id === id);
+  const before = it ? String(it[field] || '') : '';
+  try {
+    await api('PATCH', `/api/inventory/${id}/brand-supplier`, { field, value });
+    await Promise.all([loadInventory(), field === 'brand' ? loadJobs() : null]);
+    notify('Saved');
+    openInvBrands();
+  } catch (e) {
+    if (el) el.value = before;
+    await alertDialog({ title: 'Could not change it', message: e.message, kind: 'warn' });
   }
 }
 
@@ -41015,6 +41126,7 @@ const ACC_INVENTORY_TAB_ROWS = [
   { key: 'inv_btn_reverse',         type: 'button-30day' },
   { key: 'inv_btn_dismiss_pending', type: 'button' },
   { key: 'inv_btn_batches',         type: 'button' },
+  { key: 'inv_btn_brands',          type: 'button' },
 ];
 // Reports tab — every row is 2-state (view/hidden). Reports are read-only,
 // so there's no "edit" tier to give any of them.
