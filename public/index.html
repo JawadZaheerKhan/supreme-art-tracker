@@ -4759,6 +4759,9 @@ function isPartialDelivery(j) {
   // even with a ledger shortfall.
   if ((j && j.stage_index) === 7) {
     if (j.stages && j.stages[7] && j.stages[7].finalized) return false;
+    // Short of the PO but within the company's tolerance: delivered (owner, 2026-11-05).
+    const band = typeof jobTolBand === 'function' ? jobTolBand(j) : null;
+    if (band && fromLedger >= band.lo) return false;
     return fromLedger > 0 && fromLedger < booked;
   }
   // Sent back from Delivered because Ready cartons were still unshipped
@@ -36083,7 +36086,13 @@ async function finalizeAsDelivered(id) {
 function isFinalizedDelivery(j) { return !!(j && (j.stage_index || 0) === 7 && j.stages && j.stages[7] && j.stages[7].finalized); }
 function isReopenedDelivery(j) { return !!(j && (j.stage_index || 0) === 6 && j.stages && j.stages[6] && j.stages[6].reopened); }
 function deliveredReadyLeft(j) { return (j && !j.is_shade_card) ? Math.max(0, readyCartonsTotal(j) - totalDeliveredCartons(j)) : 0; }
-function canReopenDelivery(j) { return !!(j && (j.stage_index || 0) === 7 && (isFinalizedDelivery(j) || deliveredReadyLeft(j) > 0)); }
+// Also a job closed within its company's tolerance, short of the PO - to print and ship the rest.
+function deliveredShortOfPo(j) {
+  const booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const shipped = totalDeliveredCartons(j);
+  return booked > 0 && shipped > 0 && shipped < booked;
+}
+function canReopenDelivery(j) { return !!(j && (j.stage_index || 0) === 7 && (isFinalizedDelivery(j) || deliveredReadyLeft(j) > 0 || deliveredShortOfPo(j))); }
 async function undoFinalizeDelivery(id) {
   if (!canStageMoves()) { notify('Only Production Manager / Admin can send a delivered job back to Partial Delivery.'); return; }
   const j = jobs.find(x => x.id === id);
@@ -36093,10 +36102,14 @@ async function undoFinalizeDelivery(id) {
   const booked = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
   const shipped = totalDeliveredCartons(j) || (parseFloat(String(j.delqty || '').replace(/[^0-9.\-]/g, '')) || 0);
   const readyLeft = deliveredReadyLeft(j);
-  const remaining = finalized ? (booked ? Math.max(0, booked - shipped) : 0) : readyLeft;
+  // Closed within the company's tolerance, short of the PO, nothing Ready left.
+  const tolClosed = !finalized && readyLeft <= 0 && booked > shipped;
+  const remaining = finalized ? (booked ? Math.max(0, booked - shipped) : 0) : (tolClosed ? booked - shipped : readyLeft);
   const ok = await confirmDialog({
     title: `Send Job E-${id} back to Partial Delivery?`,
-    message: finalized
+    message: tolClosed
+      ? `"${j.name}" was delivered within the company's tolerance: ${shipped.toLocaleString()} of ${booked.toLocaleString()} cartons.\n\nThis sends it back to Partially Delivered so the remaining ${remaining.toLocaleString()} can be printed and shipped. It closes again at the full PO, or with Finalize as Delivered.`
+      : finalized
       ? `"${j.name}" was finalized with ${shipped.toLocaleString()} of ${booked.toLocaleString()} cartons shipped.\n\nThis undoes the Finalize: the job goes back to Partially Delivered and the remaining ${remaining.toLocaleString()} cartons can be shipped again.`
       : `"${j.name}" is Fully Delivered (${shipped.toLocaleString()} shipped against ${booked.toLocaleString()} booked), but ${readyLeft.toLocaleString()} Ready cartons have not been shipped.\n\nThis sends it back to Partially Delivered so you can record a delivery for them. It closes again once they are shipped, or with Finalize as Delivered.`,
     confirmText: 'Back to Partial Delivery',
@@ -36112,7 +36125,7 @@ async function undoFinalizeDelivery(id) {
   }
   delete stages[7];
   const who = (currentUser && (currentUser.name || currentUser.email)) || 'Admin';
-  const log = [...(j.log || []), { stage: STAGES[ready], status: 'active', notes: finalized ? `Finalize undone by ${who} - back to Partial Delivery (${remaining.toLocaleString()} cartons still to ship)` : `Sent back to Partial Delivery by ${who} - ${remaining.toLocaleString()} Ready cartons not shipped yet`, by: who, time: fmtDMYT(new Date()) }];
+  const log = [...(j.log || []), { stage: STAGES[ready], status: 'active', notes: finalized ? `Finalize undone by ${who} - back to Partial Delivery (${remaining.toLocaleString()} cartons still to ship)` : tolClosed ? `Sent back to Partial Delivery by ${who} - delivered within tolerance, ${remaining.toLocaleString()} cartons to the full PO` : `Sent back to Partial Delivery by ${who} - ${remaining.toLocaleString()} Ready cartons not shipped yet`, by: who, time: fmtDMYT(new Date()) }];
   showSaving(true);
   try {
     const updated = await api('PATCH', `/api/jobs/${id}/stage`, { stage_index: ready, stages, log });

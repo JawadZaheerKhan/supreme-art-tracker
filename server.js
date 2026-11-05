@@ -8844,11 +8844,39 @@ function parseShipperInput(raw) {
 // still unshipped (client undoFinalizeDelivery stamps stages[6].reopened),
 // which closes once those Ready cartons are shipped, not at the booked qty
 // it had already passed. Used by delivery create and edit alike.
+// With a company tolerance (job._tolPct, see withTolerance) the job closes at the
+// bottom of its band: PO 10,000 at 5% is delivered at 9,500 (owner, 2026-11-05).
 function deliveryTargetQty(job, stageIndex, stages, bookedQty) {
   const reopened = !!(stageIndex === 6 && stages && stages[6] && stages[6].reopened);
-  return reopened
-    ? Math.max(bookedQty, readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty))
-    : bookedQty;
+  if (reopened) return Math.max(bookedQty, readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty));
+  const tol = Number(job && job._tolPct);
+  return (bookedQty && tol > 0) ? Math.max(1, Math.round(bookedQty * (1 - tol / 100))) : bookedQty;
+}
+// The company's tolerance %, matched as the page matches it: same name, same letters,
+// or every word of one in the other (pharmaceuticals = pharma, Pvt / Ltd ignored) - one match only.
+const COMPANY_WORD_SYNONYMS_SRV = { pharmaceutical: 'pharma', pharmaceuticals: 'pharma', pharmaceutica: 'pharma', laboratory: 'lab', laboratories: 'lab', labs: 'lab', foods: 'food', industries: 'industry', intl: 'international', pak: 'pakistan' };
+const COMPANY_WORD_NOISE_SRV = new Set(['pvt', 'private', 'ltd', 'lt', 'limited', 'co', 'company', 'inc', 'corp', 'corporation', 'the', 'and']);
+const companyTokensSrv = n => String(n || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean)
+  .map(t => COMPANY_WORD_SYNONYMS_SRV[t] || t).filter(t => !COMPANY_WORD_NOISE_SRV.has(t));
+async function companyTolerancePct(sql, client) {
+  const name = String(client || '').trim().toLowerCase();
+  if (!name) return null;
+  const rows = await sql`SELECT company, tolerance_pct FROM finance.company_settings`;
+  const sq = v => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  let hit = rows.find(r => String(r.company || '').trim().toLowerCase() === name) || rows.find(r => sq(r.company) && sq(r.company) === sq(client));
+  if (!hit) {
+    const want = companyTokensSrv(client);
+    const subset = (a, b) => a.length && b.length && (a.every(t => b.includes(t)) || b.every(t => a.includes(t)));
+    const hits = want.length ? rows.filter(r => subset(want, companyTokensSrv(r.company))) : [];
+    if (hits.length === 1) hit = hits[0];
+  }
+  const v = hit && hit.tolerance_pct !== null && hit.tolerance_pct !== undefined ? Number(hit.tolerance_pct) : null;
+  return Number.isFinite(v) ? v : null;
+}
+// Puts the company's tolerance on the job (once) for deliveryTargetQty. MIL and shade-card jobs have none.
+async function withTolerance(sql, job) {
+  if (job && job._tolPct === undefined) job._tolPct = (job.is_shade_card || job.stock_group_name) ? null : await companyTolerancePct(sql, job.client);
+  return job;
 }
 function computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, linkedJobId, byEmail, pricing, cartonsPackets }) {
   const bookedQty  = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
@@ -9095,7 +9123,7 @@ app.post('/api/jobs/:id/deliveries', requireDeliveryWriter, async (req, res) => 
     // A Carton Shipper typed into the form's draft (by whoever filled it in).
     if (shipper === null) { const ds = parseShipperInput(draft.cartons_packets); if (ds !== null && !Number.isNaN(ds)) shipper = ds; }
     const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
-      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email, pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }), cartonsPackets: job.is_shade_card ? null : shipper });
+      computeDeliveryUpdate(await withTolerance(sql, job), { cartonsN, date, notes, poNo, batchNo, fbrNo, msiNo, byEmail: req.user?.email, pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }), cartonsPackets: job.is_shade_card ? null : shipper });
     // Draft-sourced pricing never CLEARS a job-level value it did not set.
     const nextRate   = hasPricing ? ((pricingFromDraft && rate   === null) ? job.rate    : rate)   : job.rate;
     const nextTaxPct = hasPricing ? ((pricingFromDraft && taxPct === null) ? job.tax_pct : taxPct) : job.tax_pct;
@@ -9161,7 +9189,7 @@ app.post('/api/jobs/:id/manager-deliver', requireStationUser, requirePermission(
     const n = await nextShadeCardDcNumber(sql);
     notes = `DC-${String(n).padStart(2, '0')}`;
     const { deliveries, delqty, stage_index, stages, log, entry, nextTotal, bookedQty } =
-      computeDeliveryUpdate(job, { cartonsN, date, notes, poNo, batchNo, byEmail: `${v.operator.name} (Manager)` });
+      computeDeliveryUpdate(await withTolerance(sql, job), { cartonsN, date, notes, poNo, batchNo, byEmail: `${v.operator.name} (Manager)` });
     const updated = await sql`
       UPDATE jobs
          SET deliveries  = ${JSON.stringify(deliveries)},
@@ -9429,7 +9457,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
         cpShare = i === plan.length - 1 ? cpLeft : Math.round(cpTotal * allocate / fulfilledCartons);
         cpLeft -= cpShare;
       }
-      const { deliveries, delqty, stage_index, stages, log } = computeDeliveryUpdate(job, {
+      const { deliveries, delqty, stage_index, stages, log } = computeDeliveryUpdate(await withTolerance(sql, job), {
         cartonsN: allocate, date: delivDate, notes: notesStr, poNo, batchNo, fbrNo, msiNo, byEmail,
         pricing: await deliveryPricing(sql, job, { hasPricing, rate, taxPct }),
         cartonsPackets: cpShare,
@@ -10746,7 +10774,7 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
     if (errB) return res.status(400).json({ error: errB });
 
     const byEmail = req.user?.email;
-    const updA = computeDeliveryUpdate(jobA, {
+    const updA = computeDeliveryUpdate(await withTolerance(sql, jobA), {
       cartonsN: cartonsA, date, notes: challanNo,
       poNo: String(eA.po_no ?? '').trim() || null,
       batchNo: String(eA.batch_no ?? '').trim() || null,
@@ -10754,7 +10782,7 @@ app.post('/api/jobs/:id/deliver-linked', requireDeliveryWriter, async (req, res)
       linkedJobId: partnerId, byEmail,
       pricing: await deliveryPricing(sql, jobA, { hasPricing: false }),
     });
-    const updB = computeDeliveryUpdate(jobB, {
+    const updB = computeDeliveryUpdate(await withTolerance(sql, jobB), {
       cartonsN: cartonsB, date, notes: challanNo,
       poNo: String(eB.po_no ?? '').trim() || null,
       batchNo: String(eB.batch_no ?? '').trim() || null,
@@ -10819,7 +10847,7 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
     // there's no target to compare against, so instead revert whenever
     // nothing is left delivered at all — mirrors how such a job was
     // advanced to Delivered in the first place (see computeDeliveryUpdate).
-    const shouldRevert = bookedQty ? totalCartons < bookedQty : totalCartons <= 0;
+    const shouldRevert = bookedQty ? totalCartons < deliveryTargetQty(await withTolerance(sql, job), 0, {}, bookedQty) : totalCartons <= 0;
     if (stage_index === 7 && shouldRevert) {
       stages[7] = { ...(stages[7] || {}), status: 'active' };
       stages[6] = { ...(stages[6] || {}), status: 'active', by, time, at: nowIso };
@@ -10905,7 +10933,7 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
       const ix = Number.isFinite(was) ? Math.max(0, Math.min(list.length, was)) : list.length;
       list.splice(ix, 0, entry);
       const total = sumDeliveryCartons(list);
-      const target = deliveryTargetQty(job, stage_index, stages, bookedQty);
+      const target = deliveryTargetQty(await withTolerance(sql, job), stage_index, stages, bookedQty);
       if ((target ? total >= target : total > 0) && stage_index < 7) {
         stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso, reopened: false };
         stages[7] = { status: 'done', notes: '', by, time, at: nowIso };
@@ -11115,7 +11143,7 @@ app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'
       // Same forward/back rules as computeDeliveryUpdate (create) and the
       // DELETE route (remove) — an edit can cross the completion threshold
       // in either direction, so both are handled here.
-      const target = deliveryTargetQty(job, stage_index, stages, bookedQty);
+      const target = deliveryTargetQty(await withTolerance(sql, job), stage_index, stages, bookedQty);
       const deliveryComplete = target ? totalCartons >= target : totalCartons > 0;
       if (deliveryComplete && stage_index < 7) {
         stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at: nowIso, reopened: false };
