@@ -330,7 +330,8 @@ function getDb() {
 // Bumped again for finance.company_settings.tolerance_pct and the Access Register row
 // job_btn_company_settings (company tolerance, 2026-11-04).
 // Bumped again for finance.cost_settings.gst_pct (board GST % and net value, 2026-11-05).
-const SCHEMA_VERSION = 'v2026-11-05-cost-gst';
+// Bumped again for the Access Register row rpt_sale_report_bill (Sale Report Bill button, 2026-11-05).
+const SCHEMA_VERSION = 'v2026-11-05-sale-bill';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -525,6 +526,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_sale_report:                 { label: 'Sale Report — full invoicing detail (Rate, Sale Tax, Company / Destination / NTN)', levels: { ceo: 'view', finance: 'view' } },
   rpt_sale_report_totals:          { label: 'Sale Report — totals row at the bottom (summed Rate w/o & w/ Sale Tax)', levels: { ceo: 'view' } },
   rpt_sale_report_company:         { label: 'Sale Report — Company Settings button (NTN / Destination per company)', levels: { finance: 'yes', ceo: 'view' } },
+  rpt_sale_report_bill:            { label: 'Sale Report — Bill button (deliveries still missing Invoice No., E-FBR No., MSI No., PO No. or Rate)', levels: { finance: 'view', ceo: 'view' } },
   // Party Ledger — each company's invoices (from the Sale Report), receipts
   // and running balance. Viewing and entering are separate rows.
   rpt_party_ledger:                { label: 'Party Ledger — view each company\'s invoices, receipts and running balance', levels: { ceo: 'view', finance: 'view' } },
@@ -5222,45 +5224,6 @@ app.post('/api/jobs/:id/client-visible', requirePermission('job_btn_edit'), asyn
   }
 });
 
-// Ready check (owner, 2026-10-23): the PM ticks a ready job (fully or partly
-// ready) on its Jobs tile so Finance knows to record its delivery. Only once
-// QC's Ready to Delivery Qty is written on the job card; un-ticking clears
-// it. A delivery recorded after the tick retires it - the client compares
-// the tick's time with the deliveries' own entry times, so nothing here has
-// to clear it.
-app.post('/api/jobs/:id/ready-check', requirePermission('job_btn_stage_forward'), async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const id = parseInt(req.params.id, 10);
-    const value = !!(req.body && req.body.value);
-    const [job] = await sql`SELECT id, name, stage_index, particulars, deliveries FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
-    if (!job) return res.status(404).json({ error: 'Job not found' });
-    if (value) {
-      if ((job.stage_index || 0) >= STAGES.length - 1) return res.status(409).json({ error: 'This job is already delivered.' });
-      const readyQty = readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty);
-      if (!(readyQty > 0)) return res.status(409).json({ error: 'Write the Ready to Delivery Qty on the job card first.', needs_ready_qty: true });
-      // After a partial delivery the next tick needs ready cartons that have
-      // not shipped yet - otherwise Finance would be sent to deliver nothing.
-      if (!(readyQty - sumDeliveryCartons(job.deliveries) > 0)) return res.status(409).json({ error: 'Everything ready has already shipped - write the new Ready to Delivery Qty on the job card first.', needs_ready_qty: true });
-    }
-    const check = value ? { by: (req.user && req.user.email) || 'unknown', at: new Date().toISOString() } : null;
-    const [updated] = await sql`
-      UPDATE jobs SET ready_check = ${check ? JSON.stringify(check) : null}::jsonb
-       WHERE id = ${id} AND deleted_at IS NULL
-       RETURNING id, ready_check`;
-    await logAudit(sql, req, {
-      action: 'job.ready_check',
-      entityType: 'job',
-      entityId: id,
-      summary: `Job E-${id} (${job.name}): ${value ? 'ticked Ready - Finance to record the delivery' : 'Ready tick removed'}`,
-    });
-    res.json(updated);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // Group-level client visibility toggle. Sets stock_group_visible on ALL
 // members of the group at once (they must agree — the group is one
