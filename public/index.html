@@ -6341,15 +6341,31 @@ function ceoDashFigures() {
   const createdMs = j => j.created_at ? new Date(j.created_at).getTime() : (j.dateissued ? new Date(j.dateissued + 'T12:00:00').getTime() : null);
   f.createdList = all.map(j => ({ j, ms: createdMs(j) })).filter(x => inRange(x.ms)).sort(newest);
   f.newJobs = f.createdList.length;
-  // Delivered on the date of its last shipment, as the Jobs and Sale Reports date it - not the day it
-  // was closed (a job finalized today after shipping last month is last month's; owner, 2026-11-06).
-  // No shipment recorded: the Delivered stage's own date.
-  const lastShipMs = j => { const st = (Array.isArray(j.deliveries) ? j.deliveries : []).map(deliveryEntryMs).filter(t => Number.isFinite(t)); return st.length ? Math.max(...st) : jobDeliveredAnchorMs(j); };
-  const deliveredAll = all.filter(j => isDone(j)).map(j => ({ j, ms: lastShipMs(j) })).filter(x => inRange(x.ms)).sort(newest);
+  // A job is delivered on the day a delivery was recorded for it - partial or full - as the Jobs and
+  // Sale Reports date it; with no delivery recorded, the day it went forward to Delivered. Finalizing
+  // is not a delivery, so its date never counts (owner, 2026-11-06). A job with deliveries on several
+  // days in the period counts once, on the latest of them.
+  const deliveredAll = [];
+  for (const j of all) {
+    if (j.deleted_at) continue;
+    const st = (Array.isArray(j.deliveries) ? j.deliveries : []).map(deliveryEntryMs).filter(t => Number.isFinite(t));
+    let ms = null;
+    if (st.length) {
+      const hits = st.filter(inRange);
+      if (hits.length) ms = Math.max(...hits);
+    } else if (isDone(j)) {
+      const rec = j.stages && j.stages[STAGES.length - 1];
+      const t = jobDeliveredAnchorMs(j);
+      if (!(rec && rec.finalized) && inRange(t)) ms = t;
+    }
+    if (ms != null) deliveredAll.push({ j, ms, partial: !isDone(j) || isPartialDelivery(j) });
+  }
+  deliveredAll.sort(newest);
   // Shade cards are not sales, UC or wastage - counted apart, so the jobs match those tiles.
   f.deliveredList = deliveredAll.filter(x => !x.j.is_shade_card);
   f.deliveredShade = deliveredAll.filter(x => x.j.is_shade_card);
   f.deliveredJobs = f.deliveredList.length;
+  f.deliveredPartial = f.deliveredList.filter(x => x.partial).length;
   f.uc = 0; f.shipments = 0; f.shipList = [];
   for (const j of all) {
     if (j.is_shade_card) continue;
@@ -6643,7 +6659,7 @@ function renderCeoDash() {
     <div class="cd-sec">Headline <small>· for the period</small></div>
     <div class="cd-grid">
       ${tile('created', 'new', 'Jobs created', fmt(f.newJobs), 'new job cards', () => list(f.createdList.map(x => row(job(x.j), date(x.ms))), 'No jobs created'))}
-      ${tile('delivered', 'del', 'Jobs delivered', fmt(f.deliveredJobs), 'fully delivered' + (f.deliveredShade.length ? ` · + ${fmt(f.deliveredShade.length)} shade card${f.deliveredShade.length === 1 ? '' : 's'}` : ''), () => list(f.deliveredList.map(x => row(job(x.j), date(x.ms))), 'No jobs delivered')
+      ${tile('delivered', 'del', 'Jobs delivered', fmt(f.deliveredJobs), (f.deliveredPartial ? `${fmt(f.deliveredPartial)} partly delivered` : 'deliveries recorded') + (f.deliveredShade.length ? ` · + ${fmt(f.deliveredShade.length)} shade card${f.deliveredShade.length === 1 ? '' : 's'}` : ''), () => list(f.deliveredList.map(x => row(job(x.j), date(x.ms) + (x.partial ? ' · partial' : ''))), 'No jobs delivered')
           + (f.deliveredShade.length ? head(`Shade cards · ${fmt(f.deliveredShade.length)} (not in sales, UC or wastage)`) + list(f.deliveredShade.map(x => row(job(x.j), date(x.ms))), '') : ''))}
       ${tile('uc', 'ship', 'UC delivered', fmt(f.uc), `${fmt(f.shipments)} shipment${f.shipments === 1 ? '' : 's'}`, () => list(f.shipList.map(x => row(job(x.j), `${fmt(x.cartons)} · ${date(x.ms)}`)), 'No deliveries'))}
       ${tile('waste', 'waste', 'Wastage', f.wastagePct == null ? '—' : fmt(f.wastagePct) + '%', f.issuedKg ? `${fmt(f.wastageKg)} of ${fmt(f.issuedKg)} kg` : 'no deliveries', () =>
