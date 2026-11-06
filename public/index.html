@@ -6341,7 +6341,11 @@ function ceoDashFigures() {
   const createdMs = j => j.created_at ? new Date(j.created_at).getTime() : (j.dateissued ? new Date(j.dateissued + 'T12:00:00').getTime() : null);
   f.createdList = all.map(j => ({ j, ms: createdMs(j) })).filter(x => inRange(x.ms)).sort(newest);
   f.newJobs = f.createdList.length;
-  const deliveredAll = all.filter(j => isDone(j)).map(j => ({ j, ms: jobDeliveredAnchorMs(j) })).filter(x => inRange(x.ms)).sort(newest);
+  // Delivered on the date of its last shipment, as the Jobs and Sale Reports date it - not the day it
+  // was closed (a job finalized today after shipping last month is last month's; owner, 2026-11-06).
+  // No shipment recorded: the Delivered stage's own date.
+  const lastShipMs = j => { const st = (Array.isArray(j.deliveries) ? j.deliveries : []).map(deliveryEntryMs).filter(t => Number.isFinite(t)); return st.length ? Math.max(...st) : jobDeliveredAnchorMs(j); };
+  const deliveredAll = all.filter(j => isDone(j)).map(j => ({ j, ms: lastShipMs(j) })).filter(x => inRange(x.ms)).sort(newest);
   // Shade cards are not sales, UC or wastage - counted apart, so the jobs match those tiles.
   f.deliveredList = deliveredAll.filter(x => !x.j.is_shade_card);
   f.deliveredShade = deliveredAll.filter(x => x.j.is_shade_card);
