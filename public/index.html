@@ -3643,6 +3643,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <select class="filter" id="group-filter" onchange="setGroupFilter(this.value)" title="Filter by Job Group"><option value="">All groups</option></select>
       <input class="filter" type="text" id="po-filter" placeholder="PO No." oninput="setPOFilterDebounced(this.value)" style="width:130px;" title="Filter jobs by P.O. No. substring">
       <input class="filter" type="text" id="code-filter" placeholder="Item Code" oninput="setCodeFilterDebounced(this.value)" style="width:130px;" title="Filter jobs by the job card's Code (item code) - part of it is enough">
+      <input class="filter" type="text" id="batch-filter" placeholder="Batch No." oninput="setBatchFilterDebounced(this.value)" style="width:130px;" title="Find jobs by Batch No. - the job card's or any delivery's; part of it is enough">
       <button id="company-settings-btn" onclick="openCompanyTolerances()" title="Add a company, set each company's tolerance %, and open its jobs">&#127970; Company Settings</button>
 
     </div>
@@ -4592,6 +4593,7 @@ let filterClient = '';
 let filterMachine = '';
 let filterPO = '';
 let filterCode = '';   // Item Code box (the job card's Code), owner 2026-10-08
+let filterBatch = '';  // Batch No. box: the job card's Batch No. or any delivery's (owner, 2026-11-10)
 // Shade-card filter — '' (all) | 'only' (shade cards only) | 'hide' (production only)
 let filterShadeCard = '';
 let filterGroup = '';
@@ -8891,7 +8893,7 @@ function searchMatch(text, typed) {
 // renderJobsCompact / renderJobsCards); the tabs don't - matches in other
 // tabs are offered by searchElsewhereHtml().
 function jobsSearchActive() {
-  return !!String(filterText || '').trim() || !!String(filterPO || '').trim() || !!String(filterCode || '').trim();
+  return !!String(filterText || '').trim() || !!String(filterPO || '').trim() || !!String(filterCode || '').trim() || !!String(filterBatch || '').trim();
 }
 // Search / PO / company / stage / machine / group / date filters - everything
 // except which tab the job sits in.
@@ -8911,6 +8913,11 @@ function jobPassesFilters(j) {
   }
   // Item Code: part of the job card's Code; spaces ignored on both sides.
   if (String(filterCode || '').trim() && !searchMatch(j.jobcode, filterCode)) return false;
+  // Batch No.: the job card's, or any of its deliveries'.
+  if (String(filterBatch || '').trim()) {
+    const batches = [j.bno, ...(Array.isArray(j.deliveries) ? j.deliveries.map(d => d && d.batch_no) : [])].filter(Boolean).join(' ');
+    if (!searchMatch(batches, filterBatch)) return false;
+  }
   if (filterShadeCard === 'only' && !j.is_shade_card) return false;
   if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
   if (filterMachine && j.machine !== filterMachine) return false;
@@ -10833,6 +10840,10 @@ function setPOFilterDebounced(v) { clearTimeout(_poTimer);  _poTimer  = setTimeo
 let _codeTimer = null;
 function setCodeFilter(v) { filterCode = v; renderJobs(); }
 function setCodeFilterDebounced(v) { clearTimeout(_codeTimer); _codeTimer = setTimeout(() => setCodeFilter(v), 120); }
+// Batch No. box: same as Item Code - the open tab, with Go buttons for matches in other tabs.
+let _batchTimer = null;
+function setBatchFilter(v) { filterBatch = v; renderJobs(); }
+function setBatchFilterDebounced(v) { clearTimeout(_batchTimer); _batchTimer = setTimeout(() => setBatchFilter(v), 120); }
 
 // Shade Cards toggle: '' = show everything, 'only' = show shade-card jobs.
 // The dedicated toggle button in the toolbar drives this — one click ON,
