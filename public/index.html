@@ -32145,7 +32145,11 @@ function deliveriesSectionFinance(j, opts) {
   // recomputes both server-side on a cartons edit — same forward/back
   // stage rules the create/delete routes already use. Date stays fixed
   // (nobody's asked for that one).
-  const canEditEntries = !managerMode && hasPerm('job_btn_pricing', 'yes');
+  // Delivery details: the Record Delivery button (or Invoicing fields). E-FBR No., MSI No., Rate and
+  // Sale Tax: Invoicing fields only (owner, 2026-11-10).
+  const canEditEntries = !managerMode && (hasPerm('job_btn_record_delivery', 'yes') || hasPerm('job_btn_pricing', 'yes'));
+  const canEditInvoicing = !managerMode && hasPerm('job_btn_pricing', 'yes');
+  const readCell = value => `<span title="${esc(value)}">${esc(value)}</span>`;
   const editCell = (i, field, value, opts2) => canEditEntries
     ? `<input type="${field === 'cartons' ? 'number' : 'text'}" ${field === 'cartons' ? 'min="0.01" step="any"' : ''} data-dk="${i}:${field}" value="${esc(value)}" onchange="saveDeliveryEntryField(${j.id}, ${i}, '${field}', this.value)" title="${esc((opts2&&opts2.title)||'')}" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
     : `<span title="${esc(value)}">${esc(value)}</span>`;
@@ -32195,12 +32199,12 @@ function deliveriesSectionFinance(j, opts) {
               : (deliveryShipper(j, i).value > 0 ? `<b>${deliveryShipper(j, i).value.toLocaleString()}</b>` : '&mdash;'))}
             ${isShadeCard ? '' : fieldBox('PO No.', editCell(i, 'po_no', po))}
             ${isShadeCard ? '' : fieldBox('Batch No.', editCell(i, 'batch_no', bat))}
-            ${isShadeCard ? '' : fieldBox('E-FBR No.', editCell(i, 'fbr_no', fbr))}
-            ${isShadeCard ? '' : fieldBox('MSI No.', editCell(i, 'msi_no', msi))}
-            ${isShadeCard ? '' : fieldBox('Rate / Carton', canEditEntries
+            ${isShadeCard ? '' : fieldBox('E-FBR No.', canEditInvoicing ? editCell(i, 'fbr_no', fbr) : readCell(fbr))}
+            ${isShadeCard ? '' : fieldBox('MSI No.', canEditInvoicing ? editCell(i, 'msi_no', msi) : readCell(msi))}
+            ${isShadeCard ? '' : fieldBox('Rate / Carton', canEditInvoicing
               ? `<input type="number" min="0" step="any" data-dk="${i}:rate" value="${sp.rate !== null ? esc(String(sp.rate)) : ''}" title="${sp.override ? 'Differs from the product\'s standard rate. ' : ''}This shipment's own rate \u2014 other shipments are not affected." onchange="saveDeliveryEntryField(${j.id}, ${i}, 'rate', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;${rateStyle}">`
               : (sp.rate !== null ? `<span style="${rateStyle}">${fmtRate(sp.rate)}</span>` : '&mdash;'))}
-            ${isShadeCard ? '' : fieldBox('Sale Tax %', canEditEntries
+            ${isShadeCard ? '' : fieldBox('Sale Tax %', canEditInvoicing
               ? `<input type="number" min="0" step="any" data-dk="${i}:tax_pct" value="${esc(String(sp.tax))}" title="This shipment's own sale tax \u2014 other shipments are not affected." onchange="saveDeliveryEntryField(${j.id}, ${i}, 'tax_pct', this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box;font-size:12px;">`
               : esc(String(sp.tax)) + '%')}
             ${fieldBox(isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.', isShadeCard ? `<span title="${esc(nt)}">${esc(nt)}</span>` : editCell(i, 'notes', nt))}
