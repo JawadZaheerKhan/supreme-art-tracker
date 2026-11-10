@@ -18817,6 +18817,9 @@ function buildJobsReportRows() {
       psJob: SF.psJob,
       paper,
       packKg: packKgJR,
+      extraPapers: jrExtraPapers(j),
+      extraRatio: 1,
+      weightKg: jrRowWeightKg(packets, packKgJR, jrExtraPapers(j), 1),
       paperBatches: jobPaperBatchesText(j),
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
@@ -18932,6 +18935,8 @@ function buildJobsReportRows() {
         // kg a packet across the members, weighted by their packets.
         packKg: (() => { const w = sorted.filter(b => b.packKg != null && +b.packets > 0); const pk = w.reduce((a, b) => a + (+b.packets), 0); return pk > 0 ? w.reduce((a, b) => a + (+b.packets) * b.packKg, 0) / pk : (sorted[0].packKg ?? null); })(),
         paperBatches: dedupePipe(sorted.map(b => b.paperBatches)),
+        weightKg: sorted.some(b => b.weightKg != null) ? sorted.reduce((a, b) => a + (+b.weightKg || 0), 0) : null,
+        extraPapers: [], extraRatio: 1,
         machine: dedupePipe(sorted.map(b => b.machine)),
         coatings: dedupePipe(sorted.map(b => b.coatings)),
         linkPartner: null,
@@ -18993,12 +18998,14 @@ function buildJobsReportRows() {
         jobUc: numQty(r.cartonQty),
         cartonQty: s.uc, wastage: s.wastage,
         packets: s.pk, packetsShown: s.pkShown, packetsUnit: s.pkUnit,
-        weightKg: jrWeightKg(s.pk, r.packKg),
+        extraRatio: jrShareOf(s.pk, r.packetsTotal),
+        weightKg: jrRowWeightKg(s.pk, r.packKg, r.extraPapers, jrShareOf(s.pk, r.packetsTotal)),
       } : {
         ...r,
         packetsShown: sheets ? (+r.packets || 0) * (r.psJob || 0) : r.packets,
         packetsUnit: sheets ? 'sheets' : 'packets',
-        weightKg: jrWeightKg(r.packets, r.packKg),
+        extraRatio: 1,
+        weightKg: jrRowWeightKg(r.packets, r.packKg, r.extraPapers, 1),
       });
       continue;
     }
@@ -19044,7 +19051,8 @@ function buildJobsReportRows() {
         packets:      s.pk,
         packetsShown: s.pkShown,
         packetsUnit:  s.pkUnit,
-        weightKg:     jrWeightKg(s.pk, r.packKg),
+        extraRatio:   jrShareOf(s.pk, r.packetsTotal),
+        weightKg:     jrRowWeightKg(s.pk, r.packKg, r.extraPapers, jrShareOf(s.pk, r.packetsTotal)),
         shipmentIndex: i,
         shipmentOfJob: list.length,
       });
@@ -19059,10 +19067,50 @@ function buildJobsReportRows() {
 // The Jobs Report's own quantity columns. Everything not named here follows
 // the general rule: shown once when the members agree, space-separated when
 // they do not.
+// The part of the job a shipment row is: its packets of the job's packets (whole job when unknown).
+function jrShareOf(pk, total) { const t = +total || 0; return t > 0 ? Math.min(1, Math.max(0, (+pk || 0) / t)) : 1; }
 // Weight of packets consumed: packets x kg a packet (blank when the paper's size / GSM is unknown).
 function jrWeightKg(packets, packKg) { const p = +packets || 0; return (p > 0 && packKg != null && packKg > 0) ? p * packKg : null; }
+// A job's 2nd / 3rd paper (job card): its packets, sheets and kg a packet - read fresh every
+// time, so a paper added to the job later shows straight away.
+function jrExtraPapers(j) {
+  const p = (j && j.particulars) || {};
+  const out = [];
+  for (const [key, label] of [['secondary_paper', '2nd'], ['third_paper', '3rd']]) {
+    const x = p[key];
+    const packets = x && typeof x === 'object' ? parseFloat(x.packets) || 0 : 0;
+    if (!(packets > 0)) continue;
+    const it = x.inventory_item_id ? inventoryAll.find(i => Number(i.id) === Number(x.inventory_item_id)) : null;
+    const ps = packetSize(it ? it.paper_type : '') || 100;
+    out.push({ label, packets, sheets: packets * ps, packKg: it ? packWeightKg(it.paper_type, it.size, it.gsm) : null,
+      paper: it ? `${it.paper_type}${it.size ? ' ' + it.size : ''}${it.gsm ? ' ' + it.gsm + 'gsm' : ''}` : '' });
+  }
+  return out;
+}
+// Main paper + the 2nd / 3rd paper's share (ratio: the part of the job this row is).
+function jrRowWeightKg(mainPackets, packKg, extras, ratio) {
+  const parts = [jrWeightKg(mainPackets, packKg), ...(extras || []).map(e => jrWeightKg(e.packets * ratio, e.packKg))].filter(v => v != null);
+  return parts.length ? parts.reduce((a, v) => a + v, 0) : null;
+}
+// The Packets cell: the total, and with a 2nd / 3rd paper each paper below it in green.
+function jrPacketsCellHtml(r, fmt) {
+  const ex = Array.isArray(r.extraPapers) ? r.extraPapers : [], ratio = r.extraRatio == null ? 1 : r.extraRatio;
+  const sheetsUnit = r.packetsUnit === 'sheets';
+  if (!ex.length) return sheetsUnit ? `${fmt(r.packetsShown)} sheets <span style="font-weight:500;font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>` : fmt(r.packets);
+  const r2 = v => Math.round(v * 100) / 100;
+  if (sheetsUnit) {
+    const tot = (+r.packetsShown || 0) + ex.reduce((a, e) => a + e.sheets * ratio, 0);
+    return `${fmt(r2(tot))} sheets<div style="font-size:10.5px;font-weight:600;color:#15803d;white-space:nowrap;">1st ${fmt(r2(+r.packetsShown || 0))}${ex.map(e => ` · ${e.label} ${fmt(r2(e.sheets * ratio))}`).join('')}</div>`;
+  }
+  const tot = (+r.packets || 0) + ex.reduce((a, e) => a + e.packets * ratio, 0);
+  return `${fmt(r2(tot))}<div style="font-size:10.5px;font-weight:600;color:#15803d;white-space:nowrap;">1st ${fmt(r2(+r.packets || 0))}${ex.map(e => ` · ${e.label} ${fmt(r2(e.packets * ratio))}`).join('')}</div>`;
+}
+// The same as plain text (print / Excel note).
+function jrExtraTotalPackets(r) { const ex = Array.isArray(r.extraPapers) ? r.extraPapers : [], ratio = r.extraRatio == null ? 1 : r.extraRatio; return ex.reduce((a, e) => a + e.packets * ratio, 0); }
+function jrExtraTotalSheets(r) { const ex = Array.isArray(r.extraPapers) ? r.extraPapers : [], ratio = r.extraRatio == null ? 1 : r.extraRatio; return ex.reduce((a, e) => a + e.sheets * ratio, 0); }
 const JOBS_REPORT_MERGE = {
   additive: ['deliveredQty', 'cartonQty', 'jobUc', 'poQty', 'wastage', 'readyQty', 'readyShipped', 'readyNow', 'packets', 'packetsShown', 'packetsTotal', 'milQty', 'weightKg'],
+  // (2nd / 3rd paper: a merged linked row keeps the first job's extras - linked jobs are separate cards.)
   amount: [],
 };
 
@@ -19166,9 +19214,9 @@ function renderJobsReport() {
       readyShipped: a.readyShipped + ((+r.readyQty > 0 && +r.readyShipped > 0 && r.nextShip && !r._merged) ? +r.readyShipped : 0),
       // Packets and sheets are different units - never added together; a
       // sheet row's packets are kept apart, for reference.
-      packets:       a.packets       + (r.packetsUnit === 'sheets' ? 0 : numCell(r.packets)),
-      sheetsCount:   a.sheetsCount   + (r.packetsUnit === 'sheets' ? numCell(r.packetsShown) : 0),
-      sheetsPackets: a.sheetsPackets + (r.packetsUnit === 'sheets' ? numCell(r.packets) : 0),
+      packets:       a.packets       + (r.packetsUnit === 'sheets' ? 0 : numCell(r.packets) + jrExtraTotalPackets(r)),
+      sheetsCount:   a.sheetsCount   + (r.packetsUnit === 'sheets' ? numCell(r.packetsShown) + jrExtraTotalSheets(r) : 0),
+      sheetsPackets: a.sheetsPackets + (r.packetsUnit === 'sheets' ? numCell(r.packets) + jrExtraTotalPackets(r) : 0),
       weightKg:      a.weightKg      + (+r.weightKg || 0),
     };
   }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, readyShipped: 0, packets: 0, sheetsCount: 0, sheetsPackets: 0, weightKg: 0 });
@@ -19239,9 +19287,9 @@ function renderJobsReport() {
       <td style="padding:8px 10px;text-align:right;${deliveredStyle}" title="${esc(r.delivTip || (r.isPartial ? 'Partial delivery — still owes cartons' : ''))}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
       ${wastageCell}
       ${readyCell}
-      <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${r.packetsUnit === 'sheets' ? `${fmt(r.packetsShown)} sheets <span style="font-weight:500;font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>` : fmt(r.packets)}</td>
+      <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${jrPacketsCellHtml(r, fmt)}</td>
       <td ${tdR} style="padding:8px 10px;text-align:right;white-space:nowrap;"${r.packKg ? ` title="${(+r.packets || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })} packets × ${(+r.packKg).toFixed(3)} kg"` : ''}>${fmtKg(r.weightKg)}</td>
-      <td ${td}>${esc(r.paper)}</td>
+      <td ${td}>${esc(r.paper)}${(r.extraPapers || []).filter(e => e.paper).map(e => `<div style="font-size:11px;font-weight:600;color:#15803d;">${e.label}: ${esc(e.paper)}</div>`).join('')}</td>
       <td ${td} style="padding:8px 10px;white-space:nowrap;">${esc(r.paperBatches || '')}</td>
       <td ${td}>${esc(r.machine)}</td>
       <td ${td}>${esc(r.coatings)}</td>
@@ -19345,7 +19393,7 @@ async function exportJobsReport() {
       r.wastage === null ? (r.stockGroupName ? 'MIL' : '') : r.wastage,
       r.readyQty,
       // Same as the Sale Report's Excel: packets, or sheets for Labels / Leaflets.
-      (() => { const v = r.packetsUnit === 'sheets' ? r.packetsShown : r.packets; return v ? +(+v).toFixed(2) : ''; })(),
+      (() => { const v = r.packetsUnit === 'sheets' ? (+r.packetsShown || 0) + jrExtraTotalSheets(r) : (+r.packets || 0) + jrExtraTotalPackets(r); return v ? +(+v).toFixed(2) : ''; })(),
       r.weightKg ? +(+r.weightKg).toFixed(2) : '',
       r.paper,
       r.paperBatches || '',
@@ -19763,7 +19811,7 @@ function printJobsReport() {
     <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
     <td ${tdR}>${(r.stockGroupName && r.wastage === null) ? '<b style="color:#7c3aed;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
     <td ${tdR}>${fmt(r.readyQty)}${(+r.readyQty > 0 && +r.readyShipped > 0 && !r._merged) ? (+r.readyShipped >= +r.readyQty - 0.5 ? ' (shipped)' : ` (${fmt(r.readyShipped)} shipped)`) : ''}</td>
-    <td ${tdR}>${r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packets)}</td>
+    <td ${tdR}>${(r.extraPapers && r.extraPapers.length) ? jrPacketsCellHtml(r, fmt) : (r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packets))}</td>
     <td ${tdR}>${r.weightKg ? (+r.weightKg).toLocaleString('en-IN', { maximumFractionDigits: 2 }) + ' kg' : '—'}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.paperBatches || '')}</td>
