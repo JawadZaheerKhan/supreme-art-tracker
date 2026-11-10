@@ -3012,6 +3012,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 .cd-import { --c:#dc2626; --t:#fee2e2; }
 .cd-money  { --c:#1a1a18; --t:#f8fafc; }
 .cd-waste  { --c:#475569; --t:#f1f5f9; }
+.cd-alarm  { --c:#dc2626; --t:#fef2f2; }
 .cd-mil    { --c:#7c3aed; --t:#f5f3ff; }
 /* Two figures side by side in one tile, same size (MIL ready & shipped). */
 .cd-pair { display:flex; flex-wrap:wrap; gap:4px 18px; }
@@ -6405,6 +6406,12 @@ function ceoDashFigures() {
     paperBy.set(label, e);
   }
   f.paperBy = [...paperBy.values()].sort((x, y) => y.kg - x.kg || y.units - x.units);
+  // Report warnings (all time): Wastage UPS below 0, and packets over the job card.
+  {
+    const all = ceoDashSaleRows(null);
+    f.alarmNeg = all.filter(r => !r._merged && r.wastage !== null && r.wastage !== undefined && +r.wastage < 0);
+    f.alarmOver = all.filter(r => !r._merged && r.pkOver);
+  }
   // 3 + 5. sales and wastage (period) - the Sale Report's rows
   const rows = ceoDashSaleRows(b);
   const sumBy = (keyOf, valOf) => { const m = new Map(); for (const r of rows) { const k = keyOf(r); const v = valOf(r); if (!k || v == null) continue; m.set(k, (m.get(k) || 0) + v); } return m; };
@@ -6679,6 +6686,11 @@ function renderCeoDash() {
           + head('By company · highest first') + list(f.wasteByCompany.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded')
           + head('By product · highest first') + list(f.wasteByProduct.map(([k, v]) => row(esc(k), fmt(v) + '%')), 'No wastage recorded'))}
       ${tile('waste-ups', 'waste', 'Wastage UPS', fmt(f.wasteUps), `${fmt(f.wasteSheets)} sheets · ${fmt(f.wasteJobs.length)} job${f.wasteJobs.length === 1 ? '' : 's'}`, () => `<div class="cd-sub">The Jobs Report's Wastage UPS (Delivered, this period): printed cartons not delivered, counted when a job closes - highest first. Wastage Sheets = Wastage UPS ÷ the job's ups.</div>` + list(f.wasteJobs.map(e => row(`<a onclick="ceoDashOpenJob(${e.id})">${esc(e.idDisplay)}</a> ${esc(e.name || '')}`, `${fmt(e.ups)} UPS · ${e.sheets === null ? '— sheets' : fmt(e.sheets) + ' sheets'}`)), 'No wastage in this period'))}
+      ${(f.alarmNeg.length || f.alarmOver.length) ? tile('alarm', 'alarm', '&#9888; Report warnings', fmt(f.alarmNeg.length + f.alarmOver.length),
+          [f.alarmNeg.length ? `${fmt(f.alarmNeg.length)} wastage below 0` : '', f.alarmOver.length ? `${fmt(f.alarmOver.length)} packets over the job card` : ''].filter(Boolean).join(' · ') + ' · all time', () =>
+          `<div class="cd-sub">Deliveries to check in the Sale Report - a figure typed too high, or a job card that does not match.</div>`
+          + (f.alarmNeg.length ? head(`Wastage UPS below 0 · ${fmt(f.alarmNeg.length)}`) + list(f.alarmNeg.map(r => row(job({ id: r.id, name: r.name }), `${fmt(r.wastage)} · ${esc(r.deliveredAt || '')}`)), '') : '')
+          + (f.alarmOver.length ? head(`Packets over the job card · ${fmt(f.alarmOver.length)}`) + list(f.alarmOver.map(r => row(job({ id: r.id, name: r.name }), `${fmt(Math.round(r.pkOver.cum * 100) / 100)} of ${fmt(r.pkOver.J)} ${r.pkOver.unit} · ${esc(r.deliveredAt || '')}`)), '') : '')) : ''}
     </div>
     </div>
 
