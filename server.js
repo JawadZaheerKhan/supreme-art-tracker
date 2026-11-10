@@ -332,7 +332,8 @@ function getDb() {
 // Bumped again for finance.cost_settings.gst_pct (board GST % and net value, 2026-11-05).
 // Bumped again for the Access Register row rpt_sale_report_bill (Sale Report Bill button, 2026-11-05).
 // Bumped again for the Access Register row inv_btn_brands (Brands & Suppliers window, 2026-11-05).
-const SCHEMA_VERSION = 'v2026-11-05-inv-brands';
+// Bumped again for finance.cost_batch_rates (a board rate per paper batch, 2026-11-10).
+const SCHEMA_VERSION = 'v2026-11-10-batch-rates';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1772,6 +1773,22 @@ async function initDb() {
     await sql`ALTER TABLE finance.company_settings ADD COLUMN IF NOT EXISTS tolerance_pct NUMERIC`;
     // Board / paper GST % in Cost Settings (owner, 2026-11-05): net = rate per kg + GST.
     await sql`ALTER TABLE finance.cost_settings ADD COLUMN IF NOT EXISTS gst_pct NUMERIC NOT NULL DEFAULT 0`;
+    // A board rate per paper batch (owner, 2026-11-10): one row per item + batch that has its
+    // own rate. A batch without one follows the batch before it of the same paper type + brand,
+    // and the paper type + brand's own rate (Cost Settings) is the 1st batch / older stock.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.cost_batch_rates (
+        item_id    INTEGER NOT NULL,
+        batch      INTEGER NOT NULL,
+        rate       NUMERIC NOT NULL DEFAULT 0,
+        per_qty    NUMERIC NOT NULL DEFAULT 1,
+        unit       TEXT NOT NULL DEFAULT 'rs_per_kg',
+        gst_pct    NUMERIC NOT NULL DEFAULT 0,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (item_id, batch)
+      )
+    `;
     // Board sold as waste never goes through a job card, so the Sale Report's
     // "Waste of Board" tab keeps its own hand-entered rows here. Every value
     // is typed by the user — nothing is derived from jobs.
@@ -2910,6 +2927,64 @@ app.put('/api/cost-board-rates/:job_id', requirePermission('rpt_cost_settings'),
     await logAudit(sql, req, { action: 'cost_setting.job_rate', entityType: 'job', entityId: jobId,
       summary: rate ? `Cost Report: Job E-${jobId} board rate set to Rs ${rate} / kg` : `Cost Report: Job E-${jobId} board rate back to Cost Settings` });
     res.json({ job_id: jobId, rate_per_kg: rate });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Cost Report / Cost Settings batches (owner, 2026-11-10): every Stock In batch of every
+// paper item (with its date, PO and invoice), which batch(es) each stock-out took, and the
+// rates set per batch.
+app.get('/api/cost-batches', requirePermission('rpt_cost_report', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const [batches, allocs, rates] = await Promise.all([
+      sql`
+        SELECT t.item_id, t.batch AS n, MIN(t.created_at) AS at, MIN(t.id) AS tx_id, SUM(t.change)::float AS received,
+               MAX(t.po_no) AS po_no, MAX(t.invoice_no) AS invoice_no, MAX(t.challan_no) AS challan_no, MAX(t.batch_label) AS batch_label
+          FROM inventory_transactions t
+         WHERE t.batch IS NOT NULL AND t.change > 0 AND t.reverses_tx_id IS NULL
+           AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+         GROUP BY t.item_id, t.batch`,
+      sql`SELECT id, batch_alloc FROM inventory_transactions WHERE change < 0 AND batch_alloc IS NOT NULL`,
+      sql`SELECT item_id, batch, rate, per_qty, unit, gst_pct FROM finance.cost_batch_rates`,
+    ]);
+    res.json({
+      batches,
+      allocs: allocs.map(r => ({ tx_id: r.id, alloc: r.batch_alloc })),
+      rates: rates.map(r => ({ item_id: r.item_id, batch: r.batch, rate: Number(r.rate) || 0, per_qty: Number(r.per_qty) || 1, unit: r.unit, gst_pct: Number(r.gst_pct) || 0 })),
+    });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// One batch's own rate. A blank rate removes it, so the batch follows the one before it again.
+app.put('/api/cost-batch-rates/:item_id/:batch', requirePermission('rpt_cost_settings'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const itemId = parseInt(req.params.item_id, 10), batch = parseInt(req.params.batch, 10);
+    if (!(itemId > 0) || !(batch > 0)) return res.status(400).json({ error: 'Invalid batch.' });
+    const [item] = await sql`SELECT id, paper_type, size, gsm, brand FROM inventory_items WHERE id = ${itemId}`;
+    if (!item) return res.status(404).json({ error: 'Paper item not found.' });
+    const label = `${item.paper_type}${item.size ? ' ' + item.size : ''}${item.gsm ? ' ' + item.gsm + 'gsm' : ''}${item.brand ? ' · ' + item.brand : ''} - batch ${batch}`;
+    const b = req.body || {};
+    if (b.rate === null || b.rate === undefined || String(b.rate).trim() === '') {
+      await sql`DELETE FROM finance.cost_batch_rates WHERE item_id = ${itemId} AND batch = ${batch}`;
+      await logAudit(sql, req, { action: 'cost_setting.batch_rate', entityType: 'inventory', entityId: itemId, summary: `Cost Settings: ${label} follows the batch before it again` });
+      return res.json({ item_id: itemId, batch, removed: true });
+    }
+    const rate = Number(b.rate), per = Number(b.per_qty == null || b.per_qty === '' ? 1 : b.per_qty), gst = Number(b.gst_pct == null || b.gst_pct === '' ? 0 : b.gst_pct);
+    const unit = b.unit === 'rs_per_packet' ? 'rs_per_packet' : 'rs_per_kg';
+    if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'Rate must be zero or more.' });
+    if (!Number.isFinite(per) || per <= 0) return res.status(400).json({ error: 'Per must be more than zero.' });
+    if (!Number.isFinite(gst) || gst < 0 || gst > 100) return res.status(400).json({ error: 'GST must be 0 to 100%.' });
+    const [row] = await sql`
+      INSERT INTO finance.cost_batch_rates (item_id, batch, rate, per_qty, unit, gst_pct, updated_by)
+      VALUES (${itemId}, ${batch}, ${rate}, ${per}, ${unit}, ${gst}, ${req.user?.email || null})
+      ON CONFLICT (item_id, batch) DO UPDATE SET rate = EXCLUDED.rate, per_qty = EXCLUDED.per_qty, unit = EXCLUDED.unit,
+        gst_pct = EXCLUDED.gst_pct, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+      RETURNING item_id, batch, rate, per_qty, unit, gst_pct`;
+    await logAudit(sql, req, { action: 'cost_setting.batch_rate', entityType: 'inventory', entityId: itemId,
+      summary: `Cost Settings: ${label} = Rs ${rate} per ${per} ${unit === 'rs_per_packet' ? 'packet' : 'kg'}${gst ? ' + GST ' + gst + '%' : ''}` });
+    res.json({ item_id: row.item_id, batch: row.batch, rate: Number(row.rate) || 0, per_qty: Number(row.per_qty) || 1, unit: row.unit, gst_pct: Number(row.gst_pct) || 0 });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
