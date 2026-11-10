@@ -11079,10 +11079,15 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-app.patch('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_pricing'), async (req, res) => {
+app.patch('/api/jobs/:id/deliveries/:index', requireAnyBtn(['job_btn_pricing', 'job_btn_record_delivery']), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
+    // The delivery's details go with the Record Delivery button; E-FBR No., MSI No., Rate, Sale Tax
+    // and the Sale Report's own UC / Wastage figures stay with Invoicing fields (owner, 2026-11-10).
+    if (['rate', 'tax_pct', 'fbr_no', 'msi_no', 'uc_qty', 'wastage_qty'].includes(String((req.body && req.body.field) || '')) && !userHasBtn(req.user, 'job_btn_pricing')) {
+      return res.status(403).json({ error: 'E-FBR No., MSI No., Rate and Sale Tax need the Invoicing fields row.' });
+    }
     const revId = reversesAuditIdOf(req);
     if (revId && !userHasBtn(req.user, 'job_btn_history_reverse')) return res.status(403).json({ error: 'Not allowed - the History Reverse button is off for your role.' });
     if (revId && await alreadyReversed(sql, revId)) return res.status(409).json({ error: 'That change was already reversed.' });
