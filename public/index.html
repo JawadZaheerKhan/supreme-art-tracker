@@ -22128,7 +22128,10 @@ function buildSaleReportRows(tabOverride) {
         packetsShown: fig.packetsShown, packetsUnit: fig.packetsUnit,
         sheetsPackets: fig.sheetsPackets, sheetCut: fig.sheetCut, sheetsFromJobCard: fig.sheetsFromJobCard,
         // Packets (or sheets) per Unit Carton - lets the Packets box set the UC.
-        pkPerUc: F.pkPerUnit > 0 ? (fig.packetsUnit === 'sheets' ? F.pkPerUnit * F.psJob : F.pkPerUnit) : 0,
+        pkPerUc: fig.packetsUnit === 'sheets'
+          ? ((fig.sheetsFromJobCard && cartonQtyNum > 0) ? (parseFloat(String(j.sheets || '').replace(/[^0-9.]/g, '')) || 0) / cartonQtyNum
+            : (F.pkPerUnit > 0 ? F.pkPerUnit * F.psJob * (F.cutPieces || 1) : 0))
+          : (F.pkPerUnit > 0 ? F.pkPerUnit : 0),
         ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         paperL: paperDim ? paperDim.w : '', paperW: paperDim ? paperDim.h : '', cutPieces: F.cutPieces || 1, psJob,
@@ -22745,8 +22748,8 @@ function saleReportCols(tabOverride) {
       // Sheet rows (owner, 2026-10-06): the sheets come from the job card, so
       // they are not typed here (the shipment's UC is still typed in Printed
       // UC Qty); the note carries the packets AND the cut ("1.43 pkts · 1/4").
-      cell: (r, c) => (c && c.packetsCell && !r._merged && r.pkPerUc > 0 && r.packetsUnit !== 'sheets')
-        ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}</div>`
+      cell: (r, c) => (c && c.packetsCell && !r._merged && r.pkPerUc > 0)
+        ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}${r.packetsUnit === 'sheets' ? ` <span style="font-size:11px;color:var(--text2);">sheets</span> <span style="font-size:10px;color:var(--text2);">(${saleSheetsRefText(r, fmt)})</span>` : ''}</div>`
         : r.packetsUnit === 'sheets'
           ? `<span title="${r.sheetsFromJobCard ? 'From the job card\'s Sheets' : 'The job card has no Sheets - worked out from the UC'}">${fmt(r.packetsShown)} sheets</span> <span style="font-size:10px;color:var(--text2);white-space:nowrap;">(${saleSheetsRefText(r, fmt)})</span>`
           : fmt(r.packetsShown !== undefined ? r.packetsShown : r.packets),
