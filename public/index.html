@@ -18741,6 +18741,7 @@ function buildJobsReportRows() {
       pk:      SF.rows[idx].packets,
       pkShown: SF.rows[idx].packetsShown,
       pkUnit:  SF.rows[idx].packetsUnit,
+      idx,
     }));
     // Only enforced in Delivered mode — matches the toolbar, which hides
     // these two fields in Created mode. Without this guard, a leftover
@@ -18818,8 +18819,10 @@ function buildJobsReportRows() {
       paper,
       packKg: packKgJR,
       extraPapers: jrExtraPapers(j),
-      extraRatio: 1,
-      weightKg: jrRowWeightKg(packets, packKgJR, jrExtraPapers(j), 1),
+      // 2nd / 3rd paper: the papers split FIFO (jobPaperFifo) - the whole job on a job row.
+      fifo: jobPaperFifo(j, SF, packKgJR),
+      paperParts: (() => { const f = jobPaperFifo(j, SF, packKgJR); return f ? f.whole() : null; })(),
+      weightKg: (() => { const f = jobPaperFifo(j, SF, packKgJR); return f ? fifoSum(f.whole(), 'kg') : jrWeightKg(packets, packKgJR); })(),
       paperBatches: jobPaperBatchesText(j),
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
@@ -18936,7 +18939,7 @@ function buildJobsReportRows() {
         packKg: (() => { const w = sorted.filter(b => b.packKg != null && +b.packets > 0); const pk = w.reduce((a, b) => a + (+b.packets), 0); return pk > 0 ? w.reduce((a, b) => a + (+b.packets) * b.packKg, 0) / pk : (sorted[0].packKg ?? null); })(),
         paperBatches: dedupePipe(sorted.map(b => b.paperBatches)),
         weightKg: sorted.some(b => b.weightKg != null) ? sorted.reduce((a, b) => a + (+b.weightKg || 0), 0) : null,
-        extraPapers: [], extraRatio: 1,
+        extraPapers: [], fifo: null, paperParts: null,
         machine: dedupePipe(sorted.map(b => b.machine)),
         coatings: dedupePipe(sorted.map(b => b.coatings)),
         linkPartner: null,
@@ -18998,14 +19001,12 @@ function buildJobsReportRows() {
         jobUc: numQty(r.cartonQty),
         cartonQty: s.uc, wastage: s.wastage,
         packets: s.pk, packetsShown: s.pkShown, packetsUnit: s.pkUnit,
-        extraRatio: jrShareOf(s.pk, r.packetsTotal),
-        weightKg: jrRowWeightKg(s.pk, r.packKg, r.extraPapers, jrShareOf(s.pk, r.packetsTotal)),
+        paperParts: r.fifo ? r.fifo.forRow(s.idx) : null,
+        weightKg: r.fifo ? fifoSum(r.fifo.forRow(s.idx), 'kg') : jrWeightKg(s.pk, r.packKg),
       } : {
         ...r,
         packetsShown: sheets ? (+r.packets || 0) * (r.psJob || 0) : r.packets,
         packetsUnit: sheets ? 'sheets' : 'packets',
-        extraRatio: 1,
-        weightKg: jrRowWeightKg(r.packets, r.packKg, r.extraPapers, 1),
       });
       continue;
     }
@@ -19051,8 +19052,8 @@ function buildJobsReportRows() {
         packets:      s.pk,
         packetsShown: s.pkShown,
         packetsUnit:  s.pkUnit,
-        extraRatio:   jrShareOf(s.pk, r.packetsTotal),
-        weightKg:     jrRowWeightKg(s.pk, r.packKg, r.extraPapers, jrShareOf(s.pk, r.packetsTotal)),
+        paperParts:   r.fifo ? r.fifo.forRow(s.idx) : null,
+        weightKg:     r.fifo ? fifoSum(r.fifo.forRow(s.idx), 'kg') : jrWeightKg(s.pk, r.packKg),
         shipmentIndex: i,
         shipmentOfJob: list.length,
       });
@@ -19067,8 +19068,6 @@ function buildJobsReportRows() {
 // The Jobs Report's own quantity columns. Everything not named here follows
 // the general rule: shown once when the members agree, space-separated when
 // they do not.
-// The part of the job a shipment row is: its packets of the job's packets (whole job when unknown).
-function jrShareOf(pk, total) { const t = +total || 0; return t > 0 ? Math.min(1, Math.max(0, (+pk || 0) / t)) : 1; }
 // Weight of packets consumed: packets x kg a packet (blank when the paper's size / GSM is unknown).
 function jrWeightKg(packets, packKg) { const p = +packets || 0; return (p > 0 && packKg != null && packKg > 0) ? p * packKg : null; }
 // A job's 2nd / 3rd paper (job card): its packets, sheets and kg a packet - read fresh every
@@ -19082,33 +19081,57 @@ function jrExtraPapers(j) {
     if (!(packets > 0)) continue;
     const it = x.inventory_item_id ? inventoryAll.find(i => Number(i.id) === Number(x.inventory_item_id)) : null;
     const ps = packetSize(it ? it.paper_type : '') || 100;
-    out.push({ label, packets, sheets: packets * ps, ps, offcut: !!(it && it.is_offcut), packKg: it ? packWeightKg(it.paper_type, it.size, it.gsm) : null,
+    const cutM = String(x.sheet_cut || '1/1').match(/1\s*\/\s*(\d+)/), cut = cutM ? Math.max(1, +cutM[1]) : 1;
+    out.push({ label, packets, sheets: packets * ps, ps, cut, offcut: !!(it && it.is_offcut), packKg: it ? packWeightKg(it.paper_type, it.size, it.gsm) : null,
       paper: it ? `${it.paper_type}${it.size ? ' ' + it.size : ''}${it.gsm ? ' ' + it.gsm + 'gsm' : ''}` : '',
       type: it ? it.paper_type || '' : '', size: it ? it.size || '' : '', gsm: it ? (it.gsm == null ? '' : String(it.gsm)) : '' });
   }
   return out;
 }
-// Main paper + the 2nd / 3rd paper's share (ratio: the part of the job this row is).
-function jrRowWeightKg(mainPackets, packKg, extras, ratio) {
-  const parts = [jrWeightKg(mainPackets, packKg), ...(extras || []).map(e => jrWeightKg(e.packets * ratio, e.packKg))].filter(v => v != null);
-  return parts.length ? parts.reduce((a, v) => a + v, 0) : null;
+// A job's papers split FIFO over its deliveries (owner, 2026-11-10). Each paper's job card amount
+// (packets; sheets - printed pieces - for labels / leaflets) in order 1st, 2nd, 3rd; a delivery's
+// total is the papers' sum shared by its UC, taken from the 1st paper until it is used up, then
+// the 2nd... (beyond the last paper's amount it stays on the last). null for a one-paper job.
+function jobPaperFifo(j, F, mainPackKg) {
+  const extras = jrExtraPapers(j);
+  if (!extras.length || !F) return null;
+  const inv = j.inventory_item_id ? inventoryAll.find(i => Number(i.id) === Number(j.inventory_item_id)) : null;
+  const su = !!F.sheetUnit, ps = F.psJob || 100, cut = F.cutPieces || 1;
+  const jobSheets = parseFloat(String(j.sheets || '').replace(/[^0-9.]/g, '')) || 0;
+  const papers = [{ label: '1st', offcut: !!(inv && inv.is_offcut), amt: su ? (jobSheets > 0 ? jobSheets : (+F.packets || 0) * ps * cut) : (+F.packets || 0), perPk: su ? ps * cut : 1, ps, packKg: mainPackKg }]
+    .concat(extras.map(e => ({ label: e.label, offcut: e.offcut, amt: su ? e.packets * e.ps * (e.cut || 1) : e.packets, perPk: su ? e.ps * (e.cut || 1) : 1, ps: e.ps, packKg: e.packKg })));
+  const J = papers.reduce((a, x) => a + x.amt, 0);
+  const rows = Array.isArray(F.rows) ? F.rows : [];
+  const ucOf = r => +(r && r.cartonQty) || 0;
+  const jobUC = F.cartonQtyNum > 0 ? F.cartonQtyNum : rows.reduce((a, r) => a + ucOf(r), 0);
+  const Ts = rows.map(r => jobUC > 0 ? J * ucOf(r) / jobUC : (rows.length ? J / rows.length : 0));
+  const split = (start, T) => {
+    let pos = 0;
+    return papers.map((x, i) => {
+      const lo = pos, hi = pos + x.amt; pos = hi;
+      const a = Math.max(lo, start), b = i === papers.length - 1 ? start + T : Math.min(hi, start + T);
+      const amt = Math.max(0, b - a), packets = x.perPk > 0 ? amt / x.perPk : 0;
+      return { label: x.label, offcut: x.offcut, amt, packets, ps: x.ps, packKg: x.packKg, kg: x.packKg != null ? packets * x.packKg : null };
+    });
+  };
+  return { J, jobUC, sheetUnit: su, perUc: jobUC > 0 ? J / jobUC : 0,
+    forRow: idx => split(Ts.slice(0, idx).reduce((a, v) => a + v, 0), Ts[idx] || 0),
+    whole: () => split(0, J) };
 }
+const fifoSum = (parts, k) => { const v = (parts || []).map(x => x[k]).filter(x => x !== null && x !== undefined); return v.length ? v.reduce((a, x) => a + x, 0) : null; };
 // The Packets cell: the total, and with a 2nd / 3rd paper each paper below it in green.
 function jrPacketsCellHtml(r, fmt) {
-  const ex = Array.isArray(r.extraPapers) ? r.extraPapers : [], ratio = r.extraRatio == null ? 1 : r.extraRatio;
+  const parts = Array.isArray(r.paperParts) ? r.paperParts : null;
   const sheetsUnit = r.packetsUnit === 'sheets';
-  if (!ex.length) return sheetsUnit ? `${fmt(r.packetsShown)} sheets <span style="font-weight:500;font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>` : fmt(r.packets);
-  const r2 = v => Math.round(v * 100) / 100;
-  if (sheetsUnit) {
-    const tot = (+r.packetsShown || 0) + ex.reduce((a, e) => a + e.sheets * ratio, 0);
-    return `${fmt(r2(tot))} sheets<div style="font-size:10.5px;font-weight:600;color:#15803d;white-space:nowrap;">1st ${fmt(r2(+r.packetsShown || 0))}${ex.map(e => ` · ${e.label} ${fmt(r2(e.sheets * ratio))}`).join('')}</div>`;
-  }
-  const tot = (+r.packets || 0) + ex.reduce((a, e) => a + e.packets * ratio, 0);
-  return `${fmt(r2(tot))}<div style="font-size:10.5px;font-weight:600;color:#15803d;white-space:nowrap;">1st ${fmt(r2(+r.packets || 0))}${ex.map(e => ` · ${e.label} ${fmt(r2(e.packets * ratio))}`).join('')}</div>`;
+  if (!parts) return sheetsUnit ? `${fmt(r.packetsShown)} sheets <span style="font-weight:500;font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>` : fmt(r.packets);
+  const r2 = v => Math.round(v * 100) / 100, k = sheetsUnit ? 'amt' : 'packets';
+  const line = `<div style="font-size:10.5px;font-weight:600;white-space:nowrap;">${parts.map(x => `<span style="color:${x.offcut ? '#0891b2' : '#15803d'};">${x.label} ${fmt(r2(x[k]))}</span>`).join(' + ')}</div>`;
+  return `${fmt(r2(fifoSum(parts, k) || 0))}${sheetsUnit ? ' sheets' : ''}${line}`;
 }
 // The same as plain text (print / Excel note).
-function jrExtraTotalPackets(r) { const ex = Array.isArray(r.extraPapers) ? r.extraPapers : [], ratio = r.extraRatio == null ? 1 : r.extraRatio; return ex.reduce((a, e) => a + e.packets * ratio, 0); }
-function jrExtraTotalSheets(r) { const ex = Array.isArray(r.extraPapers) ? r.extraPapers : [], ratio = r.extraRatio == null ? 1 : r.extraRatio; return ex.reduce((a, e) => a + e.sheets * ratio, 0); }
+// What the 2nd / 3rd paper adds to the row's main-paper figure (for the totals and Excel).
+function jrExtraTotalPackets(r) { return Array.isArray(r.paperParts) ? (fifoSum(r.paperParts, 'packets') || 0) - (+r.packets || 0) : 0; }
+function jrExtraTotalSheets(r) { return Array.isArray(r.paperParts) ? (fifoSum(r.paperParts, 'amt') || 0) - (+r.packetsShown || 0) : 0; }
 const JOBS_REPORT_MERGE = {
   additive: ['deliveredQty', 'cartonQty', 'jobUc', 'poQty', 'wastage', 'readyQty', 'readyShipped', 'readyNow', 'packets', 'packetsShown', 'packetsTotal', 'milQty', 'weightKg'],
   // (2nd / 3rd paper: a merged linked row keeps the first job's extras - linked jobs are separate cards.)
@@ -19812,7 +19835,7 @@ function printJobsReport() {
     <td style="border:1px solid #000;padding:4px;text-align:right;${deliveredStyle}">${esc(r.deliveredQty)}${(r.isShadeCard && r.deliveredQty !== '') ? ' copies' : ''}</td>
     <td ${tdR}>${(r.stockGroupName && r.wastage === null) ? '<b style="color:#7c3aed;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
     <td ${tdR}>${fmt(r.readyQty)}${(+r.readyQty > 0 && +r.readyShipped > 0 && !r._merged) ? (+r.readyShipped >= +r.readyQty - 0.5 ? ' (shipped)' : ` (${fmt(r.readyShipped)} shipped)`) : ''}</td>
-    <td ${tdR}>${(r.extraPapers && r.extraPapers.length) ? jrPacketsCellHtml(r, fmt) : (r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packets))}</td>
+    <td ${tdR}>${r.paperParts ? jrPacketsCellHtml(r, fmt) : (r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packets))}</td>
     <td ${tdR}>${r.weightKg ? (+r.weightKg).toLocaleString('en-IN', { maximumFractionDigits: 2 }) + ' kg' : '—'}</td>
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.paperBatches || '')}</td>
@@ -21892,9 +21915,13 @@ function jobShipmentFigures(j) {
     const cartonQty = ucTyped !== null ? ucTyped : ucCalc;
     // No ups / packet size on file: share the job's own packet count out by
     // the row's UC instead of showing 0.
-    const rowPackets = pkPerUnit > 0
-      ? cartonQty * pkPerUnit
-      : ((packets > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? packets * cartonQty / cartonQtyNum : 0);
+    // Normal jobs (owner, 2026-11-10): the job card's packets, shared over the deliveries by UC -
+    // one delivery is the job card's figure. MIL jobs: worked out from the UC (ups x packet size).
+    const rowPackets = (!isMilJob && packets > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0)
+      ? packets * cartonQty / cartonQtyNum
+      : pkPerUnit > 0
+        ? cartonQty * pkPerUnit
+        : ((packets > 0 && Number.isFinite(cartonQtyNum) && cartonQtyNum > 0) ? packets * cartonQty / cartonQtyNum : 0);
     // Sheets = PRINTED (cut) pieces, the same unit as the job card's Sheets
     // Qty (its Packets = Sheets / (packet size x cut)).
     let rowSheets = rowPackets * psJob * cutPieces;
@@ -22111,35 +22138,38 @@ function buildSaleReportRows(tabOverride) {
       // (owner, 2026-10-08; it used to divide the last shipment's whole-job
       // wastage by the whole job's issued weight).
       const rowWastageKgPct   = (rowWastageKg !== null && rowIssuedKg !== null && rowIssuedKg > 0) ? rowWastageKg * 100 / rowIssuedKg : null;
-      // 2nd / 3rd paper (owner, 2026-11-10): this delivery's share of each, as its main-paper packets
-      // are of the job's. Wastage Sheets stays the total worked out above and is shared over the
-      // papers by their sheets; its weight is each paper's share at that paper's kg a packet.
+      // 2nd / 3rd paper (owner, 2026-11-10): the papers split FIFO over the deliveries (jobPaperFifo).
+      // Wastage Sheets stays the total worked out above and is shared over the papers by their raw
+      // sheets; each share is weighed at that paper's kg a packet.
       const extrasSR = jrExtraPapers(j);
+      const fifoSR = jobPaperFifo(j, F, packKg);
       let paperParts = null, pkAll = rowPackets, pkShownAll = fig.packetsShown, issuedAll = rowIssuedKg, wkAll = rowWastageKg, wkPctAll = rowWastageKgPct;
-      let packetsView = +rowIssuedPackets || 0;   // the Packets column: packets only, every paper
-      if (extrasSR.length) {
-        const ratio = jrShareOf(rowPackets, F.packets);
-        const mainSheets = (+rowIssuedPackets || 0) * (psJob || 100);
-        const ex = extrasSR.map(e => ({ ...e, pk: e.packets * ratio, sh: e.sheets * ratio }));
-        const allSheets = mainSheets + ex.reduce((a, e) => a + e.sh, 0);
-        const shareOf = sh => allSheets > 0 ? sh / allSheets : 0;
+      let packetsView = +rowIssuedPackets || 0;   // the Packets column: packets, every paper
+      if (fifoSR) {
+        const parts = fifoSR.forRow(idx);
+        const raw = parts.map(x => x.packets * (x.ps || 100)), rawAll = raw.reduce((a2, v) => a2 + v, 0);
         const ws = rowWastageSheets;
-        paperParts = [{ label: '1st', offcut: !!(invItem && invItem.is_offcut), packets: rowPackets, pkView: +rowIssuedPackets || 0, shown: fig.packetsShown, issuedKg: rowIssuedKg,
-            wastageSheets: ws === null ? null : ws * shareOf(mainSheets), wastageKg: rowWastageKg === null ? null : rowWastageKg * shareOf(mainSheets) }]
-          .concat(ex.map(e => {
-            const wsE = ws === null ? null : ws * shareOf(e.sh);
-            return { label: e.label, offcut: e.offcut, packets: e.pk, pkView: e.pk, shown: F.sheetUnit ? e.sh : e.pk,
-              issuedKg: e.packKg != null ? e.pk * e.packKg : null,
-              wastageSheets: wsE, wastageKg: (wsE !== null && e.packKg != null && e.ps > 0) ? wsE / e.ps * e.packKg : null };
-          }));
-        const sumOf = k => { const v = paperParts.map(x => x[k]).filter(x => x !== null && x !== undefined); return v.length ? v.reduce((a, x) => a + x, 0) : null; };
-        pkAll = sumOf('packets');
-        pkShownAll = F.sheetUnit ? sumOf('shown') : pkAll;
-        issuedAll = sumOf('issuedKg');
-        wkAll = sumOf('wastageKg');
+        paperParts = parts.map((x, i) => {
+          const share = rawAll > 0 ? raw[i] / rawAll : 0, wsP = ws === null ? null : ws * share;
+          return { label: x.label, offcut: x.offcut, packets: x.packets, pkView: x.packets, shown: F.sheetUnit ? x.amt : x.packets, issuedKg: x.kg, wastageSheets: wsP,
+            wastageKg: i === 0 ? (rowWastageKg === null ? null : rowWastageKg * share) : ((wsP !== null && x.packKg != null && x.ps > 0) ? wsP / x.ps * x.packKg : null) };
+        });
+        pkAll = fifoSum(paperParts, 'packets');
+        pkShownAll = F.sheetUnit ? fifoSum(paperParts, 'shown') : pkAll;
+        issuedAll = fifoSum(paperParts, 'issuedKg');
+        wkAll = fifoSum(paperParts, 'wastageKg');
         wkPctAll = (wkAll !== null && issuedAll !== null && issuedAll > 0) ? wkAll * 100 / issuedAll : null;
-        packetsView = paperParts.reduce((a, x) => a + (+x.pkView || 0), 0);
+        packetsView = pkAll || 0;
       }
+      // Typing the packets (sheets) sets the Printed UC Qty: per UC from the job card for a normal
+      // job or a 2 / 3-paper job; MIL jobs from ups x packet size (x cut).
+      const jobSheetsSR = parseFloat(String(j.sheets || '').replace(/[^0-9.]/g, '')) || 0;
+      const pkPerUcRow = fifoSR ? fifoSR.perUc
+        : (!isMilJob && cartonQtyNum > 0 && F.packets > 0)
+          ? (fig.packetsUnit === 'sheets' ? (jobSheetsSR > 0 ? jobSheetsSR : F.packets * F.psJob * (F.cutPieces || 1)) / cartonQtyNum : F.packets / cartonQtyNum)
+          : fig.packetsUnit === 'sheets'
+            ? ((fig.sheetsFromJobCard && cartonQtyNum > 0) ? jobSheetsSR / cartonQtyNum : (F.pkPerUnit > 0 ? F.pkPerUnit * F.psJob * (F.cutPieces || 1) : 0))
+            : (F.pkPerUnit > 0 ? F.pkPerUnit : 0);
       const amountExTax  = rate !== null ? rate * cartons : null;
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
       // The tax VALUE itself - 18% of a 2,000 base is Rs 360. The report
@@ -22158,10 +22188,7 @@ function buildSaleReportRows(tabOverride) {
         packetsShown: pkShownAll, packetsUnit: fig.packetsUnit,
         sheetsPackets: fig.sheetsPackets, sheetCut: fig.sheetCut, sheetsFromJobCard: fig.sheetsFromJobCard,
         // Packets (or sheets) per Unit Carton - lets the Packets box set the UC.
-        pkPerUc: fig.packetsUnit === 'sheets'
-          ? ((fig.sheetsFromJobCard && cartonQtyNum > 0) ? (parseFloat(String(j.sheets || '').replace(/[^0-9.]/g, '')) || 0) / cartonQtyNum
-            : (F.pkPerUnit > 0 ? F.pkPerUnit * F.psJob * (F.cutPieces || 1) : 0))
-          : (F.pkPerUnit > 0 ? F.pkPerUnit : 0),
+        pkPerUc: pkPerUcRow,
         ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         paperL: paperDim ? paperDim.w : '', paperW: paperDim ? paperDim.h : '', cutPieces: F.cutPieces || 1, psJob,
@@ -22782,8 +22809,12 @@ function saleReportCols(tabOverride) {
       right: true, total: 'packetsView', filter: 'packets',
       cell: (r, c) => {
         const r3 = v => Math.round((+v || 0) * 1000) / 1000, r2 = v => fmt(Math.round(v * 100) / 100);
-        if (r.packetsUnit === 'sheets') return `${fmt(r3(r.packetsShown))} sheets` + partsLine(r, 'shown', r2, ' + ');
-        if (r.paperParts && !r._merged) return fmt(r3(r.packetsView)) + partsLine(r, 'pkView', r2, ' + ');
+        const canType = c && c.packetsCell && !r._merged && r.pkPerUc > 0;
+        const box = tail => `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}${tail}</div>`;
+        if (r.packetsUnit === 'sheets') return canType
+          ? box(' <span style="font-size:11px;color:var(--text2);">sheets</span>') + partsLine(r, 'shown', r2, ' + ')
+          : `${fmt(r3(r.packetsShown))} sheets` + partsLine(r, 'shown', r2, ' + ');
+        if (r.paperParts && !r._merged) return (canType ? box('') : fmt(r3(r.packetsView))) + partsLine(r, 'pkView', r2, ' + ');
         return (c && c.packetsCell && !r._merged && r.pkPerUc > 0)
           ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}</div>`
           : fmt(r3(r.packetsView));
