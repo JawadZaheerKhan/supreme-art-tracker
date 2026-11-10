@@ -22775,19 +22775,23 @@ function saleReportCols(tabOverride) {
     { key: 'sheetGsm', label: 'GSM', right: true, filter: 'sheetGsm', cell: r => esc(r.sheetGsm), xl: r => xlNum(r.sheetGsm), pr: r => esc(r.sheetGsm) },
     // Labels / Leaflets show SHEETS here, everything else packets. The header
     // follows the tab; on All, sheet rows carry a small "sheets" tag.
-    // Packets only (owner, 2026-11-10) - a label / leaflet row's packets are its sheets' packets.
-    // A 2nd / 3rd paper: the total, and each paper below it ("1st 16 + 2nd 5"). A box row with one
-    // paper keeps its typing box (packets set the shipment's UC).
-    { key: 'packets', label: 'Packets',
+    // Boxes: packets. Labels / Leaflets: sheets (the job card's), no packets beside them
+    // (owner, 2026-11-10). A 2nd / 3rd paper: the total, and each paper below it ("1st 16 + 2nd 5").
+    // A box row with one paper keeps its typing box (packets set the shipment's UC).
+    { key: 'packets', label: (tab === 'labels' || tab === 'leaflets') ? 'Sheets' : (tab === 'all' ? 'Packets / Sheets' : 'Packets'),
       right: true, total: 'packetsView', filter: 'packets',
-      cell: (r, c) => (r.paperParts && !r._merged)
-        ? fmt(Math.round((+r.packetsView || 0) * 1000) / 1000) + partsLine(r, 'pkView', v => fmt(Math.round(v * 100) / 100), ' + ')
-        : (c && c.packetsCell && !r._merged && r.pkPerUc > 0 && r.packetsUnit !== 'sheets')
-        ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}</div>`
-        : fmt(Math.round((+r.packetsView || 0) * 1000) / 1000),
-      totalCell: t => t.packetsView ? fmt(Math.round(t.packetsView * 1000) / 1000) : '',
-      xl: r => r.packetsView ? srXl(r.packetsView) : '',
-      pr: r => fmt(Math.round((+r.packetsView || 0) * 1000) / 1000) },
+      cell: (r, c) => {
+        const r3 = v => Math.round((+v || 0) * 1000) / 1000, r2 = v => fmt(Math.round(v * 100) / 100);
+        if (r.packetsUnit === 'sheets') return `${fmt(r3(r.packetsShown))} sheets` + partsLine(r, 'shown', r2, ' + ');
+        if (r.paperParts && !r._merged) return fmt(r3(r.packetsView)) + partsLine(r, 'pkView', r2, ' + ');
+        return (c && c.packetsCell && !r._merged && r.pkPerUc > 0)
+          ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}</div>`
+          : fmt(r3(r.packetsView));
+      },
+      totalCell: t => [t.packetsView ? fmt(Math.round(t.packetsView * 1000) / 1000) + (t.sheetsView ? ' pkts' : '') : '',
+        t.sheetsView ? fmt(Math.round(t.sheetsView * 1000) / 1000) + ' sheets' : ''].filter(Boolean).join(' + '),
+      xl: r => { const v = r.packetsUnit === 'sheets' ? r.packetsShown : r.packetsView; return v ? srXl(v) : ''; },
+      pr: r => r.packetsUnit === 'sheets' ? fmt(Math.round((+r.packetsShown || 0) * 1000) / 1000) + (tab === 'all' ? ' sheets' : '') : fmt(Math.round((+r.packetsView || 0) * 1000) / 1000) },
     { key: 'ups', label: 'UPS', right: true, filter: 'ups', cell: r => esc(r.ups), xl: r => xlNum(r.ups), pr: r => esc(r.ups) },
     { key: 'cartonQty', label: 'Printed UC Qty', right: true, total: 'cartonQty',
       // The row's share, with the job's printed total beside it when they
@@ -22884,7 +22888,8 @@ function renderSaleReport() {
       readyQty:       a.readyQty       + once('readyQty', +r.readyQty),
       // Packets and sheets are different units - never added together.
       packets:        a.packets        + (r.packetsUnit === 'sheets' ? 0 : once('packets', +r.packets)),
-      packetsView:    (a.packetsView || 0) + (+r.packetsView || 0),
+      packetsView:    (a.packetsView || 0) + (r.packetsUnit === 'sheets' ? 0 : (+r.packetsView || 0)),
+      sheetsView:     (a.sheetsView || 0) + (r.packetsUnit === 'sheets' ? (+r.packetsShown || 0) : 0),
       sheetsCount:    (a.sheetsCount || 0) + (r.packetsUnit === 'sheets' ? (+r.packetsShown || 0) : 0),
       sheetsPackets:  (a.sheetsPackets || 0) + (r.packetsUnit === 'sheets' ? (+(r.sheetsPackets ?? r.packets) || 0) : 0),   // reference only
       wastageSheets:  a.wastageSheets  + once('wastageSheets', r.wastageSheets),
