@@ -22203,7 +22203,10 @@ function buildSaleReportRows(tabOverride) {
         packetsShown: pkShownAll, packetsUnit: fig.packetsUnit,
         sheetsPackets: fig.sheetsPackets, sheetCut: fig.sheetCut, sheetsFromJobCard: fig.sheetsFromJobCard,
         // Packets (or sheets) per Unit Carton - lets the Packets box set the UC.
-        pkPerUc: F.pkPerUnit > 0 ? (fig.packetsUnit === 'sheets' ? F.pkPerUnit * F.psJob : F.pkPerUnit) : 0,
+        pkPerUc: fig.packetsUnit === 'sheets'
+          ? ((fig.sheetsFromJobCard && cartonQtyNum > 0) ? (parseFloat(String(j.sheets || '').replace(/[^0-9.]/g, '')) || 0) / cartonQtyNum
+            : (F.pkPerUnit > 0 ? F.pkPerUnit * F.psJob * (F.cutPieces || 1) : 0))
+          : (F.pkPerUnit > 0 ? F.pkPerUnit : 0),
         ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         paperL: paperDim ? paperDim.w : '', paperW: paperDim ? paperDim.h : '', cutPieces: F.cutPieces || 1, psJob,
@@ -22824,7 +22827,9 @@ function saleReportCols(tabOverride) {
       right: true, total: 'packetsView', filter: 'packets',
       cell: (r, c) => {
         const r3 = v => Math.round((+v || 0) * 1000) / 1000, r2 = v => fmt(Math.round(v * 100) / 100);
-        if (r.packetsUnit === 'sheets') return `${fmt(r3(r.packetsShown))} sheets` + partsLine(r, 'shown', r2, ' + ');
+        if (r.packetsUnit === 'sheets') return (c && c.packetsCell && !r._merged && !r.paperParts && r.pkPerUc > 0)
+          ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)} <span style="font-size:11px;color:var(--text2);">sheets</span></div>`
+          : `${fmt(r3(r.packetsShown))} sheets` + partsLine(r, 'shown', r2, ' + ');
         if (r.paperParts && !r._merged) return fmt(r3(r.packetsView)) + partsLine(r, 'pkView', r2, ' + ');
         return (c && c.packetsCell && !r._merged && r.pkPerUc > 0)
           ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}</div>`
