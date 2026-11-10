@@ -18188,9 +18188,35 @@ function jrReadyDates(j) {
   list.sort((a, b) => a.ms - b.ms);
   return list.filter((d, i) => !i || d.text !== list[i - 1].text);   // one entry per day
 }
+// Jobs Report Batch column (owner, 2026-11-10): stock-out tx id -> batch numbers it took.
+// null until loaded; an issue without a batch record counts as the 1st batch.
+let _jrTxBatches = null, _jrTxBatchesLoading = false;
+function loadJrTxBatches() {
+  if (_jrTxBatchesLoading) return;
+  _jrTxBatchesLoading = true;
+  api('GET', '/api/reports/paper-batches').then(rows => {
+    _jrTxBatches = new Map((rows || []).map(r => [Number(r.tx_id), r.ns || []]));
+    if (document.getElementById('rt-jobs-report') && typeof renderJobsReport === 'function') renderJobsReport();
+  }).catch(() => {}).finally(() => { _jrTxBatchesLoading = false; });
+}
+// "1, 2" for the main paper, then " · 2nd: 1" for a 2nd / 3rd paper. Blank when nothing was issued.
+function jobPaperBatchesText(j) {
+  if (!_jrTxBatches) return '';
+  const by = { primary: new Set(), secondary: new Set(), third: new Set() };
+  for (const x of (Array.isArray(j.issued_items) ? j.issued_items : [])) {
+    if (!x || !(parseFloat(x.sheets) > 0)) continue;
+    const src = x.source === 'secondary' || x.source === 'third' ? x.source : 'primary';
+    const ns = x.tx_id ? _jrTxBatches.get(Number(x.tx_id)) : null;
+    for (const n of (ns && ns.length ? ns : [1])) by[src].add(n);
+  }
+  const list = set => [...set].sort((a, b) => a - b).join(', ');
+  return [by.primary.size ? list(by.primary) : '', by.secondary.size ? '2nd: ' + list(by.secondary) : '', by.third.size ? '3rd: ' + list(by.third) : '']
+    .filter(Boolean).join(' · ');
+}
 function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
+  loadJrTxBatches();
   if (jobsReportState.period !== 'custom') {   // re-applied every open so "Today" stays today
     const r = periodToDateRange(jobsReportState.period);
     jobsReportState.dfrom = r.from; jobsReportState.dto = r.to;
@@ -18708,6 +18734,11 @@ function buildJobsReportRows() {
     // fall back to the whole-job packet count, displayed plain.
     const upsJR = parseFloat(j.ups);
     const psJR  = jobPacketSizeForReports(j, jobPaperTypeForReports(j, invItem));
+    // Weight column (owner, 2026-11-10): kg a packet, the Sale Report's Packet/KG -
+    // size x GSM / 15500 (3100 a ream), for this job's packet size.
+    const ptypeJR = jobPaperTypeForReports(j, invItem);
+    const packKgBaseJR = packWeightKg(ptypeJR, invItem ? invItem.size : j.size, invItem ? invItem.gsm : j.gsm);
+    const packKgJR = (packKgBaseJR !== null && psJR > 0 && packetSize(ptypeJR) > 0) ? packKgBaseJR * psJR / packetSize(ptypeJR) : packKgBaseJR;
     const perUnitPk = (upsJR > 0 && psJR > 0) ? 1 / (upsJR * psJR * jobCutPieces(j)) : 0;
     // Job creation timestamp — used for sorting and the Created At column.
     // Previously computed above the date-range filter; now inlined per-row
@@ -18830,6 +18861,8 @@ function buildJobsReportRows() {
       sheetUnit: SF.sheetUnit,   // Labels / Leaflets: packets shown as sheets
       psJob: SF.psJob,
       paper,
+      packKg: packKgJR,
+      paperBatches: jobPaperBatchesText(j),
       machine: j.machine || '',
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
       colors: String((((j.particulars || {}).no_of_colors) || {}).quantity || '').trim(),
@@ -18941,6 +18974,9 @@ function buildJobsReportRows() {
         shadeOpen: sorted.some(b => b.shadeOpen),
         linkGroup: null,
         paper: dedupePipe(sorted.map(b => b.paper)),
+        // kg a packet across the members, weighted by their packets.
+        packKg: (() => { const w = sorted.filter(b => b.packKg != null && +b.packets > 0); const pk = w.reduce((a, b) => a + (+b.packets), 0); return pk > 0 ? w.reduce((a, b) => a + (+b.packets) * b.packKg, 0) / pk : (sorted[0].packKg ?? null); })(),
+        paperBatches: dedupePipe(sorted.map(b => b.paperBatches)),
         machine: dedupePipe(sorted.map(b => b.machine)),
         coatings: dedupePipe(sorted.map(b => b.coatings)),
         linkPartner: null,
@@ -19002,10 +19038,12 @@ function buildJobsReportRows() {
         jobUc: numQty(r.cartonQty),
         cartonQty: s.uc, wastage: s.wastage,
         packets: s.pk, packetsShown: s.pkShown, packetsUnit: s.pkUnit,
+        weightKg: jrWeightKg(s.pk, r.packKg),
       } : {
         ...r,
         packetsShown: sheets ? (+r.packets || 0) * (r.psJob || 0) : r.packets,
         packetsUnit: sheets ? 'sheets' : 'packets',
+        weightKg: jrWeightKg(r.packets, r.packKg),
       });
       continue;
     }
@@ -19051,6 +19089,7 @@ function buildJobsReportRows() {
         packets:      s.pk,
         packetsShown: s.pkShown,
         packetsUnit:  s.pkUnit,
+        weightKg:     jrWeightKg(s.pk, r.packKg),
         shipmentIndex: i,
         shipmentOfJob: list.length,
       });
@@ -19065,8 +19104,10 @@ function buildJobsReportRows() {
 // The Jobs Report's own quantity columns. Everything not named here follows
 // the general rule: shown once when the members agree, space-separated when
 // they do not.
+// Weight of packets consumed: packets x kg a packet (blank when the paper's size / GSM is unknown).
+function jrWeightKg(packets, packKg) { const p = +packets || 0; return (p > 0 && packKg != null && packKg > 0) ? p * packKg : null; }
 const JOBS_REPORT_MERGE = {
-  additive: ['deliveredQty', 'cartonQty', 'jobUc', 'poQty', 'wastage', 'readyQty', 'readyShipped', 'readyNow', 'packets', 'packetsShown', 'packetsTotal', 'milQty'],
+  additive: ['deliveredQty', 'cartonQty', 'jobUc', 'poQty', 'wastage', 'readyQty', 'readyShipped', 'readyNow', 'packets', 'packetsShown', 'packetsTotal', 'milQty', 'weightKg'],
   amount: [],
 };
 
@@ -19173,8 +19214,10 @@ function renderJobsReport() {
       packets:       a.packets       + (r.packetsUnit === 'sheets' ? 0 : numCell(r.packets)),
       sheetsCount:   a.sheetsCount   + (r.packetsUnit === 'sheets' ? numCell(r.packetsShown) : 0),
       sheetsPackets: a.sheetsPackets + (r.packetsUnit === 'sheets' ? numCell(r.packets) : 0),
+      weightKg:      a.weightKg      + (+r.weightKg || 0),
     };
-  }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, readyShipped: 0, packets: 0, sheetsCount: 0, sheetsPackets: 0 });
+  }, { poQty: 0, milQty: 0, cartonQty: 0, deliveredQty: 0, wastage: 0, readyQty: 0, readyShipped: 0, packets: 0, sheetsCount: 0, sheetsPackets: 0, weightKg: 0 });
+  const fmtKg = v => (v == null || !(+v > 0)) ? '—' : (+v).toLocaleString('en-IN', { maximumFractionDigits: 2 }) + ' kg';
   const tbody = rows.map(r => {
     // Wastage (carton qty − ready qty) is just a tracking number, not a
     // good/bad indicator — the gap between PO / produced / ready can
@@ -19242,7 +19285,9 @@ function renderJobsReport() {
       ${wastageCell}
       ${readyCell}
       <td ${tdR} style="padding:8px 10px;text-align:right;font-weight:600;">${r.packetsUnit === 'sheets' ? `${fmt(r.packetsShown)} sheets <span style="font-weight:500;font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>` : fmt(r.packets)}</td>
+      <td ${tdR} style="padding:8px 10px;text-align:right;white-space:nowrap;"${r.packKg ? ` title="${(+r.packets || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })} packets × ${(+r.packKg).toFixed(3)} kg"` : ''}>${fmtKg(r.weightKg)}</td>
       <td ${td}>${esc(r.paper)}</td>
+      <td ${td} style="padding:8px 10px;white-space:nowrap;">${esc(r.paperBatches || '')}</td>
       <td ${td}>${esc(r.machine)}</td>
       <td ${td}>${esc(r.coatings)}</td>
       <td ${td}>${esc(r.colors)}</td>
@@ -19277,7 +19322,9 @@ function renderJobsReport() {
           <th ${thR}>Wastage UPS</th>
           <th ${thR}>Ready Qty</th>
           <th ${thR}>Packets</th>
+          <th ${thR} title="Weight of the packets consumed: packets x kg a packet (size x GSM / 15500, a ream / 3100)">Weight</th>
           <th ${th}>${jrColHeaderHtml('paper', 'Paper')}</th>
+          <th ${th} title="Which batch(es) of the paper the job was issued from - 1st, 2nd... (2nd / 3rd paper after the dot)">Batch</th>
           <th ${th}>${jrColHeaderHtml('machine', 'Machine')}</th>
           <th ${th}>${jrColHeaderHtml('coatings', 'Coatings')}</th>
           <th ${th}>${jrColHeaderHtml('colors', 'Colors')}</th>
@@ -19297,7 +19344,8 @@ function renderJobsReport() {
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.wastage)}</td>
           <td style="padding:8px 10px;text-align:right;white-space:nowrap;" title="Black: still on the shelf now. Green: the shipped Ready figures shown on the rows, added up.">${fmt(totals.readyQty)}${totals.readyShipped > 0 ? ` <span style="color:#166534;font-weight:700;">(${fmt(totals.readyShipped)} shipped)</span>` : ''}</td>
           <td style="padding:8px 10px;text-align:right;">${[totals.packets ? fmt(totals.packets) + (totals.sheetsCount ? ' pkts' : '') : '', totals.sheetsCount ? `${fmt(totals.sheetsCount)} sheets (${fmt(totals.sheetsPackets)} pkts)` : ''].filter(Boolean).join(' + ')}</td>
-          <td colspan="5"></td>
+          <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${totals.weightKg ? fmtKg(totals.weightKg) : ''}</td>
+          <td colspan="6"></td>
         </tr>
       </tfoot>
     </table>
@@ -19316,7 +19364,7 @@ async function exportJobsReport() {
   const readyMode = jobsReportState.mode === 'ready';
   const header = ['Job ID', 'Job Name', 'Created', readyMode ? 'Ready' : 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
-    'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage UPS', 'Ready Qty', 'Packets / Sheets', 'Paper', 'Machine', 'Coatings', 'Colors', 'Plates'];
+    'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage UPS', 'Ready Qty', 'Packets / Sheets', 'Weight (kg)', 'Paper', 'Batch', 'Machine', 'Coatings', 'Colors', 'Plates'];
   const aoa = reportExcelAoa(header);
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
@@ -19343,7 +19391,9 @@ async function exportJobsReport() {
       r.readyQty,
       // Same as the Sale Report's Excel: packets, or sheets for Labels / Leaflets.
       (() => { const v = r.packetsUnit === 'sheets' ? r.packetsShown : r.packets; return v ? +(+v).toFixed(2) : ''; })(),
+      r.weightKg ? +(+r.weightKg).toFixed(2) : '',
       r.paper,
+      r.paperBatches || '',
       r.machine,
       r.coatings,
       r.colors,
@@ -19759,7 +19809,9 @@ function printJobsReport() {
     <td ${tdR}>${(r.stockGroupName && r.wastage === null) ? '<b style="color:#7c3aed;">MIL</b>' : (r.wastage === null ? '—' : fmt(r.wastage))}</td>
     <td ${tdR}>${fmt(r.readyQty)}${(+r.readyQty > 0 && +r.readyShipped > 0 && !r._merged) ? (+r.readyShipped >= +r.readyQty - 0.5 ? ' (shipped)' : ` (${fmt(r.readyShipped)} shipped)`) : ''}</td>
     <td ${tdR}>${r.packetsUnit === 'sheets' ? shipmentPacketsText(r.packets, 'sheets', r.packetsShown, fmt) : fmt(r.packets)}</td>
+    <td ${tdR}>${r.weightKg ? (+r.weightKg).toLocaleString('en-IN', { maximumFractionDigits: 2 }) + ' kg' : '—'}</td>
     <td ${tdL}>${esc(r.paper)}</td>
+    <td ${tdL}>${esc(r.paperBatches || '')}</td>
     <td ${tdL}>${esc(r.machine)}</td>
     <td ${tdL}>${esc(r.coatings)}</td>
   </tr>`;
@@ -19790,7 +19842,9 @@ function printJobsReport() {
           <th ${tdR}>Wastage UPS</th>
           <th ${tdR}>Ready Qty</th>
           <th ${tdR}>Packets</th>
+          <th ${tdR}>Weight</th>
           <th ${tdL}>Paper</th>
+          <th ${tdL}>Batch</th>
           <th ${tdL}>Machine</th>
           <th ${tdL}>Coatings</th>
         </tr>

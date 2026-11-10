@@ -2955,6 +2955,15 @@ app.get('/api/cost-batches', requirePermission('rpt_cost_report', 'view'), async
     });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
+// Jobs Report Batch column (owner, 2026-11-10): the batch numbers each stock-out took.
+app.get('/api/reports/paper-batches', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT id, batch_alloc FROM inventory_transactions WHERE change < 0 AND batch_alloc IS NOT NULL`;
+    res.json(rows.map(r => ({ tx_id: r.id, ns: (Array.isArray(r.batch_alloc) ? r.batch_alloc : []).map(a => parseInt(a && a.n, 10)).filter(n => n > 0) })));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 // One batch's own rate. A blank rate removes it, so the batch follows the one before it again.
 app.put('/api/cost-batch-rates/:item_id/:batch', requirePermission('rpt_cost_settings'), async (req, res) => {
   try {
