@@ -2945,12 +2945,12 @@ app.get('/api/cost-batches', requirePermission('rpt_cost_report', 'view'), async
          WHERE t.batch IS NOT NULL AND t.change > 0 AND t.reverses_tx_id IS NULL
            AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
          GROUP BY t.item_id, t.batch`,
-      sql`SELECT id, batch_alloc FROM inventory_transactions WHERE change < 0 AND batch_alloc IS NOT NULL`,
+      sql`SELECT id, item_id, batch_alloc FROM inventory_transactions WHERE change < 0 AND batch_alloc IS NOT NULL`,
       sql`SELECT item_id, batch, rate, per_qty, unit, gst_pct FROM finance.cost_batch_rates`,
     ]);
     res.json({
       batches,
-      allocs: allocs.map(r => ({ tx_id: r.id, alloc: r.batch_alloc })),
+      allocs: allocs.map(r => ({ tx_id: r.id, item_id: r.item_id, alloc: r.batch_alloc })),
       rates: rates.map(r => ({ item_id: r.item_id, batch: r.batch, rate: Number(r.rate) || 0, per_qty: Number(r.per_qty) || 1, unit: r.unit, gst_pct: Number(r.gst_pct) || 0 })),
     });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }

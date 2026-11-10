@@ -25779,6 +25779,8 @@ let _costBatchList = [];             // [{ item_id, n, at, po_no, invoice_no, ch
 let _costAllocs = new Map();         // stock-out tx id -> [{ n, sheets }]
 let _costBatchRates = new Map();     // 'item|n' -> { rate, per_qty, unit, gst_pct }
 let _costBatchEff = new Map();       // 'item|n' -> { entry, own }
+let _costBatchOut = new Map();       // 'item|n' -> sheets taken out of that batch
+const _csOpenGroups = new Set();     // Cost Settings: paper type + brand rows opened to show their batches
 const crBatchKey = (itemId, n) => Number(itemId) + '|' + Number(n);
 function crItemById(id) { return id && inventoryAll ? inventoryAll.find(i => Number(i.id) === Number(id)) || null : null; }
 function crBuildBatchEff() {
@@ -25907,6 +25909,10 @@ async function openCostReport() {
     _costBoardRates = new Map((boardRates || []).map(r => [Number(r.job_id), Number(r.rate_per_kg) || 0]));
     _costBatchList = (batches && batches.batches) || [];
     _costAllocs = new Map(((batches && batches.allocs) || []).map(a => [Number(a.tx_id), Array.isArray(a.alloc) ? a.alloc : []]));
+    _costBatchOut = new Map();
+    for (const a of ((batches && batches.allocs) || [])) for (const x of (Array.isArray(a.alloc) ? a.alloc : [])) {
+      const k = crBatchKey(a.item_id, x.n); _costBatchOut.set(k, (_costBatchOut.get(k) || 0) + (+x.sheets || 0));
+    }
     _costBatchRates = new Map(((batches && batches.rates) || []).map(r => [crBatchKey(r.item_id, r.batch), r]));
     crBuildBatchEff();
   } catch (e) {
@@ -26273,7 +26279,7 @@ function openCostSettings() {
     <div style="margin-bottom:22px;">
       <h3 style="margin:0 0 8px;font-size:14px;color:var(--text2);letter-spacing:0.06em;text-transform:uppercase;">&#128230; Board / Paper &mdash; Rate per <span style="color:var(--brand);">kg or packet</span></h3>
       <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">
-        ${paperRows.length ? `Each paper type + brand: its rate is the 1st batch and all older stock. Under it, every batch from a Stock In (each size and GSM counts its own) - a batch with no rate of its own follows the one before it; type a rate to change just that batch, clear it to follow again. Pick kg or packet (ream) for how the vendor prices it. ${paperRows.length} from Inventory.` : 'No inventory rows yet.'}
+        ${paperRows.length ? `Each paper type + brand: its rate is the 1st batch (older stock). Click it to open its batches, newest first - green ones still hold stock, red ones are empty; the green count under the brand is how many hold stock. A batch with no rate of its own follows the one before it; type a rate to change just that batch, clear it to follow again. Pick kg or packet (ream) for how the vendor prices it. ${paperRows.length} from Inventory.` : 'No inventory rows yet.'}
       </div>
       <div id="cs-board-wrap" style="max-height:440px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
         <table style="width:100%;font-size:13px;border-collapse:collapse;">
@@ -26290,9 +26296,10 @@ function openCostSettings() {
             ${paperRows.length ? paperRows.map(p => {
               const key = _crPaperKey(p.paper_type, p.brand);
               const label = `${p.paper_type} · ${p.brand || 'no brand'}`;
+              const isOpen = _csOpenGroups.has(key), cnt = csGroupCountText(key);
               return `<tr style="border-top:2px solid var(--border2);background:var(--bg2);" data-key="${esc(key)}" data-cat="paper" data-label="${esc(label)}" data-unit="rs_per_kg">
-                <td style="padding:6px 10px;"><b>${esc(p.paper_type)}</b></td>
-                <td style="padding:6px 10px;"><b>${p.brand ? esc(p.brand) : '<span style="color:var(--text2);">no brand</span>'}</b><div style="font-size:10.5px;color:var(--text2);">1st batch &amp; older stock</div></td>
+                <td style="padding:6px 10px;cursor:pointer;" onclick="csToggleGroup(this.closest('tr').dataset.key)" title="Click to ${isOpen ? 'hide' : 'show'} its batches"><span style="display:inline-block;width:14px;color:var(--text2);">${isOpen ? '&#9662;' : '&#9656;'}</span><b>${esc(p.paper_type)}</b></td>
+                <td style="padding:6px 10px;cursor:pointer;" onclick="csToggleGroup(this.closest('tr').dataset.key)" title="Click to ${isOpen ? 'hide' : 'show'} its batches. This row's rate is the 1st batch (older stock)."><b>${p.brand ? esc(p.brand) : '<span style="color:var(--text2);">no brand</span>'}</b>${cnt ? `<div style="font-size:10.5px;color:#15803d;font-weight:700;">${cnt}</div>` : ''}</td>
                 ${costRateCells(key, 'kg', canEdit, true)}</tr>${costBatchRowsHtml(key, canEdit)}`;
             }).join('') : `<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text2);font-style:italic;">Nothing to show.</td></tr>`}
           </tbody>
@@ -26317,25 +26324,72 @@ function openCostSettings() {
     <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Done</button></div>
   </div>`);
 }
-// The batches under one paper type + brand row, oldest first.
+// Every batch of a paper type + brand, newest first: each Stock In batch, and the 1st batch
+// (the stock from before batches) of every size that has no Stock In batch of its own. Stock
+// left as the Batches window works it out: a later batch holds what came in less what went
+// out (never more than the balance), the 1st batch the rest.
+function csGroupBatches(groupKey) {
+  const items = (inventoryAll || []).filter(i => i && !i.deleted_at && _crPaperKey(i.paper_type, i.brand) === groupKey);
+  const out = [];
+  for (const it of items) {
+    const listed = _costBatchList.filter(b => Number(b.item_id) === Number(it.id)).sort((x, y) => y.n - x.n);
+    let rest = parseFloat(it.current_balance) || 0;
+    const rows = [];
+    for (const b of listed) {
+      if (b.n === 1) continue;
+      const left = Math.max(0, Math.min((+b.received || 0) - (_costBatchOut.get(crBatchKey(it.id, b.n)) || 0), rest));
+      rest -= left;
+      rows.push({ it, n: b.n, info: b, left });
+    }
+    const first = listed.find(b => b.n === 1) || null;
+    rows.push({ it, n: 1, info: first, left: Math.max(0, rest), older: !first });   // empty ones too, in red
+    out.push(...rows);
+  }
+  return out.sort((x, y) => (x.info && x.info.at ? 0 : 1) - (y.info && y.info.at ? 0 : 1)
+    || String(y.info && y.info.at || '').localeCompare(String(x.info && x.info.at || '')) || y.n - x.n);
+}
+function csGroupCountText(groupKey) {
+  const n = csGroupBatches(groupKey).filter(r => r.left > 0).length;
+  return n ? `${n} batch${n === 1 ? '' : 'es'}` : '';
+}
+function csToggleGroup(key) {
+  if (_csOpenGroups.has(key)) _csOpenGroups.delete(key); else _csOpenGroups.add(key);
+  costSettingsRedraw();
+}
+// The batch rows under one paper type + brand row (only while it is open).
 function costBatchRowsHtml(groupKey, canEdit) {
-  const list = _costBatchList.filter(b => { const it = crItemById(b.item_id); return it && _crPaperKey(it.paper_type, it.brand) === groupKey; })
-    .sort((x, y) => String(x.at || '').localeCompare(String(y.at || '')) || x.n - y.n);
+  if (!_csOpenGroups.has(groupKey)) return '';
+  const list = csGroupBatches(groupKey);
+  if (!list.length) return `<tr><td colspan="7" style="padding:6px 22px;font-size:11.5px;color:var(--text2);font-style:italic;">No batches of this paper in Inventory.</td></tr>`;
   const dis = canEdit ? '' : ' disabled';
   const fmt4 = n => n ? n.toLocaleString('en-IN', { maximumFractionDigits: 4 }) : '—';
-  return list.map(b => {
-    const it = crItemById(b.item_id);
-    const k = crBatchKey(b.item_id, b.n), own = _costBatchRates.get(k) || null;
+  const groupEntry = _costRates.get(groupKey) || null;
+  return list.map(r => {
+    const it = r.it, b = r.info;
+    const tint = r.left > 0 ? 'background:rgba(22,163,74,0.09);' : 'background:rgba(220,38,38,0.09);';
+    const meta = [it.size, it.gsm ? it.gsm + 'gsm' : '', it.is_offcut ? 'offcut' : ''].filter(Boolean).join(' ');
+    const ps = packetSize(it.paper_type) || 100;
+    const leftTxt = r.left > 0 ? `${(Math.round(r.left / ps * 100) / 100).toLocaleString('en-IN')} ${isReamPaper(it.paper_type) ? 'reams' : 'pkts'} left` : 'empty';
+    const leftHtml = `<b style="color:${r.left > 0 ? '#15803d' : '#b91c1c'};">${leftTxt}</b>`;
+    if (r.older) {
+      // The 1st batch = the stock from before batches: costed at the paper type + brand rate above.
+      return `<tr style="border-top:1px solid var(--border);${tint}">
+        <td colspan="2" style="padding:5px 10px 5px 22px;font-size:12px;">&#8627; <b>${esc(meta)}</b> &middot; 1st batch (older stock)
+          <div style="font-size:10.5px;color:var(--text2);">${leftHtml}</div></td>
+        <td colspan="4" style="padding:5px 10px;text-align:right;font-size:11px;color:var(--text2);font-style:italic;">rate = the paper type + brand row above</td>
+        <td style="padding:5px 10px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text2);">${fmt4(_crNetRate(groupEntry))}</td>
+      </tr>`;
+    }
+    const k = crBatchKey(it.id, r.n), own = _costBatchRates.get(k) || null;
     const eff = (_costBatchEff.get(k) || {}).entry || null;
     const shown = own || eff;
     const ph = (v, d) => own ? '' : ` placeholder="${esc(String(v == null ? d : v))}"`;
     const val = v => own ? ` value="${esc(String(v))}"` : '';
-    const meta = [it.size, it.gsm ? it.gsm + 'gsm' : '', it.is_offcut ? 'offcut' : ''].filter(Boolean).join(' ');
-    const refs = [b.at ? fmtDMY(String(b.at).slice(0, 10)) : '', b.po_no ? 'PO ' + b.po_no : '', b.invoice_no ? 'Inv ' + b.invoice_no : '', b.challan_no ? b.challan_no : ''].filter(Boolean).join(' · ');
+    const refs = [b && b.at ? fmtDMY(String(b.at).slice(0, 10)) : '', b && b.po_no ? 'PO ' + b.po_no : '', b && b.invoice_no ? 'Inv ' + b.invoice_no : '', b && b.challan_no ? b.challan_no : ''].filter(Boolean).join(' · ');
     const ck = c => `data-ck="${k}:${c}"`;
-    return `<tr style="border-top:1px solid var(--border);" data-item="${b.item_id}" data-n="${b.n}">
-      <td colspan="2" style="padding:5px 10px 5px 22px;font-size:12px;">&#8627; <b>${esc(meta)}</b> &middot; ${esc(crBatchName(b.item_id, b.n))}
-        <div style="font-size:10.5px;color:var(--text2);">${esc(refs)}${own ? '' : ' &middot; <i>same rate as the batch before</i>'}</div></td>
+    return `<tr style="border-top:1px solid var(--border);${tint}" data-item="${it.id}" data-n="${r.n}">
+      <td colspan="2" style="padding:5px 10px 5px 22px;font-size:12px;">&#8627; <b>${esc(meta)}</b> &middot; ${esc(crBatchName(it.id, r.n))}
+        <div style="font-size:10.5px;color:var(--text2);">${leftHtml}${refs ? ' &middot; ' + esc(refs) : ''}${own ? '' : ' &middot; <i>same rate as the batch before</i>'}</div></td>
       <td style="padding:5px 10px;text-align:right;"><input type="number" step="0.01" min="0" class="hg-cb-rate" ${ck('r')}${val(own && own.rate)}${ph(shown && shown.rate, 0)} onchange="costSaveBatchRow(this)" style="${COST_RATE_STYLE}${own ? '' : 'background:#f8fafc;'}"${dis}></td>
       <td style="padding:5px 10px;text-align:right;white-space:nowrap;"><input type="number" step="0.01" min="0.01" class="hg-cb-per" ${ck('p')}${val(own && own.per_qty)}${ph(shown && shown.per_qty, 1)} onchange="costSaveBatchRow(this)" style="${COST_PER_STYLE}"${dis}>
         <select class="hg-cb-unit" ${ck('u')} onchange="costSaveBatchRow(this)" style="margin-left:4px;padding:5px 4px;border:1px solid var(--border);border-radius:6px;font-size:12px;"${dis}>
