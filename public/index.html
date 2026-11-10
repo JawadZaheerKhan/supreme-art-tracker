@@ -18821,6 +18821,8 @@ function buildJobsReportRows() {
       extraPapers: jrExtraPapers(j),
       // 2nd / 3rd paper: the papers split FIFO (jobPaperFifo) - the whole job on a job row.
       fifo: jobPaperFifo(j, SF, packKgJR),
+      overInfo: jobPacketsOver(j, SF, jobPaperFifo(j, SF, packKgJR)),
+      pkOver: (() => { const o = jobPacketsOver(j, SF, jobPaperFifo(j, SF, packKgJR)); return o ? o.at(o.cumEnd.length - 1) : null; })(),
       paperParts: (() => { const f = jobPaperFifo(j, SF, packKgJR); return f ? f.whole() : null; })(),
       weightKg: (() => { const f = jobPaperFifo(j, SF, packKgJR); return f ? fifoSum(f.whole(), 'kg') : jrWeightKg(packets, packKgJR); })(),
       paperBatches: jobPaperBatchesText(j),
@@ -18939,7 +18941,7 @@ function buildJobsReportRows() {
         packKg: (() => { const w = sorted.filter(b => b.packKg != null && +b.packets > 0); const pk = w.reduce((a, b) => a + (+b.packets), 0); return pk > 0 ? w.reduce((a, b) => a + (+b.packets) * b.packKg, 0) / pk : (sorted[0].packKg ?? null); })(),
         paperBatches: dedupePipe(sorted.map(b => b.paperBatches)),
         weightKg: sorted.some(b => b.weightKg != null) ? sorted.reduce((a, b) => a + (+b.weightKg || 0), 0) : null,
-        extraPapers: [], fifo: null, paperParts: null,
+        extraPapers: [], fifo: null, paperParts: null, overInfo: null, pkOver: null,
         machine: dedupePipe(sorted.map(b => b.machine)),
         coatings: dedupePipe(sorted.map(b => b.coatings)),
         linkPartner: null,
@@ -19002,6 +19004,7 @@ function buildJobsReportRows() {
         cartonQty: s.uc, wastage: s.wastage,
         packets: s.pk, packetsShown: s.pkShown, packetsUnit: s.pkUnit,
         paperParts: r.fifo ? r.fifo.forRow(s.idx) : null,
+        pkOver: r.overInfo ? r.overInfo.at(s.idx) : null,
         weightKg: r.fifo ? fifoSum(r.fifo.forRow(s.idx), 'kg') : jrWeightKg(s.pk, r.packKg),
       } : {
         ...r,
@@ -19053,6 +19056,7 @@ function buildJobsReportRows() {
         packetsShown: s.pkShown,
         packetsUnit:  s.pkUnit,
         paperParts:   r.fifo ? r.fifo.forRow(s.idx) : null,
+        pkOver:       r.overInfo ? r.overInfo.at(s.idx) : null,
         weightKg:     r.fifo ? fifoSum(r.fifo.forRow(s.idx), 'kg') : jrWeightKg(s.pk, r.packKg),
         shipmentIndex: i,
         shipmentOfJob: list.length,
@@ -19114,13 +19118,37 @@ function jobPaperFifo(j, F, mainPackKg) {
       return { label: x.label, offcut: x.offcut, amt, packets, ps: x.ps, packKg: x.packKg, kg: x.packKg != null ? packets * x.packKg : null };
     });
   };
-  return { J, jobUC, sheetUnit: su, perUc: jobUC > 0 ? J / jobUC : 0,
+  return { J, jobUC, sheetUnit: su, Ts, perUc: jobUC > 0 ? J / jobUC : 0,
     forRow: idx => split(Ts.slice(0, idx).reduce((a, v) => a + v, 0), Ts[idx] || 0),
     whole: () => split(0, J) };
+}
+// Over the job card (owner, 2026-11-10): the job's deliveries, in order, counted against its job
+// card total - packets, or sheets for labels / leaflets; every paper for a 2 / 3-paper job. A
+// delivery is flagged when the running total up to it passes the job card's.
+function jobPacketsOver(j, F, fifo) {
+  if (!F || !Array.isArray(F.rows) || !F.rows.length) return null;
+  const su = !!F.sheetUnit, ps = F.psJob || 100, cut = F.cutPieces || 1;
+  const jobSheets = parseFloat(String(j.sheets || '').replace(/[^0-9.]/g, '')) || 0;
+  const J = fifo ? fifo.J : (su ? (jobSheets > 0 ? jobSheets : (+F.packets || 0) * ps * cut) : (+F.packets || 0));
+  if (!(J > 0)) return null;
+  const amts = fifo ? fifo.Ts : F.rows.map(r => +(su ? r.packetsShown : r.packets) || 0);
+  let cum = 0;
+  const cumEnd = amts.map(a => (cum += a));
+  const tol = Math.max(0.005, J * 1e-6);
+  return { J, unit: su ? 'sheets' : 'packets', cumEnd, at: idx => (idx >= 0 && cumEnd[idx] > J + tol) ? { J, cum: cumEnd[idx], unit: su ? 'sheets' : 'packets' } : null };
+}
+// The orange sign beside the figure.
+function pkOverMarkHtml(o) {
+  if (!o) return '';
+  const n = v => (Math.round(v * 100) / 100).toLocaleString('en-IN');
+  return `<span title="More than the job card: the deliveries up to here count ${n(o.cum)} ${o.unit}, the job card has ${n(o.J)}. Check the figure typed." style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:#f59e0b;color:#fff;font-size:11px;font-weight:900;cursor:help;flex:0 0 auto;margin-right:4px;">!</span>`;
 }
 const fifoSum = (parts, k) => { const v = (parts || []).map(x => x[k]).filter(x => x !== null && x !== undefined); return v.length ? v.reduce((a, x) => a + x, 0) : null; };
 // The Packets cell: the total, and with a 2nd / 3rd paper each paper below it in green.
 function jrPacketsCellHtml(r, fmt) {
+  return (r._merged ? '' : pkOverMarkHtml(r.pkOver)) + jrPacketsCellInner(r, fmt);
+}
+function jrPacketsCellInner(r, fmt) {
   const parts = Array.isArray(r.paperParts) ? r.paperParts : null;
   const sheetsUnit = r.packetsUnit === 'sheets';
   if (!parts) return sheetsUnit ? `${fmt(r.packetsShown)} sheets <span style="font-weight:500;font-size:10px;color:var(--text2);">(${fmt(r.packets)} pkts)</span>` : fmt(r.packets);
@@ -22189,6 +22217,7 @@ function buildSaleReportRows(tabOverride) {
         sheetsPackets: fig.sheetsPackets, sheetCut: fig.sheetCut, sheetsFromJobCard: fig.sheetsFromJobCard,
         // Packets (or sheets) per Unit Carton - lets the Packets box set the UC.
         pkPerUc: pkPerUcRow,
+        pkOver: (() => { const o = jobPacketsOver(j, F, fifoSR); return o ? o.at(idx) : null; })(),
         ucTyped: fig.ucTyped, ucCalc: fig.ucCalc, wastageTyped: fig.wastageTyped, wastageCalc: fig.wastageCalc,
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         paperL: paperDim ? paperDim.w : '', paperW: paperDim ? paperDim.h : '', cutPieces: F.cutPieces || 1, psJob,
@@ -22810,14 +22839,13 @@ function saleReportCols(tabOverride) {
       cell: (r, c) => {
         const r3 = v => Math.round((+v || 0) * 1000) / 1000, r2 = v => fmt(Math.round(v * 100) / 100);
         const canType = c && c.packetsCell && !r._merged && r.pkPerUc > 0;
-        const box = tail => `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}${tail}</div>`;
+        const mark = r._merged ? '' : pkOverMarkHtml(r.pkOver);
+        const box = tail => `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${mark}${c.packetsCell(r)}${tail}</div>`;
         if (r.packetsUnit === 'sheets') return canType
           ? box(' <span style="font-size:11px;color:var(--text2);">sheets</span>') + partsLine(r, 'shown', r2, ' + ')
-          : `${fmt(r3(r.packetsShown))} sheets` + partsLine(r, 'shown', r2, ' + ');
-        if (r.paperParts && !r._merged) return (canType ? box('') : fmt(r3(r.packetsView))) + partsLine(r, 'pkView', r2, ' + ');
-        return (c && c.packetsCell && !r._merged && r.pkPerUc > 0)
-          ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}</div>`
-          : fmt(r3(r.packetsView));
+          : `${mark}${fmt(r3(r.packetsShown))} sheets` + partsLine(r, 'shown', r2, ' + ');
+        if (r.paperParts && !r._merged) return (canType ? box('') : mark + fmt(r3(r.packetsView))) + partsLine(r, 'pkView', r2, ' + ');
+        return canType ? box('') : mark + fmt(r3(r.packetsView));
       },
       totalCell: t => [t.packetsView ? fmt(Math.round(t.packetsView * 1000) / 1000) + (t.sheetsView ? ' pkts' : '') : '',
         t.sheetsView ? fmt(Math.round(t.sheetsView * 1000) / 1000) + ' sheets' : ''].filter(Boolean).join(' + '),
