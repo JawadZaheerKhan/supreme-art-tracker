@@ -19127,7 +19127,7 @@ function jrExtraPapers(j) {
     if (!(packets > 0)) continue;
     const it = x.inventory_item_id ? inventoryAll.find(i => Number(i.id) === Number(x.inventory_item_id)) : null;
     const ps = packetSize(it ? it.paper_type : '') || 100;
-    out.push({ label, packets, sheets: packets * ps, ps, offcut: !!(it && it.is_offcut), packKg: it ? packWeightKg(it.paper_type, it.size, it.gsm) : null,
+    out.push({ label, packets, sheets: packets * ps, packKg: it ? packWeightKg(it.paper_type, it.size, it.gsm) : null,
       paper: it ? `${it.paper_type}${it.size ? ' ' + it.size : ''}${it.gsm ? ' ' + it.gsm + 'gsm' : ''}` : '' });
   }
   return out;
@@ -22155,33 +22155,6 @@ function buildSaleReportRows(tabOverride) {
       // (owner, 2026-10-08; it used to divide the last shipment's whole-job
       // wastage by the whole job's issued weight).
       const rowWastageKgPct   = (rowWastageKg !== null && rowIssuedKg !== null && rowIssuedKg > 0) ? rowWastageKg * 100 / rowIssuedKg : null;
-      // 2nd / 3rd paper (owner, 2026-11-10): this delivery's share of each, as its main-paper packets
-      // are of the job's. Wastage Sheets stays the total worked out above and is shared over the
-      // papers by their sheets; its weight is each paper's share at that paper's kg a packet.
-      const extrasSR = jrExtraPapers(j);
-      let paperParts = null, pkAll = rowPackets, pkShownAll = fig.packetsShown, issuedAll = rowIssuedKg, wkAll = rowWastageKg, wkPctAll = rowWastageKgPct;
-      if (extrasSR.length) {
-        const ratio = jrShareOf(rowPackets, F.packets);
-        const mainSheets = (+rowIssuedPackets || 0) * (psJob || 100);
-        const ex = extrasSR.map(e => ({ ...e, pk: e.packets * ratio, sh: e.sheets * ratio }));
-        const allSheets = mainSheets + ex.reduce((a, e) => a + e.sh, 0);
-        const shareOf = sh => allSheets > 0 ? sh / allSheets : 0;
-        const ws = rowWastageSheets;
-        paperParts = [{ label: '1st', offcut: !!(invItem && invItem.is_offcut), packets: rowPackets, shown: fig.packetsShown, issuedKg: rowIssuedKg,
-            wastageSheets: ws === null ? null : ws * shareOf(mainSheets), wastageKg: rowWastageKg === null ? null : rowWastageKg * shareOf(mainSheets) }]
-          .concat(ex.map(e => {
-            const wsE = ws === null ? null : ws * shareOf(e.sh);
-            return { label: e.label, offcut: e.offcut, packets: e.pk, shown: F.sheetUnit ? e.sh : e.pk,
-              issuedKg: e.packKg != null ? e.pk * e.packKg : null,
-              wastageSheets: wsE, wastageKg: (wsE !== null && e.packKg != null && e.ps > 0) ? wsE / e.ps * e.packKg : null };
-          }));
-        const sumOf = k => { const v = paperParts.map(x => x[k]).filter(x => x !== null && x !== undefined); return v.length ? v.reduce((a, x) => a + x, 0) : null; };
-        pkAll = sumOf('packets');
-        pkShownAll = F.sheetUnit ? sumOf('shown') : pkAll;
-        issuedAll = sumOf('issuedKg');
-        wkAll = sumOf('wastageKg');
-        wkPctAll = (wkAll !== null && issuedAll !== null && issuedAll > 0) ? wkAll * 100 / issuedAll : null;
-      }
       const amountExTax  = rate !== null ? rate * cartons : null;
       const amountIncTax = amountExTax !== null ? amountExTax * (1 + taxPct / 100) : null;
       // The tax VALUE itself - 18% of a 2,000 base is Rs 360. The report
@@ -22196,8 +22169,8 @@ function buildSaleReportRows(tabOverride) {
         // delivery shipped (owner spec) - normal jobs keep the job's PO Qty.
         poQty: isMilJob ? cartons : (j.qty || ''), cartonQty: rowCartonQty, cartons, cartonsPackets, cpPerRow,
         ucJob: Number.isFinite(cartonQtyNum) ? cartonQtyNum : null,   // the job's printed total, shown beside the row's share
-        wastage: rowWastage, readyQty, packets: pkAll, mainPackets: rowPackets, milPerRow: isMilJob, paperParts,
-        packetsShown: pkShownAll, packetsUnit: fig.packetsUnit,
+        wastage: rowWastage, readyQty, packets: rowPackets, milPerRow: isMilJob,
+        packetsShown: fig.packetsShown, packetsUnit: fig.packetsUnit,
         sheetsPackets: fig.sheetsPackets, sheetCut: fig.sheetCut, sheetsFromJobCard: fig.sheetsFromJobCard,
         // Packets (or sheets) per Unit Carton - lets the Packets box set the UC.
         pkPerUc: F.pkPerUnit > 0 ? (fig.packetsUnit === 'sheets' ? F.pkPerUnit * F.psJob : F.pkPerUnit) : 0,
@@ -22205,7 +22178,7 @@ function buildSaleReportRows(tabOverride) {
         sheetSize, sheetL, sheetW, sheetGsm, paperType: paperTypeVal,
         paperL: paperDim ? paperDim.w : '', paperW: paperDim ? paperDim.h : '', cutPieces: F.cutPieces || 1, psJob,
         ups: upsVal, plates: platesVal,
-        wastageSheets: rowWastageSheets, wastagePackets: rowWastagePackets, wastageKg: wkAll, wastageKgPct: wkPctAll, issuedKg: issuedAll, packKg, packUnit,
+        wastageSheets: rowWastageSheets, wastagePackets: rowWastagePackets, wastageKg: rowWastageKg, wastageKgPct: rowWastageKgPct, issuedKg: rowIssuedKg, packKg, packUnit,
         coatings: coatingsVal,
         isShadeCard: !!j.is_shade_card, isPartial: isPartialDelivery(j),
         // The yellow row shade is for deliveries still OPEN - it clears by
@@ -22778,9 +22751,6 @@ function saleReportCols(tabOverride) {
   const dash = '\u2014';
   const d1 = srNum, d2 = srNum;   // were 1 and 2 decimals
   const sheetsText = r => r.wastageSheets === null || r.wastageSheets === undefined ? '' : d1(r.wastageSheets);
-  // A job with a 2nd / 3rd paper: each paper's figure under the total - offcut cyan, else green.
-  const partsLine = (r, k, f) => (r.paperParts && !r._merged)
-    ? `<div style="font-size:10.5px;font-weight:600;white-space:nowrap;">${r.paperParts.map(x => `<span style="color:${x.offcut ? '#0891b2' : '#15803d'};">${x.label} ${x[k] === null || x[k] === undefined ? '—' : f(x[k])}</span>`).join(' · ')}</div>` : '';
   const nameWithBatch = r => String(r.name || '') + (r.batchNo ? ' — ' + r.batchNo : '');
   const tab = tabOverride || saleReportState.tab || 'all';
   if (tab === SALE_REPORT_WASTE_TAB) return saleReportWasteCols();
@@ -22820,9 +22790,7 @@ function saleReportCols(tabOverride) {
       // Sheet rows (owner, 2026-10-06): the sheets come from the job card, so
       // they are not typed here (the shipment's UC is still typed in Printed
       // UC Qty); the note carries the packets AND the cut ("1.43 pkts · 1/4").
-      cell: (r, c) => (r.paperParts && !r._merged)
-        ? (r.packetsUnit === 'sheets' ? `${fmt(r.packetsShown)} sheets` : fmt(r.packets)) + partsLine(r, r.packetsUnit === 'sheets' ? 'shown' : 'packets', v => fmt(Math.round(v * 100) / 100))
-        : (c && c.packetsCell && !r._merged && r.pkPerUc > 0 && r.packetsUnit !== 'sheets')
+      cell: (r, c) => (c && c.packetsCell && !r._merged && r.pkPerUc > 0 && r.packetsUnit !== 'sheets')
         ? `<div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap;">${c.packetsCell(r)}</div>`
         : r.packetsUnit === 'sheets'
           ? `<span title="${r.sheetsFromJobCard ? 'From the job card\'s Sheets' : 'The job card has no Sheets - worked out from the UC'}">${fmt(r.packetsShown)} sheets</span> <span style="font-size:10px;color:var(--text2);white-space:nowrap;">(${saleSheetsRefText(r, fmt)})</span>`
@@ -22858,10 +22826,10 @@ function saleReportCols(tabOverride) {
       xl: r => xlNum(r.wastage),
       pr: r => (r.wastage === null ? dash : fmt(r.wastage)) + (r.readyQty > 0 ? ' + <span style="color:#166534;font-weight:bold;">' + fmt(r.readyQty) + '</span>' : '') },
     { key: 'wastageSheets', label: 'Wastage Sheets', right: true,
-      cell: r => partsOf(r, 'wastageSheets', v => d1(v)) || (sheetsText(r) + partsLine(r, 'wastageSheets', d1)), totalCell: t => t.wastageSheets ? d1(t.wastageSheets) : '',
+      cell: r => partsOf(r, 'wastageSheets', v => d1(v)) || sheetsText(r), totalCell: t => t.wastageSheets ? d1(t.wastageSheets) : '',
       xl: r => r.wastageSheets === null || r.wastageSheets === undefined ? '' : srXl(r.wastageSheets), pr: r => sheetsText(r) },
     { key: 'wastageKg', label: 'Wastage Weight (kg)', right: true,
-      cell: r => partsOf(r, 'wastageKg', v => d2(v)) || ((r.wastageKg === null ? '&mdash;' : d2(r.wastageKg)) + partsLine(r, 'wastageKg', d2)), totalCell: t => t.wastageKg ? d2(t.wastageKg) : '', xl: r => r.wastageKg === null ? '' : srXl(r.wastageKg), pr: r => r.wastageKg === null ? dash : d2(r.wastageKg) },
+      cell: r => partsOf(r, 'wastageKg', v => d2(v)) || (r.wastageKg === null ? '&mdash;' : d2(r.wastageKg)), totalCell: t => t.wastageKg ? d2(t.wastageKg) : '', xl: r => r.wastageKg === null ? '' : srXl(r.wastageKg), pr: r => r.wastageKg === null ? dash : d2(r.wastageKg) },
     // Wastage weight as a share of the paper issued: wastage kg x 100 / issued kg.
     // The total is the ratio of the two column totals, not a sum of percentages.
     { key: 'wastageKgPct', label: 'Wastage KGs %', right: true,
@@ -22870,7 +22838,7 @@ function saleReportCols(tabOverride) {
       xl: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? '' : srXl(r.wastageKgPct),
       pr: r => r.wastageKgPct === null || r.wastageKgPct === undefined ? dash : d2(r.wastageKgPct) + '%' },
     { key: 'issuedKg', label: 'Packets Issued Weight (kg)', right: true,
-      cell: r => partsOf(r, 'issuedKg', v => d2(v)) || ((r.issuedKg === null ? '&mdash;' : d2(r.issuedKg)) + partsLine(r, 'issuedKg', d2)), totalCell: t => t.issuedKg ? d2(t.issuedKg) : '', xl: r => r.issuedKg === null ? '' : srXl(r.issuedKg), pr: r => r.issuedKg === null ? dash : d2(r.issuedKg) },
+      cell: r => partsOf(r, 'issuedKg', v => d2(v)) || (r.issuedKg === null ? '&mdash;' : d2(r.issuedKg)), totalCell: t => t.issuedKg ? d2(t.issuedKg) : '', xl: r => r.issuedKg === null ? '' : srXl(r.issuedKg), pr: r => r.issuedKg === null ? dash : d2(r.issuedKg) },
     { key: 'rate', label: 'Rate per UC', right: true, filter: 'rate', cell: (r, c) => c.rateCell(r), xl: r => xlNum(r.rate), pr: r => r.rate !== null ? fmtRate(r.rate) : dash },
     { key: 'exTax', label: 'Rate Excl. Tax', right: true, total: 'amountExTax', totalPrint: true,
       cell: r => partsOf(r, 'amountExTax', v => fmtRate(v)) || (r.amountExTax !== null ? fmtRate(r.amountExTax) : '&mdash;'), xl: r => r.amountExTax === null ? '' : +r.amountExTax.toFixed(2), pr: r => r.amountExTax !== null ? fmtRate(r.amountExTax) : dash },
