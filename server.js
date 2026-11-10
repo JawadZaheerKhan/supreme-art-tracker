@@ -2904,6 +2904,19 @@ app.put('/api/cost-settings/:key', requirePermission('rpt_cost_settings'), async
     res.json(costRow(rows[0]));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
+// Clear a paper batch's own rate (Cost Settings, owner 2026-11-10): the batch follows the paper
+// type + brand rate again. Only batch rows ('paper:<type>|<brand>|b<n>') can be removed.
+app.delete('/api/cost-settings/:key', requirePermission('rpt_cost_settings'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const key = String(req.params.key || '');
+    if (!/^paper:[^|]*\|[^|]*\|b\d+$/.test(key)) return res.status(400).json({ error: 'Only a batch rate can be cleared.' });
+    const [row] = await sql`DELETE FROM finance.cost_settings WHERE key = ${key} RETURNING label`;
+    if (row) await logAudit(sql, req, { action: 'cost_setting.update', entityType: 'cost_setting', entityId: null, summary: `Cost Settings: ${row.label} follows the paper rate again` });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 // A job's own Rs/kg, typed in the Cost Report. 0 clears it (back to Cost Settings).
 app.get('/api/cost-board-rates', requirePermission('rpt_cost_report', 'view'), async (req, res) => {
   try {
@@ -11696,6 +11709,11 @@ app.post('/api/inventory/rename-value', requirePermission('inv_btn_brands'), asy
                label = split_part(c.label, ' · ', 1) || ' · ' || ${to}
          WHERE c.category = 'paper' AND split_part(c.key, '|', 2) = ${from} AND split_part(c.key, '|', 3) = ''
            AND NOT EXISTS (SELECT 1 FROM finance.cost_settings d WHERE d.key = split_part(c.key, '|', 1) || '|' || ${to})`);
+      q.push(sql`
+        UPDATE finance.cost_settings c SET key = split_part(c.key, '|', 1) || '|' || ${to} || '|' || split_part(c.key, '|', 3),
+               label = split_part(c.label, ' · ', 1) || ' · ' || ${to} || ' · ' || split_part(c.label, ' · ', 3)
+         WHERE c.category = 'paper' AND split_part(c.key, '|', 2) = ${from} AND split_part(c.key, '|', 3) ~ '^b[0-9]+$'
+           AND NOT EXISTS (SELECT 1 FROM finance.cost_settings d WHERE d.key = split_part(c.key, '|', 1) || '|' || ${to} || '|' || split_part(c.key, '|', 3))`);
     } else {
       q.push(sql`UPDATE inventory_items SET supplier = ${to} WHERE supplier = ${from}`);
       q.push(sql`UPDATE inventory_imports SET supplier = ${to} WHERE supplier = ${from}`);
