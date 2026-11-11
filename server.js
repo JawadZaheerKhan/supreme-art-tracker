@@ -5054,14 +5054,17 @@ app.post('/api/reports/job-issued', requireAuth, async (req, res) => {
     const sql = getDb();
     const ids = [...new Set((Array.isArray(req.body && req.body.ids) ? req.body.ids : []).map(x => parseInt(x, 10)).filter(x => x > 0))].slice(0, 5000);
     if (!ids.length) return res.json([]);
+    // Fresh paper issued to each job, and (owner, 2026-11-11) the offcut issued to it - Issue buttons at any
+    // stage, or the old automatic CTP offcut (less what came back) - offcut = true on those rows.
     const rows = await sql`
-      SELECT t.job_id, i.paper_type, SUM(-t.change)::float AS sheets
+      SELECT t.job_id, i.paper_type, COALESCE(i.is_offcut, false) AS offcut, SUM(-t.change)::float AS sheets
         FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id
-       WHERE t.job_id = ANY(${ids}) AND t.reason = 'job-consumed' AND t.change < 0
-         AND COALESCE(i.is_offcut, false) = false
+       WHERE t.job_id = ANY(${ids})
+         AND ((COALESCE(i.is_offcut, false) = false AND t.reason = 'job-consumed' AND t.change < 0)
+           OR (COALESCE(i.is_offcut, false) = true AND t.reason IN ('job-consumed', 'job-auto-offcut', 'job-auto-offcut-refund')))
          AND t.reverses_tx_id IS NULL
          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-       GROUP BY t.job_id, i.paper_type`;
+       GROUP BY t.job_id, i.paper_type, COALESCE(i.is_offcut, false)`;
     res.json(rows);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });

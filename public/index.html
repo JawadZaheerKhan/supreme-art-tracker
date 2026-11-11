@@ -6537,8 +6537,8 @@ function jobDeliveredPackets(j) {
   return (F.packets > 0 && Number.isFinite(F.cartonQtyNum) && F.cartonQtyNum > 0) ? F.packets * cartons / F.cartonQtyNum : 0;
 }
 // A job's paper on its card, paper by paper (owner, 2026-11-11). The card's packets are the total of every
-// paper: the 2nd / 3rd paper's packets and the offcut taken for the 1st at CTP come off the 1st. Each part in
-// its paper's unit (reams for paper, pkts for board); approved extra packets go to their own paper.
+// paper: the 2nd / 3rd paper's packets come off the 1st. Each part in its paper's unit (reams for paper, pkts
+// for board); approved extra packets go to their own paper. The offcut in it comes from the stock records.
 // base = the card's share (delivered is worked out on it), pk = base + extra packets.
 function ceoDashJobParts(j) {
   const p = j.particulars || {};
@@ -6555,22 +6555,11 @@ function ceoDashJobParts(j) {
     if (!(base + top > 0)) continue;
     extrasPk += base;
     const it = itemOf(x.inventory_item_id);
-    extras.push({ label, base, pk: base + top, ream: !!(it && isReamPaper(it.paper_type)), offcut: !!(it && it.is_offcut) });
+    extras.push({ label, base, pk: base + top, ream: !!(it && isReamPaper(it.paper_type)) });
   }
   const mainIt = itemOf(j.inventory_item_id);
-  const ream = !!(mainIt && isReamPaper(mainIt.paper_type));
   const mainBase = Math.max(0, total - extrasPk), mainTop = topFor(null);
-  // Offcut taken for the 1st paper at CTP (a legacy 2nd / 3rd paper pre-consumed with it is theirs, not the 1st's).
-  const pre = p.offcut_pre_consumed;
-  let preMain = pre && Number.isFinite(+pre.total_packets) ? +pre.total_packets : 0;
-  for (const key of ['secondary_paper', 'third_paper']) if (secondaryInPreConsumed(j, key)) preMain -= parseFloat((p[key] || {}).packets) || 0;
-  preMain = Math.min(mainBase, Math.max(0, preMain));
-  const main = [];
-  if (mainIt && mainIt.is_offcut) main.push({ label: '1st', base: mainBase, pk: mainBase + mainTop, ream, offcut: true });
-  else {
-    if (mainBase - preMain + mainTop > 0) main.push({ label: '1st', base: mainBase - preMain, pk: mainBase - preMain + mainTop, ream, offcut: false });
-    if (preMain > 0) main.push({ label: '1st offcut', base: preMain, pk: preMain, ream, offcut: true });
-  }
+  const main = mainBase + mainTop > 0 ? [{ label: '1st', base: mainBase, pk: mainBase + mainTop, ream: !!(mainIt && isReamPaper(mainIt.paper_type)) }] : [];
   return [...main, ...extras];
 }
 // The jobs counted as Used in a period: every job that left Printing in it (now in
@@ -6585,12 +6574,15 @@ function ceoDashUsedJobs(sb) {
     const parts = ceoDashJobParts(j);
     const pk = parts.reduce((a, x) => a + x.pk, 0);
     if (!pk) continue;
-    // Each paper's shipped share: the job's delivered share of its card packets.
+    // Delivered (owner, 2026-11-11): a normal job with any delivery (a partial one too) counts all its used
+    // packets; a MIL job counts per delivery - its delivered share - as the Sale Report does.
+    const isMil = !!(j.stock_group_name || j.group_job_id);
+    const shipped = (Array.isArray(j.deliveries) && j.deliveries.length > 0) || (j.stage_index || 0) >= STAGES.length - 1;
     const total = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
-    const r = total > 0 ? jobDeliveredPackets(j) / total : 0;
-    for (const x of parts) x.delivered = x.base * r;
+    const r = isMil ? (total > 0 ? jobDeliveredPackets(j) / total : 0) : 0;
+    for (const x of parts) x.delivered = isMil ? x.base * r : (shipped ? x.pk : 0);
     const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
-    const x = { j, ms, pk, parts, ream: !!(it && isReamPaper(it.paper_type)), offcut: parts.every(q => q.offcut), delivered: parts.reduce((a, q) => a + q.delivered, 0) };
+    const x = { j, ms, pk, parts, ream: !!(it && isReamPaper(it.paper_type)), delivered: parts.reduce((a, q) => a + q.delivered, 0) };
     ((j.particulars || {}).paper_waived ? waived : used).push(x);
   }
   return { used, waived };
@@ -6889,11 +6881,12 @@ function ceoDashFigures() {
     for (const q of x.parts) {
       const un = q.ream ? 'reams' : 'pkts';
       iu.used[un] += q.pk; iu.delivered[un] += q.delivered;
-      if (q.offcut) iu.off[un] += q.pk;
     }
-    x.issued = { pkts: 0, reams: 0 };   // fresh paper the store issued to this job (any date) - for its own line
+    // Fresh paper the store issued to this job (any date), and the offcut issued to it at any stage.
+    x.issued = { pkts: 0, reams: 0 }; x.off = { pkts: 0, reams: 0 };
     for (const r of ((ceoDash.jobIssued && ceoDash.jobIssued.get(x.j.id)) || [])) {
-      x.issued[isReamPaper(r.paper_type) ? 'reams' : 'pkts'] += (+r.sheets || 0) / packetSize(r.paper_type || '');
+      const un = isReamPaper(r.paper_type) ? 'reams' : 'pkts', v = (+r.sheets || 0) / packetSize(r.paper_type || '');
+      if (r.offcut) { x.off[un] += v; iu.off[un] += v; } else x.issued[un] += v;
     }
     iu.usedJobs.push(x);
   }
@@ -7166,7 +7159,7 @@ function renderCeoDash() {
         const signed = (d, un) => Math.abs(d) < 0.005 ? '' : (d > 0 ? '+' : '') + fmt(d) + ' ' + un;
         const off = iu.off;
         const partsSum = (x, pick) => x.parts.reduce((a, q) => { if (pick(q)) a[q.ream ? 'reams' : 'pkts'] += q.pk; return a; }, { pkts: 0, reams: 0 });
-        const partsTxt = x => x.parts.map(q => `${q.label} ${fmt(q.pk)} ${q.ream ? 'reams' : 'pkts'}${q.offcut && !/offcut/.test(q.label) ? ' (offcut)' : ''}`).join(' + ');
+        const partsTxt = x => x.parts.map(q => `${q.label} ${fmt(q.pk)} ${q.ream ? 'reams' : 'pkts'}`).join(' + ') + ((x.off.pkts || x.off.reams) ? ` · offcut ${u(x.off)}` : '');
         const diff = { pkts: iu.issued.pkts - (iu.used.pkts - off.pkts), reams: iu.issued.reams - (iu.used.reams - off.reams) };
         const dTxt = [signed(diff.pkts, 'pkts'), signed(diff.reams, 'reams')].filter(Boolean).join(' · ');
         const offTxt = (off.pkts || off.reams) ? ` · ${u(off)} on offcut` : '';
@@ -7174,7 +7167,7 @@ function renderCeoDash() {
         const sub = !iu.loaded ? 'loading…' : `${fmt(iu.usedJobs.length)} job${iu.usedJobs.length === 1 ? '' : 's'} printed · ` + (dTxt ? 'issued − used: ' + dTxt : 'issued and used are the same') + offTxt;
         // A job printed on offcut was issued no fresh paper: not short, so no red.
         // Issued to the job against its fresh (not offcut) card paper, pkts and reams each on their own.
-        const gap = x => { const fresh = partsSum(x, q => !q.offcut);
+        const gap = x => { const card = partsSum(x, () => true), fresh = { pkts: card.pkts - x.off.pkts, reams: card.reams - x.off.reams };
           return [['pkts', x.issued.pkts - fresh.pkts], ['reams', x.issued.reams - fresh.reams]].filter(([, d]) => Math.abs(d) >= 0.005)
             .map(([un, d]) => ` · <b style="color:${d > 0 ? '#b45309' : '#b91c1c'};">${d > 0 ? '+' : ''}${fmt(d)} ${un}</b>`).join(''); };
         // By company (owner, 2026-11-03): issued vs used per company, most used first.
@@ -7183,7 +7176,8 @@ function renderCeoDash() {
           const name = String(x.j.client || '').trim() || '—', k = name.toLowerCase();
           const e = byCo.get(k) || { name, jobs: 0, issued: { pkts: 0, reams: 0 }, used: { pkts: 0, reams: 0 }, delivered: { pkts: 0, reams: 0 }, off: { pkts: 0, reams: 0 } };
           e.jobs++; e.issued.pkts += x.issued.pkts; e.issued.reams += x.issued.reams;
-          for (const q of x.parts) { const un = q.ream ? 'reams' : 'pkts'; e.used[un] += q.pk; e.delivered[un] += q.delivered; if (q.offcut) e.off[un] += q.pk; }
+          for (const q of x.parts) { const un = q.ream ? 'reams' : 'pkts'; e.used[un] += q.pk; e.delivered[un] += q.delivered; }
+          e.off.pkts += x.off.pkts; e.off.reams += x.off.reams;
           byCo.set(k, e);
         }
         const coDiff = e => { const d = { pkts: e.issued.pkts - (e.used.pkts - e.off.pkts), reams: e.issued.reams - (e.used.reams - e.off.reams) };
@@ -7191,7 +7185,7 @@ function renderCeoDash() {
         const coRows = [...byCo.values()].sort((a, b) => (b.used.pkts + b.used.reams) - (a.used.pkts + a.used.reams))
           .map(e => row(`${esc(e.name)} <small style="color:var(--text2);">${fmt(e.jobs)} job${e.jobs === 1 ? '' : 's'}</small>`, `issued to these jobs ${u(e.issued)} · used ${u(e.used)} · delivered ${u(e.delivered)}${coDiff(e)}${(e.off.pkts || e.off.reams) ? ` · <span style="color:var(--text2);font-weight:500;">${u(e.off)} on offcut</span>` : ''}`));
         return tile('issued-used', 'stock cd-wide', 'Packets issued vs used vs delivered', value, sub, iu.loaded ? () =>
-          `<div class="cd-sub">Issued = all paper that left the store in the period (the same as the Paper issued tile). Used = the jobs whose printing was done in the period (now in Coating or later, Ready or Delivered): their job-card packets for the 1st, 2nd and 3rd paper (+ approved extra packets for each), offcut included, each in its own unit (reams for paper, pkts for board). Offcut was never issued fresh, so it is left out of "issued − used" and shown as "on offcut". Delivered = each paper's share of what those jobs shipped, deliveries on any date. On each job: what the store issued to it (any date) against its card - more in orange, less in red.</div>`
+          `<div class="cd-sub">Issued = all paper that left the store in the period (the same as the Paper issued tile). Used = the jobs whose printing was done in the period (now in Coating or later, Ready or Delivered): their job-card packets for the 1st, 2nd and 3rd paper (+ approved extra packets for each), each in its own unit (reams for paper, pkts for board). The offcut issued to those jobs (Issue buttons, any stage) is part of Used; it was never issued fresh, so it is left out of "issued − used" and shown as "on offcut". Delivered = all the used packets of the jobs that have a delivery - a partial one too; a MIL job counts per delivery, as the Sale Report does. On each job: what the store issued to it (any date) against its card - more in orange, less in red.</div>`
           + head(`By company · ${fmt(byCo.size)}`)
           + list(coRows, 'No job left Printing in this period')
           + head(`Jobs · ${fmt(iu.usedJobs.length)} · issued ${u(iu.issued)} · used ${u(iu.used)} · delivered ${u(iu.delivered)}`)
