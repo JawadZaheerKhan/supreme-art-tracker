@@ -2302,7 +2302,10 @@
   .jc-stage-time { font-size: 11px; color: var(--text2); line-height: 1.3; margin-top: 2px; }
   .jc-stage-time .jc-t-start { color: #1d4ed8; font-weight: 700; }
   .jc-stage-time .jc-t-end { color: #15803d; font-weight: 700; }
+  .jc-stage-time span { white-space: nowrap; }
   .jc-stage-time:empty { display: none; }
+  .jc-details-cell.jc-has-time > input, .jc-details-cell.jc-has-time > .jc-details-pick { display: none; }
+  .jc-details-cell.jc-has-time .jc-stage-time { font-size: 12.5px; margin-top: 0; }
   @media print { .jc-stage-time { display: none !important; } }
   .lc-sec-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
   .lc-sec-row .lc-form-name { font-size: 10.5px; font-weight: 800; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; min-width: 108px; }
@@ -31756,18 +31759,27 @@ function jcStageLog(job) {
 }
 const jcHm = ms => { const d = new Date(ms); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
 // Start in blue - completion in green (owner, 2026-11-11: short and simple).
-const jcSpan = (startMs, endMs) => `<span class="jc-t-start">${jcHm(startMs)}</span>${endMs != null ? ` - <span class="jc-t-end">${jcHm(endMs)}</span>` : ''}`;
+const jcSpan = (startMs, endMs) => [startMs != null ? `<span class="jc-t-start">${jcHm(startMs)}</span>` : '', endMs != null ? `<span class="jc-t-end">${jcHm(endMs)}</span>` : '']
+  .filter(Boolean).join(' - ');
 function jcStageTimeLines(job, stage, starts, log) {
   const lower = v => String(v || '').trim().toLowerCase();
   if (stage === 'Ready to Deliver') {
     const pasted = log.filter(x => x.stage === 'Pasting').map(x => x.ms);
     const st = job.stages && job.stages[STAGES.indexOf('Pasting')];
     const startMs = pasted.length ? Math.max(...pasted) : (st && st.at ? new Date(st.at).getTime() : NaN);
-    if (!isFinite(startMs)) return [];
     const end = jobEndMs(job);
-    return [jcSpan(startMs, end)];
+    if (!isFinite(startMs) && end == null) return [];
+    return [jcSpan(isFinite(startMs) ? startMs : null, end)];
   }
   const mine = starts.filter(x => (x.sections || []).some(sec => LC_SECTION_STAGE[sec] === stage));
+  if (!mine.length) {
+    // No QA start: just the completion (the stage's latest entry, else the day it was moved on).
+    const ends = log.filter(l => l.stage === stage).map(l => l.ms);
+    const st = job.stages && job.stages[STAGES.indexOf(stage)];
+    const stMs = st && st.at && !/^Skipped/.test(st.notes || '') ? new Date(st.at).getTime() : NaN;
+    const endMs = ends.length ? Math.max(...ends) : stMs;
+    return isFinite(endMs) ? [jcSpan(null, endMs)] : [];
+  }
   return mine.map(x => {
     const startMs = new Date(x.start).getTime();
     const ofStage = log.filter(l => l.stage === stage);
@@ -31787,6 +31799,16 @@ async function fillJcStageTimes(job) {
   for (const el of document.querySelectorAll('.jc-stage-time')) {
     const lines = jcStageTimeLines(job, el.dataset.stage, Array.isArray(starts) ? starts : [], log);
     el.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+    // The times take the saved date's place; a row that can be edited opens the date box on a click.
+    const td = el.closest('td');
+    if (td) {
+      td.classList.toggle('jc-has-time', lines.length > 0);
+      const inp = td.querySelector('input');
+      const editable = inp && !inp.readOnly;
+      el.style.cursor = editable ? 'pointer' : '';
+      el.title = editable ? 'Click to change the saved date' : '';
+      el.onclick = editable ? () => { td.classList.remove('jc-has-time'); inp.focus(); } : null;
+    }
   }
 }
 
