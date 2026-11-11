@@ -15185,7 +15185,11 @@ async function reverseStockTxGroup(txIds, itemId) {
 // pallet and which pallet of how many.
 function ordinalN(n) { const v = n % 100, sx = ['th', 'st', 'nd', 'rd']; return n + (sx[(v - 20) % 10] || sx[v] || sx[0]); }
 // As written on a sticker: the batch's number and the year it came in, 02-2026.
-function invBatchNo(n, at) { return String(n).padStart(2, '0') + '-' + localDateISO(at ? new Date(at) : new Date()).slice(0, 4); }
+// NN-MM-YY (owner, 2026-11-11): 01-11-26 = the 1st batch, received November 2026.
+function invBatchNo(n, at) {
+  const d = localDateISO(at ? new Date(at) : new Date());
+  return String(n).padStart(2, '0') + '-' + d.slice(5, 7) + '-' + d.slice(2, 4);
+}
 function invBatchShown(b, at) { return (b && (b.label || b.batch_label)) || invBatchNo(b.n != null ? b.n : b.batch, at || b.first_at || b.created_at); }
 function invQtyHtml(sheets, it) {
   const ps = packetSize(it.paper_type || ''), u = packetUnitLabel(it.paper_type || '').toLowerCase();
@@ -15248,7 +15252,7 @@ async function openInvSticker(itemId, n, tx) {
   // The whole Stock In on one pallet; split it into the real pallets with "+ Another quantity".
   const rows = [{ q: total > 0 ? String(total) : '', n: '1' }];
   const date = b.first_at ? localDateISO(new Date(b.first_at)) : localDateISO();
-  Object.assign(_ist, { itemId, n, txId: b.tx_id || 0, label: b.batch_label || '', ref: total, units, rows, autoBatch: manual ? '' : invBatchNo(n, b.first_at) });
+  Object.assign(_ist, { itemId, n, txId: b.tx_id || 0, label: b.batch_label || '', po: b.po_no || '', inv: b.invoice_no || '', ref: total, units, rows, autoBatch: manual ? '' : invBatchNo(n, b.first_at) });
   const desc = it ? `${it.paper_type || ''}${it.size ? ' ' + it.size : ''}${it.gsm ? ' ' + it.gsm + ' gsm' : ''}`.trim() : '';
   openModal(`<div class="modal" style="max-width:900px;" onclick="event.stopPropagation()">
     <h2>Print Sticker</h2>
@@ -15265,7 +15269,10 @@ async function openInvSticker(itemId, n, tx) {
           <div class="form-group"><label class="form-label">Brand</label><input type="text" id="ist-brand" value="${esc((it && it.brand) || '')}" oninput="istRefresh()"></div>
         </div>
         <div class="form-row">
-          <div class="form-group"><label class="form-label">DC #</label><input type="text" id="ist-dc" value="${esc(b.challan_no || '')}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">LC / PO No.</label><input type="text" id="ist-po" value="${esc(b.po_no || '')}" oninput="istRefresh()"></div>
+          <div class="form-group"><label class="form-label">Invoice No.</label><input type="text" id="ist-inv" value="${esc(b.invoice_no || '')}" oninput="istRefresh()"></div>
+        </div>
+        <div class="form-row">
           <div class="form-group"><label class="form-label">Each sticker is a</label><input type="text" id="ist-per" value="Pallet" oninput="istRefresh()"></div>
           ${manual ? `<div class="form-group"><label class="form-label">Counted in</label><select id="ist-units" onchange="istSetUnits(this.value)"><option value="packets">Packets</option><option value="reams">Reams</option><option value="sheets">Sheets</option></select></div>` : ''}
         </div>
@@ -15314,7 +15321,7 @@ function istSetUnits(v) { _ist.units = v || 'packets'; istRenderRows(); istRefre
 function istDateChanged() {
   const el = document.getElementById('ist-batch');
   if (el && _ist.n && el.value.trim() === _ist.autoBatch) {
-    _ist.autoBatch = String(_ist.n).padStart(2, '0') + '-' + (istVal('ist-date') || localDateISO()).slice(0, 4);
+    _ist.autoBatch = invBatchNo(_ist.n, (istVal('ist-date') || localDateISO()) + 'T12:00:00');
     el.value = _ist.autoBatch;
   }
   istRefresh();
@@ -15351,7 +15358,7 @@ function istPlan(strict) {
 }
 function istData(stickers, total) {
   return { batchNo: istVal('ist-batch'), date: (istVal('ist-date') || '').split('-').reverse().join('-'), desc: istVal('ist-desc'),
-    supplier: istVal('ist-supplier'), brand: istVal('ist-brand'), dc: istVal('ist-dc'),
+    supplier: istVal('ist-supplier'), brand: istVal('ist-brand'), po: istVal('ist-po'), inv: istVal('ist-inv'),
     per: istVal('ist-per'), units: _ist.units || 'packets', stickers, total };
 }
 function istRefresh() {
@@ -15377,11 +15384,12 @@ async function printInvSticker() {
   const n = plan.stickers.length;
   if (n > 50 && !await confirmDialog({ title: `Print ${n} stickers?`, message: `That is ${n} labels, one page each.`, confirmText: 'Print' })) return;
   const html = invStickerDocHtml(istData(plan.stickers, plan.total));
-  // A typed-over Batch No. stays with the Stock In, so a reprint has it.
+  // A typed-over Batch No., the LC / PO No. and the Invoice No. stay with the Stock In, so a reprint has them.
   const bn = istVal('ist-batch');
   const label = bn && bn !== _ist.autoBatch ? bn : '';
-  if (_ist.txId && label !== _ist.label) {
-    try { await api('PUT', `/api/inventory/transactions/${_ist.txId}/sticker`, { batch_label: label }); }
+  const po = istVal('ist-po'), inv = istVal('ist-inv');
+  if (_ist.txId && (label !== _ist.label || po !== _ist.po || inv !== _ist.inv)) {
+    try { await api('PUT', `/api/inventory/transactions/${_ist.txId}/sticker`, { batch_label: label, po_no: po, invoice_no: inv }); }
     catch (e) { console.error('Sticker numbers not kept (printing anyway):', e); }
   }
   closeModal();
@@ -15425,7 +15433,7 @@ function invStickerDocHtml(d) {
     + '<div class="date"><small>RECEIVED ON</small><b>' + esc(d.date) + '</b></div></div>'
     + '<div class="line desc">' + cell('desc', 'DESCRIPTION', '<span class="clamp">' + esc(d.desc) + '</span>', 'desc') + '</div>'
     + '<div class="line">' + cell('supplier', 'SUPPLIER', '<span class="fit2">' + esc(d.supplier) + '</span>') + cell('brand', 'BRAND', '<span class="fit2">' + esc(d.brand) + '</span>') + '</div>'
-    + '<div class="line">' + cell('dc', 'DC #', '<span class="fit2">' + esc(d.dc) + '</span>') + '</div>'
+    + '<div class="line">' + cell('po', 'LC / PO NO.', '<span class="fit2">' + esc(d.po) + '</span>') + cell('inv', 'INVOICE NO.', '<span class="fit2">' + esc(d.inv) + '</span>') + '</div>'
     + '<div class="line">' + cell('qty', 'QUANTITY / ' + per, '<span class="fit1">' + (+(+s.qty).toFixed(2)).toLocaleString() + '<i>' + esc(d.units || 'packets') + '</i></span>', 'qty') + cell('cas', per + ' #', '<span class="fit1">' + s.no + ' OF ' + d.total + '</span>') + '</div>'
     + '</div>';
   const css = `
@@ -26046,7 +26054,7 @@ function crBatchInfo(itemId, n) { return _costBatchList.find(b => Number(b.item_
 function crBatchName(itemId, n) {
   if (invIsOffcutItem(itemId)) return 'offcut';
   const b = crBatchInfo(itemId, n);
-  return `${ordinalNum(n)} batch${b ? ' (' + (b.batch_label || (String(n).padStart(2, '0') + '-' + String(b.at || '').slice(0, 4))) + ')' : ''}`;
+  return `${ordinalNum(n)} batch${b ? ' (' + (b.batch_label || invBatchNo(n, b.at || undefined)) + ')' : ''}`;
 }
 function ordinalNum(n) { const v = n % 100, sx = ['th', 'st', 'nd', 'rd']; return n + (sx[(v - 20) % 10] || sx[v] || sx[0]); }
 // kg per packet / ream of one paper item.
