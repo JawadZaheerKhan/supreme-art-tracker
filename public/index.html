@@ -897,17 +897,22 @@
   .acc-table td.acc-cell.locked { opacity: 0.55; }
   /* Sliding toggle in each cell (owner, 2026-11-11) - the coloured knob sits on the chosen side:
      green = Edit (or View on a tab), amber = View / 30 Day, red = Hidden. */
-  .acc-table td.acc-cell.acc-cell-tg { background: transparent; padding: 5px 4px; opacity: 1; }
-  .acc-table tbody th.acc-rowlabel { min-width: 210px; }   /* the toggles must not squeeze the names */
+  /* The table fits its box (owner, 2026-11-11): fixed columns - names 190px, the rest share what's left. */
+  .acc-table.acc-table-tg { table-layout: fixed; min-width: 860px; }
+  .acc-table.acc-table-tg thead th { padding: 7px 2px; font-size: 9.5px; white-space: normal; }
+  .acc-table.acc-table-tg thead th:first-child { width: 190px; padding-left: 10px; }
+  .acc-table.acc-table-tg tbody th.acc-rowlabel { max-width: none; padding: 6px 8px; font-size: 12px; }
+  .acc-table td.acc-cell.acc-cell-tg { background: transparent; padding: 4px 3px; opacity: 1; min-width: 0; }
   .acc-tg {
-    position: relative; isolation: isolate; display: inline-grid; grid-template-columns: repeat(var(--n), 1fr);
-    padding: 2px; background: #fff; border: 1px solid #d8c5c5; border-radius: 8px;
-    box-shadow: 0 1px 4px rgba(91,33,33,.10); vertical-align: middle;
+    position: relative; isolation: isolate; display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr));
+    width: 100%; max-width: calc(var(--n) * 30px + 6px); margin: 0 auto;
+    padding: 2px; background: #fff; border: 1px solid #d8c5c5; border-radius: 7px;
+    box-shadow: 0 1px 3px rgba(91,33,33,.10);
   }
   .acc-tg::before {
     content: ""; position: absolute; z-index: 0; top: 2px; bottom: 2px; left: 2px;
-    width: calc((100% - 4px) / var(--n)); border-radius: 6px; background: var(--tg);
-    box-shadow: 0 2px 6px rgba(0,0,0,.22);
+    width: calc((100% - 4px) / var(--n)); border-radius: 5px; background: var(--tg);
+    box-shadow: 0 1px 4px rgba(0,0,0,.22);
     transform: translateX(calc(100% * var(--i)));
     transition: transform .34s cubic-bezier(.34,1.2,.64,1), background-color .25s ease;
   }
@@ -915,10 +920,17 @@
   .acc-tg-partial { --tg: #d97706; }
   .acc-tg-deny { --tg: #b91c1c; }
   .acc-tg button {
-    position: relative; z-index: 1; min-width: auto; margin: 0; padding: 4px 5px;
+    position: relative; z-index: 1; min-width: 0; margin: 0; padding: 3px 0;
     background: transparent !important; border: 0 !important; box-shadow: none !important;
-    font-size: 9.5px; font-weight: 800; letter-spacing: .02em; color: var(--text2);
-    white-space: nowrap; cursor: pointer; transition: color .2s ease;
+    font-size: 9px; font-weight: 800; letter-spacing: 0; color: var(--text2);
+    white-space: nowrap; overflow: hidden; text-overflow: clip; cursor: pointer; transition: color .2s ease;
+  }
+  /* Smaller laptops: thinner names column and words, still one screen wide. */
+  @media (max-width: 1150px) {
+    .acc-table.acc-table-tg thead th:first-child { width: 150px; }
+    .acc-table.acc-table-tg tbody th.acc-rowlabel { font-size: 11px; }
+    .acc-table td.acc-cell.acc-cell-tg { padding: 4px 2px; }
+    .acc-tg button { font-size: 8px; }
   }
   .acc-tg button:not(.is-on):hover { color: var(--text); }
   .acc-tg button.is-on { color: #fff; cursor: default; }
@@ -41873,13 +41885,14 @@ function nextAccLevelButton30(current) {
 // at boot), not instantly — there's no push mechanism to already-open tabs.
 // The sides of each row type's toggle, left to right (owner, 2026-11-11).
 const ACC_TOGGLE_OPTS = {
-  tab: [['view', 'View'], ['hidden', 'Hidden']],
+  tab: [['view', 'View'], ['hidden', 'Hide']],
   'edit-view': [['yes', 'Edit'], ['view', 'View']],
-  button: [['yes', 'Edit'], ['view', 'View'], ['hidden', 'Hidden']],
-  'button-30day': [['yes', 'Edit'], ['30-day', '30 Day'], ['view', 'View'], ['hidden', 'Hidden']],
-  action: [['yes', 'Edit'], ['hidden', 'Hidden']],
-  'action-30day': [['yes', 'Edit'], ['30-day', '30 Day'], ['hidden', 'Hidden']],
+  button: [['yes', 'Edit'], ['view', 'View'], ['hidden', 'Hide']],
+  'button-30day': [['yes', 'Edit'], ['30-day', '30d'], ['view', 'View'], ['hidden', 'Hide']],
+  action: [['yes', 'Edit'], ['hidden', 'Hide']],
+  'action-30day': [['yes', 'Edit'], ['30-day', '30d'], ['hidden', 'Hide']],
 };
+const ACC_TOGGLE_TIP = { yes: 'Edit - can use it', view: 'View - can see, can\'t change', hidden: 'Hidden - not shown', '30-day': '30 Day - last 30 days only' };
 function accTone(rowType, level) {
   return rowType === 'tab' ? (level === 'view' ? 'allow' : 'deny') : ({ yes: 'allow', view: 'partial', '30-day': 'partial' }[level] || 'deny');
 }
@@ -41888,7 +41901,7 @@ function accToggleHtml(key, role, rowType, level, locked) {
   let i = opts.findIndex(o => o[0] === level);
   if (i < 0) i = opts.length - 1;
   return `<div class="acc-tg acc-tg-${accTone(rowType, opts[i][0])}${locked ? ' is-locked' : ''}" style="--n:${opts.length};--i:${i};">${opts.map(([v, l], j) =>
-    `<button type="button" class="${j === i ? 'is-on' : ''}" aria-pressed="${j === i}" ${locked ? 'disabled' : `onclick="setRolePermission('${key}','${role}','${v}',this)"`}>${l}</button>`).join('')}</div>`;
+    `<button type="button" class="${j === i ? 'is-on' : ''}" aria-pressed="${j === i}" title="${rowType === 'tab' && v === 'view' ? 'View - tab is shown' : ACC_TOGGLE_TIP[v]}" ${locked ? 'disabled' : `onclick="setRolePermission('${key}','${role}','${v}',this)"`}>${l}</button>`).join('')}</div>`;
 }
 // Pick a side of a cell's toggle: the knob slides at once, then it saves (a failed save puts it back).
 async function setRolePermission(key, role, next, btn) {
@@ -41974,7 +41987,7 @@ function renderAccessRegisterHtml(matrixData) {
   const rowDefs = ACC_TAB_ROWS[_accRegTab];
   const body = rowDefs
     ? `<div class="acc-tablewrap">
-        <table class="acc-table">
+        <table class="acc-table acc-table-tg">
           <thead>
             <tr>
               <th>Capability</th>
