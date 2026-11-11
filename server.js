@@ -3215,25 +3215,20 @@ app.delete('/api/report-warnings/ignore/:kind/:job_id/:index', requirePermission
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Jobs Report Batch column (owner, 2026-11-10): the batch numbers each stock-out took.
-// Jobs Report Machine Time (owner, 2026-11-11): each machine's line clearances in order - the New Job of one
-// entry runs until the machine's next entry (end null = still on the machine). Times are as QA typed them.
-app.get('/api/reports/job-machine-times', requireAuth, async (req, res) => {
+// A job's QA starts (owner, 2026-11-11): every line clearance where it is the New Job - the machine, its
+// sections and when it came on (as QA typed it). The job card times each stage from these.
+app.get('/api/jobs/:id/qa-starts', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id) || String(id).startsWith('4')) return res.json([]);
     const rows = await sql`
-      SELECT machine, entry_date, entry_time, new_job FROM line_clearance
-       WHERE deleted_at IS NULL
-       ORDER BY machine, entry_date, entry_time, created_at`;
+      SELECT machine, sections, entry_date, entry_time, new_job FROM line_clearance
+       WHERE deleted_at IS NULL AND regexp_replace(new_job, '\D', '', 'g') = ${String(id)}
+       ORDER BY entry_date, entry_time, created_at`;
     const at = r => String(r.entry_date instanceof Date ? r.entry_date.toISOString() : r.entry_date).slice(0, 10) + 'T' + (r.entry_time || '00:00');
-    const out = [];
-    rows.forEach((r, i) => {
-      const id = lcJobId(r.new_job);
-      if (!id) return;
-      const next = rows[i + 1] && rows[i + 1].machine === r.machine ? rows[i + 1] : null;
-      out.push({ job_id: id, machine: r.machine, start: at(r), end: next ? at(next) : null });
-    });
-    res.json(out);
+    res.json(rows.filter(r => lcJobId(r.new_job) === id).map(r => ({ machine: r.machine, sections: r.sections || [], start: at(r) })));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.get('/api/reports/paper-batches', requireAuth, async (req, res) => {

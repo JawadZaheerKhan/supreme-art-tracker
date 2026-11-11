@@ -2299,6 +2299,9 @@
   .lc-field input, .lc-field select, .lc-field textarea { width: 100%; min-width: 0; font-size: 14px; padding: 7px 8px; border: 1.5px solid var(--border2); border-radius: 7px; background: #fff; box-sizing: border-box; }
   .lc-field.lc-wide { grid-column: span 2; }
   .lc-hint { font-weight: 500; color: #b45309; font-size: 10.5px; }
+  .jc-stage-time { font-size: 10.5px; color: #1d4ed8; line-height: 1.3; margin-top: 2px; }
+  .jc-stage-time:empty { display: none; }
+  @media print { .jc-stage-time { display: none !important; } }
   .lc-sec-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
   .lc-sec-row .lc-form-name { font-size: 10.5px; font-weight: 800; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; min-width: 108px; }
   .lc-sec { padding: 5px 11px; font-size: 13px; font-weight: 800; border-radius: 7px; border: 1.5px solid var(--border2); background: #fff; cursor: pointer; }
@@ -18592,35 +18595,25 @@ function loadJrTxBatches() {
     if (document.getElementById('rt-jobs-report') && typeof renderJobsReport === 'function') renderJobsReport();
   }).catch(() => {}).finally(() => { _jrTxBatchesLoading = false; });
 }
-// Jobs Report Machine Time (owner, 2026-11-11): job id -> [{ machine, start, end }] from QA's line clearances.
-let _jrMachineTimes = null, _jrMachineTimesLoading = false;
-function loadJrMachineTimes() {
-  if (_jrMachineTimesLoading) return;
-  _jrMachineTimesLoading = true;
-  api('GET', '/api/reports/job-machine-times').then(rows => {
-    const m = new Map();
-    for (const r of rows || []) { const l = m.get(Number(r.job_id)) || []; l.push(r); m.set(Number(r.job_id), l); }
-    _jrMachineTimes = m;
-    if (document.getElementById('rt-jobs-report') && typeof renderJobsReport === 'function') renderJobsReport();
-  }).catch(() => {}).finally(() => { _jrMachineTimesLoading = false; });
-}
 function jrDur(mins) {
   mins = Math.max(0, Math.round(mins));
   return mins < 60 ? mins + 'm' : mins < 1440 ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : Math.floor(mins / 1440) + 'd ' + Math.floor((mins % 1440) / 60) + 'h';
 }
-// "SM-102 1h 20m · Die Cut 1 running 45m" - each machine the job was on, how long (QA's times).
-function jobMachineTimeText(j) {
-  const list = _jrMachineTimes && _jrMachineTimes.get(Number(j.id));
-  if (!list || !list.length) return '';
-  const byM = new Map();
-  for (const x of list) {
-    const end = x.end ? new Date(x.end) : new Date();
-    const mins = (end - new Date(x.start)) / 60000;
-    const e = byM.get(x.machine) || { mins: 0, running: false };
-    e.mins += Math.max(0, mins); if (!x.end) e.running = true;
-    byM.set(x.machine, e);
-  }
-  return [...byM.entries()].map(([m, e]) => `${m} ${e.running ? 'running ' : ''}${jrDur(e.mins)}`).join(' · ');
+// When a job counts as delivered (owner): its latest shipment - a partial one counts, and a 2nd / 3rd
+// moves it on - not the day it was closed. No shipment: the Delivered stage. null = not delivered yet.
+function jobEndMs(j) {
+  const ds = (Array.isArray(j.deliveries) ? j.deliveries : []).map(deliveryEntryMs).filter(n => isFinite(n));
+  if (ds.length) return Math.max(...ds);
+  const st = j.stages && j.stages[STAGES.length - 1];
+  const ms = st && st.at ? new Date(st.at).getTime() : NaN;
+  return isFinite(ms) ? ms : null;
+}
+// Jobs Report Time (owner, 2026-11-11): created -> delivered, like the job card tile; "running" until then.
+function jobTotalTimeText(j) {
+  if (!j || !j.created_at) return '';
+  const start = new Date(j.created_at).getTime();
+  const end = jobEndMs(j);
+  return end != null ? jrDur((end - start) / 60000) : 'running ' + jrDur((Date.now() - start) / 60000);
 }
 // "1, 2" for the main paper, then " · 2nd: 1" for a 2nd / 3rd paper. Blank when nothing was issued.
 function jobPaperBatchesText(j) {
@@ -18641,7 +18634,6 @@ function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
   loadJrTxBatches();
-  loadJrMachineTimes();
   if (jobsReportState.period !== 'custom') {   // re-applied every open so "Today" stays today
     const r = periodToDateRange(jobsReportState.period);
     jobsReportState.dfrom = r.from; jobsReportState.dto = r.to;
@@ -19297,7 +19289,7 @@ function buildJobsReportRows() {
       weightKg: (() => { const f = jobPaperFifo(j, SF, packKgJR); return f ? fifoSum(f.whole(), 'kg') : jrWeightKg(packets, packKgJR); })(),
       paperBatches: jobPaperBatchesText(j),
       machine: j.machine || '',
-      machineTime: jobMachineTimeText(j),
+      jobTime: jobTotalTimeText(j),
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
       colors: String((((j.particulars || {}).no_of_colors) || {}).quantity || '').trim(),
       plates: String((((j.particulars || {}).plates) || {}).quantity || '').trim(),
@@ -19411,7 +19403,7 @@ function buildJobsReportRows() {
         // kg a packet across the members, weighted by their packets.
         packKg: (() => { const w = sorted.filter(b => b.packKg != null && +b.packets > 0); const pk = w.reduce((a, b) => a + (+b.packets), 0); return pk > 0 ? w.reduce((a, b) => a + (+b.packets) * b.packKg, 0) / pk : (sorted[0].packKg ?? null); })(),
         paperBatches: dedupePipe(sorted.map(b => b.paperBatches)),
-        machineTime: dedupePipe(sorted.map(b => b.machineTime)),
+        jobTime: dedupePipe(sorted.map(b => b.jobTime)),
         weightKg: sorted.some(b => b.weightKg != null) ? sorted.reduce((a, b) => a + (+b.weightKg || 0), 0) : null,
         extraPapers: [], fifo: null, paperParts: null, overInfo: null, pkOver: null,
         machine: dedupePipe(sorted.map(b => b.machine)),
@@ -19819,7 +19811,7 @@ function renderJobsReport() {
       <td ${td}>${esc(r.paper)}${(r.extraPapers || []).filter(e => e.paper).map(e => `<div style="font-size:11px;font-weight:600;color:#15803d;">${e.label}: ${esc(e.paper)}</div>`).join('')}</td>
       <td ${td} style="padding:8px 10px;white-space:nowrap;">${esc(r.paperBatches || '')}</td>
       <td ${td}>${esc(r.machine)}</td>
-      <td ${td} style="padding:8px 10px;font-size:12px;">${(r.machineTime || '').split(' · ').filter(Boolean).map(t => `<div style="white-space:nowrap;">${esc(t)}</div>`).join('')}</td>
+      <td ${td} style="padding:8px 10px;white-space:nowrap;">${esc(r.jobTime || '')}</td>
       <td ${td}>${esc(r.coatings)}</td>
       <td ${td}>${esc(r.colors)}</td>
       <td ${td}>${esc(r.plates)}</td>
@@ -19857,7 +19849,7 @@ function renderJobsReport() {
           <th ${th}>${jrColHeaderHtml('paper', 'Paper')}</th>
           <th ${th} title="Which batch(es) of the paper the job was issued from - 1st, 2nd... (2nd / 3rd paper after the dot)">Batch</th>
           <th ${th}>${jrColHeaderHtml('machine', 'Machine')}</th>
-          <th ${th} title="From QA's line clearance: on each machine, from the entry where this job is the New Job to that machine's next entry">Machine Time</th>
+          <th ${th} title="From when the job was created to its delivery (the latest shipment - a partial one counts); running until delivered. Each stage's own time is on the job card.">Time</th>
           <th ${th}>${jrColHeaderHtml('coatings', 'Coatings')}</th>
           <th ${th}>${jrColHeaderHtml('colors', 'Colors')}</th>
           <th ${th}>${jrColHeaderHtml('plates', 'Plates')}</th>
@@ -19896,7 +19888,7 @@ async function exportJobsReport() {
   const readyMode = jobsReportState.mode === 'ready';
   const header = ['Job ID', 'Job Name', 'Created', readyMode ? 'Ready' : 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
-    'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage UPS', 'Ready Qty', 'Packets / Sheets', 'Weight (kg)', 'Paper', 'Batch', 'Machine', 'Machine Time', 'Coatings', 'Colors', 'Plates'];
+    'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage UPS', 'Ready Qty', 'Packets / Sheets', 'Weight (kg)', 'Paper', 'Batch', 'Machine', 'Time', 'Coatings', 'Colors', 'Plates'];
   const aoa = reportExcelAoa(header);
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
@@ -19927,7 +19919,7 @@ async function exportJobsReport() {
       r.paper,
       r.paperBatches || '',
       r.machine,
-      r.machineTime || '',
+      r.jobTime || '',
       r.coatings,
       r.colors,
       r.plates,
@@ -20346,7 +20338,7 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.paperBatches || '')}</td>
     <td ${tdL}>${esc(r.machine)}</td>
-    <td ${tdL}>${esc(r.machineTime || '')}</td>
+    <td ${tdL}>${esc(r.jobTime || '')}</td>
     <td ${tdL}>${esc(r.coatings)}</td>
   </tr>`;
   }).join('');
@@ -20380,7 +20372,7 @@ function printJobsReport() {
           <th ${tdL}>Paper</th>
           <th ${tdL}>Batch</th>
           <th ${tdL}>Machine</th>
-          <th ${tdL}>Machine Time</th>
+          <th ${tdL}>Time</th>
           <th ${tdL}>Coatings</th>
         </tr>
         ${tableRows}
@@ -31738,6 +31730,65 @@ function ctpSetupRow(p) {
     </table>`;
 }
 
+// ── Stage times on the job card (owner, 2026-11-11) ──
+// Start: QA's line clearance when the job came onto the machine. End: that stage's completion entry by the
+// same machine in the job's log (Station / line manager). Ready to Deliver: Pasting's completion -> delivery.
+// Worked out from the times written, so QA entering the start after the end was saved still works.
+const JC_STAGE_TIME_KEYS = new Set(['printed_sheets_qty', 'coating_sheets_qty', 'die_cutting_sheets', 'sorted_cartons_qty', 'pasted_cartons_qty', 'delivered_cartons_qty']);
+const LC_SECTION_STAGE = { CTP: 'CTP Plate Making', Printing: 'Printing', Coating: 'Coatings', 'Die Cutting': 'Die Cutting', Breaking: 'Sorting', Sorting: 'Sorting', 'Folder Gluer': 'Pasting', 'FG Dispatch': 'Ready to Deliver' };
+function jcLogTimeMs(t) {
+  const m = String(t || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+  return m ? new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0)).getTime() : NaN;
+}
+// Every log entry that finished work at a stage: { machine, stage, ms }.
+function jcStageLog(job) {
+  const out = [];
+  for (const e of (Array.isArray(job.log) ? job.log : [])) {
+    const m = /^(.+?)\s*·\s*([^()]+?)\s*\((.+?)\)$/.exec(String((e && e.by) || ''));
+    const m2 = m ? null : /^(.+?)\s*\((.+?)\)$/.exec(String((e && e.by) || ''));
+    const stage = m ? m[3].trim() : m2 ? m2[2].trim() : '';
+    const ms = jcLogTimeMs(e && e.time);
+    if (stage && isFinite(ms)) out.push({ machine: m ? m[2].trim() : '', stage, ms });
+  }
+  return out;
+}
+const jcHm = ms => { const d = new Date(ms); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+function jcStageTimeLines(job, stage, starts, log) {
+  const lower = v => String(v || '').trim().toLowerCase();
+  if (stage === 'Ready to Deliver') {
+    const pasted = log.filter(x => x.stage === 'Pasting').map(x => x.ms);
+    const st = job.stages && job.stages[STAGES.indexOf('Pasting')];
+    const startMs = pasted.length ? Math.max(...pasted) : (st && st.at ? new Date(st.at).getTime() : NaN);
+    if (!isFinite(startMs)) return [];
+    const end = jobEndMs(job);
+    return [end != null ? `Pasting done ${jcHm(startMs)} → delivered ${jcHm(end)} · <b>${jrDur((end - startMs) / 60000)}</b>`
+      : `Pasting done ${jcHm(startMs)} · ready <b>${jrDur((Date.now() - startMs) / 60000)}</b> so far`];
+  }
+  const mine = starts.filter(x => (x.sections || []).some(sec => LC_SECTION_STAGE[sec] === stage));
+  return mine.map(x => {
+    const startMs = new Date(x.start).getTime();
+    const ofStage = log.filter(l => l.stage === stage);
+    const sameM = ofStage.filter(l => lower(l.machine) === lower(x.machine));
+    const pool = sameM.length ? sameM : (mine.length === 1 ? ofStage : []);
+    const after = pool.filter(l => l.ms >= startMs).map(l => l.ms);
+    const endMs = after.length ? Math.max(...after) : (pool.length ? Math.max(...pool.map(l => l.ms)) : NaN);
+    return isFinite(endMs)
+      ? `${esc(x.machine)}: QA start ${jcHm(startMs)} → done ${jcHm(endMs)} · <b>${jrDur((endMs - startMs) / 60000)}</b>`
+      : `${esc(x.machine)}: QA start ${jcHm(startMs)} · running <b>${jrDur((Date.now() - startMs) / 60000)}</b>`;
+  });
+}
+async function fillJcStageTimes(job) {
+  const slots = [...document.querySelectorAll('.jc-stage-time')];
+  if (!slots.length || !job || !job.id) return;
+  let starts = [];
+  try { starts = await api('GET', '/api/jobs/' + job.id + '/qa-starts'); } catch (e) { starts = []; }
+  const log = jcStageLog(job);
+  for (const el of document.querySelectorAll('.jc-stage-time')) {
+    const lines = jcStageTimeLines(job, el.dataset.stage, Array.isArray(starts) ? starts : [], log);
+    el.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+  }
+}
+
 const PARTICULARS_STAGE_MAP = {
   printed_sheets_qty: 'Printing', printed_waste_sheets: 'Printing',
   coating_sheets_qty: 'Coatings', uv_waste_sheets: 'Coatings',
@@ -32168,6 +32219,8 @@ function particularsTable(p, job, opts) {
       // card for everyone but a Super Admin (the server enforces it too) -
       // the green ▶ in Quantity opens that stage's operator entry instead.
       const locked = jcStageRowsLocked && !!stage;
+      // Each stage's time (owner, 2026-11-11), filled in once QA's starts arrive - see fillJcStageTimes.
+      const stageTimeSlot = stage && JC_STAGE_TIME_KEYS.has(r.key) && job && job.id && !opts.preview ? `<div class="jc-stage-time" data-stage="${esc(stage)}"></div>` : '';
       const lockAttr = locked ? ` readonly title="Recorded at the Station - use the green ▶ to change it there"` : '';
       return `
     <tr${locked ? ' class="jc-row-locked"' : ''}>
@@ -32175,12 +32228,14 @@ function particularsTable(p, job, opts) {
       <td class="jc-details-cell">
         <input type="text" id="p-${r.key}-details" value="${detailsVal}"${lockAttr}>
         ${locked ? '' : `<button type="button" class="jc-details-pick" onclick="pickDetailsDate(this, 'p-${r.key}-details')" title="Pick a date">&#128197;</button>`}
+        ${stageTimeSlot}
       </td>
       <td><div style="display:flex;align-items:center;"><input type="text" id="p-${r.key}-quantity"  value="${qtyDisplay}"${qtyPlaceholder ? ` placeholder="${qtyPlaceholder}"` : ''}${lockAttr} style="flex:1;min-width:0;">${entryDot}</div>${wasteExtraHtml}</td>
       <td><input type="text" id="p-${r.key}-name"      value="${nameVal}" placeholder="Machine" ${machinesListId && !locked ? `list="${machinesListId}"` : ''} oninput="refreshRowPersonsList('${r.key}')" onchange="refreshRowPersonsList('${r.key}')"${lockAttr}><datalist id="${personsListId}" data-particulars-persons="${r.key}">${personsOpts}</datalist></td>
       <td><input type="text" id="p-${r.key}-signature" value="${sigVal}" placeholder="Operator"${locked ? '' : ` list="${personsListId}"`}${lockAttr}></td>
     </tr>`;
     }).join('');
+  if (job && job.id && !opts.preview) setTimeout(() => fillJcStageTimes(job), 0);
   return `
     ${wasteOverlay ? wastageAdjJobCardBanner(job, '#7c3aed') : ''}
     ${machineDatalists}
