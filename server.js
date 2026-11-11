@@ -335,7 +335,8 @@ function getDb() {
 // Bumped again for finance.cost_batch_rates (a board rate per paper batch, 2026-11-10).
 // Bumped again for finance.report_warning_ignores and the row dash_btn_ignore_warning (2026-11-11).
 // Bumped again for the Access Register row inv_btn_print_sticker (split off inv_btn_batches, 2026-11-11).
-const SCHEMA_VERSION = 'v2026-11-11-print-sticker';
+// Bumped again for Edit / Hidden buttons - View on them becomes Hidden (Print: Edit), 2026-11-11.
+const SCHEMA_VERSION = 'v2026-11-11-edit-hidden-buttons';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -363,6 +364,9 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // once; the live source of truth after that is the table itself.
 // `extra` lists any additional selectable level valid ONLY for that
 // group (currently just inventory_reverse's '30-day').
+// Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
+// out, so these rows have no View. The rest keep View, where seeing something means something.
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_record_delivery', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -489,7 +493,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   inv_btn_dismiss_pending: { label: 'Pending Stock — Dismiss button (remove a delivered job from the pending queue)', levels: { admin: 'yes' } },
   inv_btn_brands:          { label: 'Brands & Suppliers button — see every brand and supplier (View); fix a spelling or change an item\'s brand / supplier (Edit)', levels: { admin: 'yes', store_manager: 'yes', production_manager: 'view', finance: 'view', ceo: 'view' } },
   inv_btn_batches:         { label: 'Batches button — the Batch window of a paper: its batches, stock left in each, dates and references', levels: { admin: 'yes', store_manager: 'yes', ceo: 'view', production_manager: 'view', finance: 'view' } },
-  inv_btn_print_sticker:   { label: 'Print Sticker button — the hand-typed pallet sticker in the Inventory toolbar, and the Sticker buttons on a Stock In (History, Stock In report, Batches window, after a Stock In); Edit also keeps the P.O. / Invoice / Batch No. typed on it', levels: { admin: 'yes', store_manager: 'yes', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  inv_btn_print_sticker:   { label: 'Print Sticker button — the hand-typed pallet sticker in the Inventory toolbar, and the Sticker buttons on a Stock In (History, Stock In report, Batches window, after a Stock In); Edit also keeps the P.O. / Invoice / Batch No. typed on it', levels: { admin: 'yes', store_manager: 'yes', ceo: 'hidden', production_manager: 'hidden', finance: 'hidden' } },
 
   // Access Register — Reports tab. All 2-state (view/hidden) — reports are
   // read-only, there's no "edit" concept for any of them. Same "not wired
@@ -577,7 +581,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   products_btn_revenue: { label: 'Revenue / Avg Rate — see those two stats on a Product Rate tile', levels: { ceo: 'view', finance: 'view' } },
   dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, wastage, production & MIL and stock tiles with date filters (view only)', levels: { ceo: 'view' } },
   products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
-  products_btn_name:    { label: 'Product name — rename a product on its tile (new and duplicated jobs take the new name; the Job Name box offers product names)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
+  products_btn_name:    { label: 'Product name — rename a product on its tile (new and duplicated jobs take the new name; the Job Name box offers product names)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'hidden' } },
 
   // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
   // every role until a Super Admin turns it on, except Procurement, whose tab
@@ -1716,6 +1720,12 @@ async function initDb() {
         `;
       }
     }
+    // Edit / Hidden buttons (owner, 2026-11-11): View there only greyed the button out, so it
+    // becomes Hidden. Print was the one button View let you use, so its View becomes Edit.
+    await sql`UPDATE role_permissions SET level = 'yes', updated_by = 'print: view became edit', updated_at = NOW()
+              WHERE permission_key = 'job_btn_print' AND level = 'view'`;
+    await sql`UPDATE role_permissions SET level = 'hidden', updated_by = 'button: view became hidden', updated_at = NOW()
+              WHERE permission_key = ANY(${ACTION_BUTTON_KEYS}) AND level = 'view'`;
 
     // ── Finance features (merged in from the Supreme Art Finance app) ──
     // Pricing lives on the job itself; the reference tables stay in the
@@ -3164,7 +3174,7 @@ app.put('/api/role-permissions', requireSuperAdmin, async (req, res) => {
     const def = ROLE_PERMISSION_DEFAULTS[key];
     if (!def) return res.status(400).json({ error: 'Unknown permission key' });
     if (!EDITABLE_PERMISSION_ROLES.includes(role)) return res.status(400).json({ error: 'Unknown or non-editable role' });
-    const validLevels = ['no', 'hidden', 'view', 'yes', ...(def.extra || [])];
+    const validLevels = ['no', 'hidden', ...(ACTION_BUTTON_KEYS.includes(key) ? [] : ['view']), 'yes', ...(def.extra || [])];
     if (!validLevels.includes(level)) return res.status(400).json({ error: `level must be one of: ${validLevels.join(', ')}` });
     await sql`
       INSERT INTO role_permissions (permission_key, role, level, updated_by, updated_at)

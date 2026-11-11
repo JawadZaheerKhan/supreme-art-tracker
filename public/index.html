@@ -5580,7 +5580,14 @@ async function loadEffectivePermissions() {
 // 'view' check but not a 'yes' one. '30-day' (inventory_reverse only)
 // isn't in this order — callers that care about it read permLevel()
 // directly and compare the string, same as the server's reverseTierFor.
-function permLevel(key) { return (_rolePerms && _rolePerms[key]) || 'no'; }
+// An Edit / Hidden button (owner, 2026-11-11) never has View: an old View reads as Hidden.
+function permLevel(key) {
+  const l = (_rolePerms && _rolePerms[key]) || 'no';
+  return l === 'view' && accIsActionRow(key) ? 'hidden' : l;
+}
+function accIsActionRow(key) {
+  try { return /^action/.test(ACC_ROW_TYPE[key] || ''); } catch (e) { return false; }   // before the register lists load
+}
 function hasPerm(key, min = 'yes') {
   const order = { no: 0, hidden: 0, view: 1, yes: 2 };
   return (order[permLevel(key)] ?? 0) >= (order[min] ?? 2);
@@ -5723,7 +5730,7 @@ function isOffcutJob(j) {
 // independent server enforcement of who can print (see the Access
 // Register's note on this row), so editing it changes who SEES the
 // button, not a real security boundary.
-function canPrintJobCard() { return isSuperAdmin() || hasPerm('job_btn_print', 'view'); }
+function canPrintJobCard() { return isSuperAdmin() || hasPerm('job_btn_print'); }
 // Wastage Adjustment (adjust/un-adjust), the Finalized Jobs tab, and the
 // Manual Job Card Consumption report all share this one permission —
 // defaults to nobody but Super Admin, same as before this was editable,
@@ -6086,7 +6093,7 @@ const BTN_FN_ROWS = {
   openCartonTypeModal: ['carton_btn_types', 'yes'], openCartonBulkIn: ['carton_btn_stock_in', 'yes'], openCartonStockIn: ['carton_btn_stock_in', 'yes'], openCartonBulkOut: ['carton_btn_issue', 'yes'], openCartonIssue: ['carton_btn_issue', 'yes'],
   openHistory: ['job_btn_history', 'view'],
   openLinkJobPicker: ['job_btn_link', 'yes'], unlinkJob: ['job_btn_link', 'yes'],
-  printJobCard: ['job_btn_print', 'view'], printSelectedJobs: ['job_btn_print', 'view'],
+  printJobCard: ['job_btn_print', 'yes'], printSelectedJobs: ['job_btn_print', 'yes'],
   toggleBlock: ['job_btn_block', 'yes'],
   deleteJob: ['job_btn_delete', 'yes'],
   openDuplicateJob: ['job_btn_duplicate', 'yes'], duplicateGroupIntoJob: ['job_btn_duplicate', 'yes'], createNextJobInGroup: ['job_btn_duplicate', 'yes'],
@@ -41672,27 +41679,27 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_tab_access',          type: 'tab' },
   { key: 'job_btn_edit',            type: 'button' },
   { key: 'job_btn_history',         type: 'button' },
-  { key: 'job_btn_history_reverse', type: 'button' },
-  { key: 'job_btn_link',            type: 'button' },
-  { key: 'job_btn_print',           type: 'button' },
-  { key: 'job_btn_block',           type: 'button' },
-  { key: 'job_btn_delete',          type: 'button' },
-  { key: 'job_btn_duplicate',       type: 'button' },
+  { key: 'job_btn_history_reverse', type: 'action' },
+  { key: 'job_btn_link',            type: 'action' },
+  { key: 'job_btn_print',           type: 'action' },
+  { key: 'job_btn_block',           type: 'action' },
+  { key: 'job_btn_delete',          type: 'action' },
+  { key: 'job_btn_duplicate',       type: 'action' },
   { key: 'job_btn_company_settings', type: 'button' },
-  { key: 'job_btn_create_mil',      type: 'button' },
-  { key: 'job_btn_new_job',         type: 'button' },
+  { key: 'job_btn_create_mil',      type: 'action' },
+  { key: 'job_btn_new_job',         type: 'action' },
   { key: 'job_btn_stage_forward',   type: 'button' },
-  { key: 'job_btn_stage_moves',     type: 'button' },
-  { key: 'job_btn_process_without_paper', type: 'button' },
-  { key: 'job_btn_extra_packets',   type: 'button' },
-  { key: 'job_btn_over_issue',      type: 'button' },
-  { key: 'job_btn_over_issue_ignore', type: 'button' },
-  { key: 'job_btn_record_delivery', type: 'button' },
+  { key: 'job_btn_stage_moves',     type: 'action' },
+  { key: 'job_btn_process_without_paper', type: 'action' },
+  { key: 'job_btn_extra_packets',   type: 'action' },
+  { key: 'job_btn_over_issue',      type: 'action' },
+  { key: 'job_btn_over_issue_ignore', type: 'action' },
+  { key: 'job_btn_record_delivery', type: 'action' },
   { key: 'job_btn_delivery_details', type: 'button' },
-  { key: 'job_btn_operator_entry',  type: 'button' },
+  { key: 'job_btn_operator_entry',  type: 'action' },
   { key: 'job_btn_particulars',     type: 'edit-view' },
-  { key: 'job_btn_delete_delivery', type: 'button' },
-  { key: 'job_btn_adjust',          type: 'button' },
+  { key: 'job_btn_delete_delivery', type: 'action' },
+  { key: 'job_btn_adjust',          type: 'action' },
   { key: 'job_btn_stickers',        type: 'button' },
   { key: 'job_btn_pricing',         type: 'button' },
 ];
@@ -41703,19 +41710,19 @@ const ACC_JOBS_TAB_ROWS = [
 const ACC_INVENTORY_TAB_ROWS = [
   { key: 'inventory_tab_access',    type: 'tab' },
   { key: 'imports_tab_access',      type: 'tab' },
-  { key: 'inv_btn_stock_in',        type: 'button' },
-  { key: 'inv_btn_stock_out',       type: 'button' },
-  { key: 'inv_btn_offcut_issuance', type: 'button' },
+  { key: 'inv_btn_stock_in',        type: 'action' },
+  { key: 'inv_btn_stock_out',       type: 'action' },
+  { key: 'inv_btn_offcut_issuance', type: 'action' },
   { key: 'inv_btn_history',         type: 'button' },
-  { key: 'inv_btn_edit',            type: 'button' },
-  { key: 'inv_btn_delete',          type: 'button' },
-  { key: 'inv_btn_add_offcut',      type: 'button' },
-  { key: 'inv_btn_add_paper',       type: 'button' },
-  { key: 'inv_btn_add_import',      type: 'button' },
-  { key: 'inv_btn_reverse',         type: 'button-30day' },
-  { key: 'inv_btn_dismiss_pending', type: 'button' },
+  { key: 'inv_btn_edit',            type: 'action' },
+  { key: 'inv_btn_delete',          type: 'action' },
+  { key: 'inv_btn_add_offcut',      type: 'action' },
+  { key: 'inv_btn_add_paper',       type: 'action' },
+  { key: 'inv_btn_add_import',      type: 'action' },
+  { key: 'inv_btn_reverse',         type: 'action-30day' },
+  { key: 'inv_btn_dismiss_pending', type: 'action' },
   { key: 'inv_btn_batches',         type: 'button' },
-  { key: 'inv_btn_print_sticker',   type: 'button' },
+  { key: 'inv_btn_print_sticker',   type: 'action' },
   { key: 'inv_btn_brands',          type: 'button' },
 ];
 // Reports tab — every row is 2-state (view/hidden). Reports are read-only,
@@ -41728,13 +41735,13 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_current_balance',             type: 'tab' },
   { key: 'rpt_offcut_consumption',          type: 'tab' },
   { key: 'rpt_manual_job_card_consumption', type: 'tab' },
-  { key: 'rpt_btn_delete_history',     type: 'button' },
-  { key: 'rpt_btn_delete_consumption', type: 'button' },
+  { key: 'rpt_btn_delete_history',     type: 'action' },
+  { key: 'rpt_btn_delete_consumption', type: 'action' },
   { key: 'rpt_jobs_report',                 type: 'tab' },
   { key: 'rpt_mil_products',                type: 'tab' },
   { key: 'rpt_production_report',           type: 'tab' },
   { key: 'rpt_job_number_register',         type: 'tab' },
-  { key: 'rpt_job_number_reuse',            type: 'button' },
+  { key: 'rpt_job_number_reuse',            type: 'action' },
   { key: 'rpt_daily_production_report',     type: 'tab' },
   { key: 'rpt_jobs_archive',                type: 'tab' },
   { key: 'rpt_imports_archive',             type: 'tab' },
@@ -41743,9 +41750,9 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_sale_report_company',         type: 'button' },
   { key: 'rpt_sale_report_bill',            type: 'button' },
   { key: 'rpt_party_ledger',                type: 'tab' },
-  { key: 'rpt_party_ledger_entry',          type: 'button' },
+  { key: 'rpt_party_ledger_entry',          type: 'action' },
   { key: 'rpt_chart_accounts',              type: 'tab' },
-  { key: 'rpt_chart_accounts_edit',         type: 'button' },
+  { key: 'rpt_chart_accounts_edit',         type: 'action' },
   { key: 'rpt_cost_report',                 type: 'tab' },
   { key: 'rpt_cost_settings',               type: 'button' },
 ];
@@ -41755,7 +41762,7 @@ const ACC_PRODUCTS_TAB_ROWS = [
   { key: 'products_btn_rate',    type: 'button' },
   { key: 'products_btn_revenue', type: 'button' },
   { key: 'products_btn_specials', type: 'button' },
-  { key: 'products_btn_name',    type: 'button' },
+  { key: 'products_btn_name',    type: 'action' },
 ];
 // Station tab: one View/Hidden row for the whole tab.
 const ACC_STATION_TAB_ROWS = [
@@ -41770,7 +41777,7 @@ const ACC_USERS_TAB_ROWS = [
   { key: 'user_team_tab_access',           type: 'tab' },
   { key: 'user_btn_activity',              type: 'button' },
   { key: 'user_btn_sessions',              type: 'button' },
-  { key: 'user_btn_change_role',           type: 'button' },
+  { key: 'user_btn_change_role',           type: 'action' },
   { key: 'user_btn_block',                 type: 'button' },
   { key: 'user_btn_remove',                type: 'button' },
   { key: 'user_btn_invite',                type: 'button' },
@@ -41785,14 +41792,14 @@ const ACC_USERS_TAB_ROWS = [
 // turned on here, except Procurement.
 const ACC_CARTON_TAB_ROWS = [
   { key: 'carton_tab_access',   type: 'tab' },
-  { key: 'carton_btn_types',    type: 'button' },
-  { key: 'carton_btn_stock_in', type: 'button' },
-  { key: 'carton_btn_issue',    type: 'button' },
-  { key: 'carton_btn_reverse',  type: 'button-30day' },
+  { key: 'carton_btn_types',    type: 'action' },
+  { key: 'carton_btn_stock_in', type: 'action' },
+  { key: 'carton_btn_issue',    type: 'action' },
+  { key: 'carton_btn_reverse',  type: 'action-30day' },
 ];
 const ACC_DASHBOARD_TAB_ROWS = [
   { key: 'dashboard_tab_access', type: 'tab' },
-  { key: 'dash_btn_ignore_warning', type: 'button' },
+  { key: 'dash_btn_ignore_warning', type: 'action' },
 ];
 const ACC_CLIENT_VIEW_TAB_ROWS = [
   { key: 'client_view_preview', type: 'tab' },
@@ -41821,6 +41828,9 @@ function nextAccLevelButton(current) {
 }
 // 'edit-view': a row with just EDIT / VIEW (e.g. Particulars - always seen).
 function nextAccLevelEditView(current) { return current === 'yes' ? 'view' : 'yes'; }
+// 'action': a button that is only EDIT / HIDDEN (owner, 2026-11-11); 'action-30day' adds 30-DAY.
+function nextAccLevelAction(current) { return current === 'yes' ? 'hidden' : 'yes'; }
+function nextAccLevelAction30(current) { return current === 'yes' ? '30-day' : current === '30-day' ? 'hidden' : 'yes'; }
 function nextAccLevelButton30(current) {
   const order = ['yes', '30-day', 'view', 'hidden'];
   const idx = order.indexOf(current);
@@ -41838,7 +41848,8 @@ async function cycleRolePermission(key, role) {
   if (!groupDef) return;
   const rowType = ACC_ROW_TYPE[key] || 'button';
   const current = (_roleMatrixData.matrix[key] && _roleMatrixData.matrix[key][role]) || 'hidden';
-  const next = rowType === 'tab' ? nextAccLevelTab(current) : rowType === 'button-30day' ? nextAccLevelButton30(current) : rowType === 'edit-view' ? nextAccLevelEditView(current) : nextAccLevelButton(current);
+  const next = rowType === 'tab' ? nextAccLevelTab(current) : rowType === 'button-30day' ? nextAccLevelButton30(current) : rowType === 'edit-view' ? nextAccLevelEditView(current)
+    : rowType === 'action' ? nextAccLevelAction(current) : rowType === 'action-30day' ? nextAccLevelAction30(current) : nextAccLevelButton(current);
   showSaving(true);
   try {
     await api('PUT', '/api/role-permissions', { key, role, level: next });
@@ -41883,10 +41894,11 @@ function accGroupRow(matrixData, key, rowType) {
     let level = group[role] || 'hidden';
     if (rowType === 'tab' && level === 'yes') level = 'view';   // older 'yes' rows (e.g. station_access) mean the tab is visible
     if (rowType === 'edit-view' && level !== 'yes') level = 'view';   // EDIT / VIEW only - never hidden
+    if (/^action/.test(rowType) && level === 'view') level = 'hidden';   // EDIT / HIDDEN only - never view
     return `<td class="acc-cell ${cellClass(level)} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${ACC_LEVEL_LABEL[level] || level.toUpperCase()}</td>`;
   });
   // What the row is: a button, a report page, or a tab / page.
-  const kind = (rowType === 'button' || rowType === 'button-30day') ? 'button'
+  const kind = (rowType === 'button' || rowType === 'button-30day' || rowType === 'action' || rowType === 'action-30day') ? 'button'
     : rowType === 'tab' ? (/^rpt_/.test(key) ? 'report' : 'tab') : '';
   const tag = kind ? `<span class="acc-tag acc-tag-${kind}">${kind}</span>` : '';
   return `<tr class="acc-group-row"><th class="acc-rowlabel">${tag}${label}</th>${cells.join('')}</tr>`;
@@ -41919,10 +41931,10 @@ function renderAccessRegisterHtml(matrixData) {
     : `<div class="empty" style="padding:32px;text-align:center;">This section hasn't been rebuilt yet.</div>`;
 
   return `
-  <div class="acc-reg-dek">One tab per module. The tab's own row (e.g. "Jobs tab") controls whether that whole tab is visible at all — View or Hidden. Every button inside it has its own row: Edit (full access), View (visible but disabled), or Hidden (not shown at all) — both View and Hidden are meant to stay fully blocked server-side once wired up, regardless of what's shown client-side. Client is not part of this table — see the Client View portal's own separate, unrelated access.</div>
+  <div class="acc-reg-dek">One tab per module. The tab's own row (e.g. "Jobs tab") controls whether that whole tab is visible at all — View or Hidden. Every button inside it has its own row. A button that only does something is Edit (can use it) or Hidden (not shown). A row that opens something to look at also has View — can see it, can't change anything. Client is not part of this table — see the Client View portal's own separate, unrelated access.</div>
   <div class="acc-reg-legend">
     <span><span class="acc-swatch allow"></span>View (tab) / Edit (button) — full access</span>
-    <span><span class="acc-swatch partial"></span>View (button) — visible, disabled</span>
+    <span><span class="acc-swatch partial"></span>View — can see, can't change</span>
     <span><span class="acc-swatch deny"></span>Hidden — not shown</span>
   </div>
 
