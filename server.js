@@ -494,7 +494,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_record_delivery', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_record_delivery', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -677,6 +677,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_cost_report:                 { label: 'Cost Report — view every job\'s cost', levels: {} },
   rpt_line_clearance:              { label: 'Line Clearance — QA\'s line clearance log for every machine (previous job, new job, check points), with Print', levels: { admin: 'view', ceo: 'view', production_manager: 'view' } },
   rpt_line_clearance_edit:         { label: 'Line Clearance — green dot: open an entry and correct it', levels: { admin: 'yes' } },
+  rpt_days_off:                    { label: 'Days off — set the days with no work time (holidays); Sundays are always off', levels: { admin: 'yes' } },
   rpt_line_clearance_delete:       { label: 'Line Clearance — delete an entry', levels: { admin: 'yes' } },
   rpt_cost_settings:               { label: 'Cost Report — Cost Settings and each job\'s board rate (see and change the rates)', levels: {} },
   rpt_chart_accounts_edit:         { label: 'Chart of Accounts — add / edit / remove accounts and link customers', levels: { finance: 'yes' } },
@@ -4142,9 +4143,16 @@ function businessNowWc() {
   const g = t => (p.find(x => x.type === t) || {}).value || '00';
   return `${g('year')}-${g('month')}-${g('day')}T${g('hour') === '24' ? '00' : g('hour')}:${g('minute')}`;
 }
+// Days off (owner, 2026-11-11): every Sunday, plus the dates set with the Days off button (schema_meta 'off_days').
+async function loadOffDays(sql) {
+  try { const r = await sql`SELECT value FROM schema_meta WHERE key = 'off_days'`; const a = r[0] ? JSON.parse(r[0].value) : []; return new Set(Array.isArray(a) ? a : []); }
+  catch (e) { return new Set(); }
+}
+const isOffDay = (d, offDays) => { const dt = new Date(d * 86400000); return dt.getUTCDay() === 0 || !!(offDays && offDays.has(dt.toISOString().slice(0, 10))); };
 // Work minutes of start -> end, day by day: 8:10 - 4:45, but the start counts from the entry even before 8:10,
 // and a real end (an entry) counts up to the entry even after 4:45. A job still running stops at 4:45 each day.
-function workMinsByDay(start, end, endReal) {
+// An off day has no work time - unless the job was started and completed on it.
+function workMinsByDay(start, end, endReal, offDays) {
   const out = new Map();
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return out;
   const d0 = Math.floor(start / 1440), d1 = Math.floor(end / 1440);
@@ -4152,7 +4160,7 @@ function workMinsByDay(start, end, endReal) {
     const ws = d * 1440 + WORK_START_MIN, we = d * 1440 + WORK_END_MIN;
     const a = d === d0 ? start : ws;
     const b = d === d1 ? (endReal ? end : Math.min(end, we)) : we;
-    const mins = Math.max(0, b - a);
+    const mins = isOffDay(d, offDays) ? (d === d0 && d === d1 && endReal ? end - start : 0) : Math.max(0, b - a);
     if (mins > 0) out.set(new Date(d * 1440 * 60000).toISOString().slice(0, 10), mins);
   }
   return out;
@@ -4178,6 +4186,7 @@ async function machineHoursMap(sql, from, to) {
   const jobs = ids.length ? await sql`SELECT id, name, log FROM jobs WHERE id = ANY(${ids})` : [];
   const byId = new Map(jobs.map(j => [j.id, { name: j.name, ends: jobLogEnds(j.log) }]));
   const nowMin = wcMin(businessNowWc()), fromMin = wcMin(from + 'T00:00'), toEnd = wcMin(to + 'T00:00') + 1440;
+  const offDays = await loadOffDays(sql);
   const out = new Map();
   rows.forEach((r, i) => {
     const start = wcMin(at(r));
@@ -4194,7 +4203,7 @@ async function machineHoursMap(sql, from, to) {
     if (end == null && nx != null) { end = nx; real = true; }
     if (end == null) { end = nowMin; real = false; }
     if (end < fromMin || start >= toEnd) return;
-    for (const [date, mins] of workMinsByDay(start, end, real)) {
+    for (const [date, mins] of workMinsByDay(start, end, real, offDays)) {
       if (date < from || date > to) continue;
       const key = date + '|' + mLow;
       const e = out.get(key) || { machine: r.machine, date, mins: 0, jobs: [] };
@@ -8224,6 +8233,22 @@ app.get('/api/dashboard/running-now', requirePermission('dashboard_tab_access', 
       const j = byId.get(lcJobId(r.new_job));
       return { ...r, job_id: j ? j.id : null, job_name: j ? j.name : '', new_company: r.new_company || (j ? j.client : '') || '' };
     }));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Days off (owner, 2026-11-11): read by anyone signed in (the work-time figures need them); set with rpt_days_off.
+app.get('/api/settings/off-days', requireAuth, async (req, res) => {
+  try { await dbReady; res.json([...(await loadOffDays(getDb()))].sort()); }
+  catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/settings/off-days', requirePermission('rpt_days_off'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const dates = [...new Set((Array.isArray(req.body && req.body.dates) ? req.body.dates : []).map(String).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)))].sort();
+    await sql`INSERT INTO schema_meta (key, value) VALUES ('off_days', ${JSON.stringify(dates)})
+              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    await logAudit(sql, req, { action: 'settings.off_days', entityType: 'settings', entityId: null, summary: `Days off set: ${dates.length ? dates.join(', ') : 'none'}` });
+    res.json(dates);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // QA's own recent entries on his screen (PIN in the body, never the URL).

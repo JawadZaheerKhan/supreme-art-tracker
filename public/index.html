@@ -4201,6 +4201,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
               <input type="date" id="dp-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" data-acc="rpt_days_off" onclick="openOffDays()" title="Days with no work time (holidays). Sundays are always off.">&#128197; Days off</button>
             <button class="btn btn-sm" style="margin-left:auto;" onclick="exportDailyRegister()">&#128202; Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print</button>
           </div>
@@ -4213,6 +4214,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
               <input type="date" id="dp-die-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" data-acc="rpt_days_off" onclick="openOffDays()" title="Days with no work time (holidays). Sundays are always off.">&#128197; Days off</button>
             <button class="btn btn-sm" style="margin-left:auto;" onclick="exportDailyRegister()">&#128202; Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print</button>
           </div>
@@ -4225,6 +4227,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
               <input type="date" id="dp-coatings-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" data-acc="rpt_days_off" onclick="openOffDays()" title="Days with no work time (holidays). Sundays are always off.">&#128197; Days off</button>
             <button class="btn btn-sm" style="margin-left:auto;" onclick="exportDailyRegister()">&#128202; Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print</button>
           </div>
@@ -4237,6 +4240,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
               <input type="date" id="dp-breaking-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" data-acc="rpt_days_off" onclick="openOffDays()" title="Days with no work time (holidays). Sundays are always off.">&#128197; Days off</button>
             <button class="btn btn-sm" style="margin-left:auto;" onclick="exportDailyRegister()">&#128202; Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print</button>
           </div>
@@ -4249,6 +4253,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
               <input type="date" id="dp-pasting-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" data-acc="rpt_days_off" onclick="openOffDays()" title="Days with no work time (holidays). Sundays are always off.">&#128197; Days off</button>
             <button class="btn btn-sm" style="margin-left:auto;" onclick="exportDailyRegister()">&#128202; Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print</button>
           </div>
@@ -4261,6 +4266,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
               <input type="date" id="dp-sorting-date" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--font);">
             </label>
             <button class="btn btn-sm" onclick="loadDailyProductionForCurrentTab()">Refresh</button>
+            <button class="btn btn-sm" data-acc="rpt_days_off" onclick="openOffDays()" title="Days with no work time (holidays). Sundays are always off.">&#128197; Days off</button>
             <button class="btn btn-sm" style="margin-left:auto;" onclick="exportDailyRegister()">&#128202; Excel</button>
             <button class="btn btn-primary btn-sm" onclick="printDailyRegister()">&#128424; Print</button>
           </div>
@@ -6630,6 +6636,7 @@ function setCeoDashProdCustom() {
 // withProd false = only the main date filter changed (Production keeps its own).
 async function loadCeoDash(withProd) {
   renderCeoDash();
+  ensureOffDays().then(() => { if (mode === 'dashboard') renderCeoDash(); });
   if (withProd !== false) loadCeoDashProd();
   const [imports, stale, ignored, running] = await Promise.all([
     api('GET', '/api/imports').catch(() => []),
@@ -18655,6 +18662,13 @@ function loadJrTxBatches() {
 // Work time (owner, 2026-11-11): 8:10 am - 4:45 pm a day; the start counts from the entry even before 8:10 and
 // a real end (an entry) counts up to it even after 4:45; still running = stops at 4:45. Mirrors the server.
 const WORK_START_MIN = 8 * 60 + 10, WORK_END_MIN = 16 * 60 + 45;
+// Days off (owner, 2026-11-11): Sundays, plus the dates set with the Days off button (loaded once, see ensureOffDays).
+let _offDays = new Set(), _offDaysLoaded = null;
+function ensureOffDays() {
+  if (!_offDaysLoaded) _offDaysLoaded = api('GET', '/api/settings/off-days').then(a => { _offDays = new Set(Array.isArray(a) ? a : []); }).catch(() => {});
+  return _offDaysLoaded;
+}
+const isOffDayN = d => { const dt = new Date(d * 86400000); return dt.getUTCDay() === 0 || _offDays.has(dt.toISOString().slice(0, 10)); };
 function workMins(startMs, endMs, endReal) {
   const w = ms => { const d = new Date(ms); return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes()) / 60000; };
   const start = w(startMs), end = w(endMs);
@@ -18664,7 +18678,7 @@ function workMins(startMs, endMs, endReal) {
   for (let d = d0; d <= d1; d++) {
     const ws = d * 1440 + WORK_START_MIN, we = d * 1440 + WORK_END_MIN;
     const a = d === d0 ? start : ws, b = d === d1 ? (endReal ? end : Math.min(end, we)) : we;
-    total += Math.max(0, b - a);
+    total += isOffDayN(d) ? (d === d0 && d === d1 && endReal ? end - start : 0) : Math.max(0, b - a);
   }
   return total;
 }
@@ -18707,6 +18721,7 @@ function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
   loadJrTxBatches();
+  ensureOffDays().then(() => { if (document.getElementById('rt-jobs-report')) renderJobsReport(); });
   if (jobsReportState.period !== 'custom') {   // re-applied every open so "Today" stays today
     const r = periodToDateRange(jobsReportState.period);
     jobsReportState.dfrom = r.from; jobsReportState.dto = r.to;
@@ -24914,6 +24929,39 @@ function dpHoursDetail(key) {
     <table style="width:100%;border-collapse:collapse;font-size:13px;">${rows}</table>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
   </div>`);
+}
+// Days off (owner, 2026-11-11): Sundays are always off; add any other day (holiday, shutdown) - no work time on it.
+async function openOffDays() {
+  await ensureOffDays();
+  const list = [..._offDays].sort();
+  const rows = list.length ? list.map(d => `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-bottom:1px solid var(--border);">
+      <span><b>${esc(fmtDMY(d))}</b> <span style="color:var(--text2);font-size:12px;">${esc(new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { weekday: 'long' }))}</span></span>
+      <button class="btn btn-sm" onclick="saveOffDays(${esc(JSON.stringify(list.filter(x => x !== d)))})" title="Make it a working day again">&#10005;</button></div>`).join('')
+    : '<div style="color:var(--text2);padding:8px;">No days off set - only Sundays.</div>';
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:440px;">
+    <h2>Days off</h2>
+    <div style="font-size:12px;color:var(--text2);margin:-6px 0 10px;">No work time is counted on these days (machine Hours, Jobs Report Time, Running now). Sundays are always off. Work started and completed on a day off still counts.</div>
+    <div style="display:flex;gap:8px;margin-bottom:10px;"><input type="date" id="off-day-new" style="flex:1;"><button class="btn btn-primary btn-sm" onclick="addOffDay()">+ Add</button></div>
+    <div style="max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:8px;">${rows}</div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
+}
+function addOffDay() {
+  const v = (document.getElementById('off-day-new') || {}).value || '';
+  if (!v) { notify('Pick a date'); return; }
+  if (new Date(v + 'T12:00:00').getDay() === 0) { notify('Sundays are always off'); return; }
+  saveOffDays([..._offDays, v]);
+}
+async function saveOffDays(dates) {
+  showSaving(true);
+  try {
+    const saved = await api('PUT', '/api/settings/off-days', { dates });
+    _offDays = new Set(Array.isArray(saved) ? saved : []);
+    notify('Days off saved');
+    openOffDays();
+    loadDailyProductionForCurrentTab();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 async function loadDailyProductionPrinting() {
   const dateEl = document.getElementById('dp-date');
@@ -42710,6 +42758,7 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_line_clearance',              type: 'tab' },
   { key: 'rpt_line_clearance_edit',         type: 'action' },
   { key: 'rpt_line_clearance_delete',       type: 'action' },
+  { key: 'rpt_days_off',                    type: 'action' },
 ];
 // Products tab (Product Rate), merged in from the Finance app.
 const ACC_PRODUCTS_TAB_ROWS = [
