@@ -895,6 +895,35 @@
   .acc-table td.acc-cell.editable { cursor: pointer; box-shadow: inset 0 0 0 1.5px rgba(0,0,0,0.18); transition: box-shadow 0.12s, filter 0.12s; }
   .acc-table td.acc-cell.editable:hover { filter: brightness(0.93); box-shadow: inset 0 0 0 1.5px rgba(0,0,0,0.35); }
   .acc-table td.acc-cell.locked { opacity: 0.55; }
+  /* Sliding toggle in each cell (owner, 2026-11-11) - the coloured knob sits on the chosen side:
+     green = Edit (or View on a tab), amber = View / 30 Day, red = Hidden. */
+  .acc-table td.acc-cell.acc-cell-tg { background: transparent; padding: 5px 4px; opacity: 1; }
+  .acc-table tbody th.acc-rowlabel { min-width: 210px; }   /* the toggles must not squeeze the names */
+  .acc-tg {
+    position: relative; isolation: isolate; display: inline-grid; grid-template-columns: repeat(var(--n), 1fr);
+    padding: 2px; background: #fff; border: 1px solid #d8c5c5; border-radius: 8px;
+    box-shadow: 0 1px 4px rgba(91,33,33,.10); vertical-align: middle;
+  }
+  .acc-tg::before {
+    content: ""; position: absolute; z-index: 0; top: 2px; bottom: 2px; left: 2px;
+    width: calc((100% - 4px) / var(--n)); border-radius: 6px; background: var(--tg);
+    box-shadow: 0 2px 6px rgba(0,0,0,.22);
+    transform: translateX(calc(100% * var(--i)));
+    transition: transform .34s cubic-bezier(.34,1.2,.64,1), background-color .25s ease;
+  }
+  .acc-tg-allow { --tg: #16a34a; }
+  .acc-tg-partial { --tg: #d97706; }
+  .acc-tg-deny { --tg: #b91c1c; }
+  .acc-tg button {
+    position: relative; z-index: 1; min-width: auto; margin: 0; padding: 4px 5px;
+    background: transparent !important; border: 0 !important; box-shadow: none !important;
+    font-size: 9.5px; font-weight: 800; letter-spacing: .02em; color: var(--text2);
+    white-space: nowrap; cursor: pointer; transition: color .2s ease;
+  }
+  .acc-tg button:not(.is-on):hover { color: var(--text); }
+  .acc-tg button.is-on { color: #fff; cursor: default; }
+  .acc-tg.is-locked { opacity: .5; }
+  .acc-tg.is-locked button { cursor: not-allowed; }
   .acc-table tr.acc-group-row th.acc-rowlabel { font-weight: 700; }
   /* Row kind tag before the name (owner, 2026-11-11). */
   .acc-tag { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 8px; font-size: 9px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; vertical-align: 1px; }
@@ -1689,7 +1718,7 @@
     box-shadow:0 0 0 3px rgba(22,101,52,.18), 0 4px 12px rgba(20,83,45,.28);
   }
   @media (prefers-reduced-motion: reduce) {
-    .whole-toggle, .whole-toggle::before, .jr-mode-slider::before { transition: none; animation: none !important; }
+    .whole-toggle, .whole-toggle::before, .jr-mode-slider::before, .acc-tg::before { transition: none; animation: none !important; }
   }
   /* Create Mil Job toolbar button — same pill shape as the Shade Cards
      toggle so it feels part of the toolbar, red palette to stand out as
@@ -41842,6 +41871,55 @@ function nextAccLevelButton30(current) {
 // place. Other currently-signed-in sessions of the affected role pick
 // this up next time they load the app (their _rolePerms is fetched once
 // at boot), not instantly — there's no push mechanism to already-open tabs.
+// The sides of each row type's toggle, left to right (owner, 2026-11-11).
+const ACC_TOGGLE_OPTS = {
+  tab: [['view', 'View'], ['hidden', 'Hidden']],
+  'edit-view': [['yes', 'Edit'], ['view', 'View']],
+  button: [['yes', 'Edit'], ['view', 'View'], ['hidden', 'Hidden']],
+  'button-30day': [['yes', 'Edit'], ['30-day', '30 Day'], ['view', 'View'], ['hidden', 'Hidden']],
+  action: [['yes', 'Edit'], ['hidden', 'Hidden']],
+  'action-30day': [['yes', 'Edit'], ['30-day', '30 Day'], ['hidden', 'Hidden']],
+};
+function accTone(rowType, level) {
+  return rowType === 'tab' ? (level === 'view' ? 'allow' : 'deny') : ({ yes: 'allow', view: 'partial', '30-day': 'partial' }[level] || 'deny');
+}
+function accToggleHtml(key, role, rowType, level, locked) {
+  const opts = ACC_TOGGLE_OPTS[rowType] || ACC_TOGGLE_OPTS.button;
+  let i = opts.findIndex(o => o[0] === level);
+  if (i < 0) i = opts.length - 1;
+  return `<div class="acc-tg acc-tg-${accTone(rowType, opts[i][0])}${locked ? ' is-locked' : ''}" style="--n:${opts.length};--i:${i};">${opts.map(([v, l], j) =>
+    `<button type="button" class="${j === i ? 'is-on' : ''}" aria-pressed="${j === i}" ${locked ? 'disabled' : `onclick="setRolePermission('${key}','${role}','${v}',this)"`}>${l}</button>`).join('')}</div>`;
+}
+// Pick a side of a cell's toggle: the knob slides at once, then it saves (a failed save puts it back).
+async function setRolePermission(key, role, next, btn) {
+  if (!_roleMatrixData) return;
+  const groupDef = _roleMatrixData.groups.find(g => g.key === key);
+  if (!groupDef) return;
+  const rowType = ACC_ROW_TYPE[key] || 'button';
+  const tg = btn && btn.closest('.acc-tg');
+  const redraw = () => { const el = document.getElementById('users-access-register-section'); if (el) el.innerHTML = renderAccessRegisterHtml(_roleMatrixData); };
+  if (tg) {
+    if (btn.classList.contains('is-on')) return;
+    const opts = ACC_TOGGLE_OPTS[rowType] || ACC_TOGGLE_OPTS.button;
+    tg.style.setProperty('--i', Math.max(0, opts.findIndex(o => o[0] === next)));
+    tg.classList.remove('acc-tg-allow', 'acc-tg-partial', 'acc-tg-deny');
+    tg.classList.add('acc-tg-' + accTone(rowType, next));
+    tg.querySelectorAll('button').forEach(b => { b.classList.toggle('is-on', b === btn); b.setAttribute('aria-pressed', b === btn); });
+  }
+  showSaving(true);
+  try {
+    await api('PUT', '/api/role-permissions', { key, role, level: next });
+    if (!_roleMatrixData.matrix[key]) _roleMatrixData.matrix[key] = {};
+    _roleMatrixData.matrix[key][role] = next;
+    applyBtnAccess(document.body);   // black / not black follows the change
+    if (!tg) redraw();
+    notify(`${roleLabel(role)}: ${groupDef.label} → ${ACC_LEVEL_LABEL[next] || next.toUpperCase()}`);
+  } catch (e) {
+    notify('Error: ' + e.message);
+    redraw();
+  }
+  showSaving(false);
+}
 async function cycleRolePermission(key, role) {
   if (!_roleMatrixData) return;
   const groupDef = _roleMatrixData.groups.find(g => g.key === key);
@@ -41850,19 +41928,7 @@ async function cycleRolePermission(key, role) {
   const current = (_roleMatrixData.matrix[key] && _roleMatrixData.matrix[key][role]) || 'hidden';
   const next = rowType === 'tab' ? nextAccLevelTab(current) : rowType === 'button-30day' ? nextAccLevelButton30(current) : rowType === 'edit-view' ? nextAccLevelEditView(current)
     : rowType === 'action' ? nextAccLevelAction(current) : rowType === 'action-30day' ? nextAccLevelAction30(current) : nextAccLevelButton(current);
-  showSaving(true);
-  try {
-    await api('PUT', '/api/role-permissions', { key, role, level: next });
-    if (!_roleMatrixData.matrix[key]) _roleMatrixData.matrix[key] = {};
-    _roleMatrixData.matrix[key][role] = next;
-    applyBtnAccess(document.body);   // black / not black follows the change
-    const accEl = document.getElementById('users-access-register-section');
-    if (accEl) accEl.innerHTML = renderAccessRegisterHtml(_roleMatrixData);
-    notify(`${roleLabel(role)}: ${groupDef.label} → ${ACC_LEVEL_LABEL[next] || next.toUpperCase()}`);
-  } catch (e) {
-    notify('Error: ' + e.message);
-  }
-  showSaving(false);
+  return setRolePermission(key, role, next);
 }
 
 // Column order for every row — Super Admin and Client stay locked (Super
@@ -41886,16 +41952,15 @@ function accGroupRow(matrixData, key, rowType) {
     ? esc(rawLabel)
     : `${esc(rawLabel.slice(0, sepIdx))}<span class="acc-rowlabel-sub">${esc(rawLabel.slice(sepIdx + 3))}</span>`;
   const group = (matrixData.matrix && matrixData.matrix[key]) || {};
-  const cellClass = (level) => rowType === 'tab' ? (level === 'view' ? 'allow' : 'deny') : ({ yes: 'allow', view: 'partial', hidden: 'deny', '30-day': 'partial' }[level] || 'deny');
   const cells = COLUMN_ROLES.map(role => {
-    if (role === 'super_admin') return `<td class="acc-cell allow locked" title="Super Admin always has this">${rowType === 'tab' ? 'VIEW' : 'EDIT'}</td>`;
-    if (role === 'client') return `<td class="acc-cell deny locked" title="Client is not part of this system — see the Client View portal's own separate access">HIDDEN</td>`;
-    if (ACC_SUPER_ADMIN_ONLY_ROWS.has(key)) return `<td class="acc-cell deny locked" title="Access Register is Super Admin only — this can't be changed">HIDDEN</td>`;
+    if (role === 'super_admin') return `<td class="acc-cell acc-cell-tg" title="Super Admin always has this">${accToggleHtml(key, role, rowType, rowType === 'tab' ? 'view' : 'yes', true)}</td>`;
+    if (role === 'client') return `<td class="acc-cell acc-cell-tg" title="Client is not part of this system — see the Client View portal's own separate access">${accToggleHtml(key, role, rowType, 'hidden', true)}</td>`;
+    if (ACC_SUPER_ADMIN_ONLY_ROWS.has(key)) return `<td class="acc-cell acc-cell-tg" title="Access Register is Super Admin only — this can't be changed">${accToggleHtml(key, role, rowType, 'hidden', true)}</td>`;
     let level = group[role] || 'hidden';
     if (rowType === 'tab' && level === 'yes') level = 'view';   // older 'yes' rows (e.g. station_access) mean the tab is visible
     if (rowType === 'edit-view' && level !== 'yes') level = 'view';   // EDIT / VIEW only - never hidden
     if (/^action/.test(rowType) && level === 'view') level = 'hidden';   // EDIT / HIDDEN only - never view
-    return `<td class="acc-cell ${cellClass(level)} editable" onclick="cycleRolePermission('${key}','${role}')" title="Click to change">${ACC_LEVEL_LABEL[level] || level.toUpperCase()}</td>`;
+    return `<td class="acc-cell acc-cell-tg">${accToggleHtml(key, role, rowType, level, false)}</td>`;
   });
   // What the row is: a button, a report page, or a tab / page.
   const kind = (rowType === 'button' || rowType === 'button-30day' || rowType === 'action' || rowType === 'action-30day') ? 'button'
@@ -41933,9 +41998,9 @@ function renderAccessRegisterHtml(matrixData) {
   return `
   <div class="acc-reg-dek">One tab per module. The tab's own row (e.g. "Jobs tab") controls whether that whole tab is visible at all — View or Hidden. Every button inside it has its own row. A button that only does something is Edit (can use it) or Hidden (not shown). A row that opens something to look at also has View — can see it, can't change anything. Client is not part of this table — see the Client View portal's own separate, unrelated access.</div>
   <div class="acc-reg-legend">
-    <span><span class="acc-swatch allow"></span>View (tab) / Edit (button) — full access</span>
-    <span><span class="acc-swatch partial"></span>View — can see, can't change</span>
-    <span><span class="acc-swatch deny"></span>Hidden — not shown</span>
+    <span><span class="acc-swatch allow" style="background:#16a34a;border-color:#16a34a;"></span>Edit / View (tab) — full access</span>
+    <span><span class="acc-swatch partial" style="background:#d97706;border-color:#d97706;"></span>View — can see, can't change · 30 Day — last 30 days only</span>
+    <span><span class="acc-swatch deny" style="background:#b91c1c;border-color:#b91c1c;"></span>Hidden — not shown</span>
   </div>
 
   <div class="tabs" style="margin:12px 0 16px;">${tabsBar}</div>
