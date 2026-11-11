@@ -2302,6 +2302,10 @@
   .lc-sec-row .lc-form-name { font-size: 10.5px; font-weight: 800; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; min-width: 108px; }
   .lc-sec { padding: 5px 11px; font-size: 13px; font-weight: 800; border-radius: 7px; border: 1.5px solid var(--border2); background: #fff; cursor: pointer; }
   .lc-sec.is-on { border-color: #155e75; background: #155e75; color: #fff; }
+  .lc-field label.lc-qc { margin: 0; color: var(--text); font-size: 14px; overflow: visible; }
+  .lc-qc { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border: 1.5px solid var(--border2); border-radius: 7px; background: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
+  .lc-qc input { width: 20px; height: 20px; margin: 0; accent-color: #16a34a; }
+  .lc-field label.lc-qc.is-on { border-color: #16a34a; background: #f0fdf4; color: #166534; }
   .lc-sec-tag { display: inline-block; margin-left: 4px; padding: 0 7px; border-radius: 8px; background: #155e75; color: #fff; font-size: 10.5px; font-weight: 800; line-height: 17px; vertical-align: 1px; }
   .lc-pts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
   @media (max-width: 700px) { .lc-pts { grid-template-columns: 1fr; } }
@@ -26381,7 +26385,7 @@ function lcTableHtml(form, rows) {
   const body = rows.map((e, i) => `<tr><td>${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td>${esc(e.entry_time || '')}</td><td>${esc(e.machine)}</td>
     <td>${esc((e.sections || []).join(', '))}</td><td>${esc(e.prev_job)}</td><td>${esc(e.new_job)}</td>
     ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
-    <td class="${e.cleared ? 'lc-cl-y' : 'lc-cl-n'}">${e.cleared ? 'Y' : 'N'}</td><td>${esc(e.line_manager || '')}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td></tr>`).join('');
+    <td class="${e.cleared ? 'lc-cl-y' : 'lc-cl-n'}">${e.cleared ? 'Y' : 'N'}</td><td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td></tr>`).join('');
   return `<h3 style="margin:18px 0 8px;font-size:15px;">${esc(LC_FORMS[form].title)} <span style="font-weight:500;color:var(--text2);font-size:13px;">(${rows.length} entr${rows.length === 1 ? 'y' : 'ies'})</span></h3>
     <div style="overflow-x:auto;"><table class="ss-table lc-rep" style="width:100%;"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
 }
@@ -26430,14 +26434,14 @@ function printLineClearance() {
       <td style="${td}">${esc(e.prev_job)}</td><td style="${td}">${esc(e.new_job)}</td>
       ${nums.map(n => { const [c] = lcPointMark(e, n); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;' : c === 'lc-no' ? 'color:#b91c1c;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
       <td style="${td}text-align:center;font-weight:bold;background:${e.cleared ? '#dcfce7' : '#fee2e2'};">${e.cleared ? 'Y' : 'N'}</td>
-      <td style="${td}">${esc(e.line_manager || '')}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');
+      <td style="${td}text-align:center;font-weight:bold;color:${e.qc_cleared ? '#166534' : '#b91c1c'};">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');
     const dates = g.list.map(e => String(e.entry_date).slice(0, 10)).sort();
     return `<div style="${REPORT_PRINT_WRAP}${gi < groups.length - 1 ? 'page-break-after:always;break-after:page;' : ''}">
       <div style="margin-bottom:6px;">${reportPrintHeading({ title: 'LINE CLEARANCE LOG', formCode: `Doc No: ${f.doc} · Rev:00 · Effective Date: 01-10-2026`, scope: f.title,
         dateText: `${fmtDMY(lcState.from)} - ${fmtDMY(lcState.to)}`, note: `Generated: ${fmtDMYT(new Date())}` })}</div>
       <table style="width:100%;font-size:8.5pt;border-collapse:collapse;margin-bottom:6px;"><tr>
         <td style="${td}"><b>Machine Name:</b> ${esc(g.machine)}</td>
-        <td style="${td}"><b>Section:</b> ${esc(uniq(g.list.flatMap(e => e.sections || [])))}</td><td style="${td}"><b>QC:</b> ${esc(uniq(g.list.map(e => e.line_manager)))}</td>
+        <td style="${td}"><b>Section:</b> ${esc(uniq(g.list.flatMap(e => e.sections || [])))}</td>
         <td style="${td}"><b>Period:</b> ${esc(fmtDMY(dates[0]))} to ${esc(fmtDMY(dates[dates.length - 1]))}</td></tr></table>
       <table style="width:100%;font-size:7.5pt;border-collapse:collapse;margin-bottom:6px;"><tr><td colspan="4" style="${td}font-weight:bold;">CHECK POINTS &middot; &#10003; OK &nbsp; &#10007; Not OK &nbsp; &ndash; N/A</td></tr>${legend}</table>
       <table style="width:100%;font-size:8pt;border-collapse:collapse;">${head}${body}</table>
@@ -39830,7 +39834,7 @@ function stationHasQa() { return !!(stationOperator && stationOperator.kind === 
 function stationQaNowTime() { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
 function stationQaBlank() {
   return { entry_date: localDateISO(), entry_time: stationQaNowTime(), form: '', sections: [], machine: '',
-    line_manager: '', prev_job: '', new_job: '', points: {}, remarks: '' };
+    qc_cleared: false, prev_job: '', new_job: '', points: {}, remarks: '' };
 }
 async function stationOpenQa() {
   stationView = 'qa';
@@ -39904,7 +39908,8 @@ function stationQaHtml() {
             <select onchange="stationQaMachine(this.value)"><option value="">- Pick the machine -</option>${machineOpts.map(m => `<option value="${esc(m.name)}" ${q.machine === m.name ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div>
           <div class="lc-field"><label>Date <span class="urdu" dir="rtl" lang="ur">تاریخ</span></label><input type="date" value="${esc(q.entry_date)}" onchange="stationQaSet('entry_date', this.value)"></div>
           <div class="lc-field"><label>Time <span class="urdu" dir="rtl" lang="ur">وقت</span></label><input type="time" value="${esc(q.entry_time)}" onchange="stationQaSet('entry_time', this.value)"></div>
-          ${field('line_manager', 'QC', 'کیو سی')}
+          <div class="lc-field"><label>QC <span class="urdu" dir="rtl" lang="ur">کیو سی</span></label>
+            <label class="lc-qc ${q.qc_cleared ? 'is-on' : ''}"><input type="checkbox" ${q.qc_cleared ? 'checked' : ''} onchange="stationQaSet('qc_cleared', this.checked); this.closest('.lc-qc').classList.toggle('is-on', this.checked)"> Cleared by QC</label></div>
           ${field('prev_job', 'Previous Job No.', 'پچھلی جاب نمبر')}
           ${field('new_job', 'New Job No.', 'نئی جاب نمبر')}
           <div class="lc-field lc-wide"><label>Remarks <span class="urdu" dir="rtl" lang="ur">ریمارکس</span></label>
@@ -39926,7 +39931,7 @@ function stationQaRecentHtml() {
     const miss = lcMissing(e);
     return `<div class="lc-entry ${e.cleared ? 'ok' : 'no'}">
       <b>${esc(fmtDMY(e.entry_date))} ${esc(e.entry_time || '')}</b> &middot; ${esc(e.machine)} &middot; ${esc((e.sections || []).join(', '))}<br>
-      Job ${esc(e.prev_job)} &rarr; ${esc(e.new_job)} &middot; Line Cleared: ${e.cleared ? '<b class="lc-y">Y</b>' : `<b class="lc-x">N</b> (not ticked: ${miss.join(', ')})`}
+      Job ${esc(e.prev_job)} &rarr; ${esc(e.new_job)} &middot; Line Cleared: ${e.cleared ? '<b class="lc-y">Y</b>' : `<b class="lc-x">N</b> (not ticked: ${miss.join(', ')})`} &middot; QC: ${e.qc_cleared ? '<b class="lc-y">&#10003;</b>' : '<b class="lc-x">&#10007;</b>'}
       ${e.remarks ? `<br><span style="color:var(--text2);">${esc(e.remarks)}</span>` : ''}</div>`;
   }).join('');
 }
