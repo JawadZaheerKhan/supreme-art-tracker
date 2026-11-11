@@ -4132,6 +4132,93 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
 // (used by the client's totals footer). Shared by Printing / Die /
 // Pasting / Coatings so the four tabs render the Jobs column the same
 // way.
+// ── Machine hours from QA's line clearance (owner, 2026-11-11) ──────────────
+// Wall-clock times ('YYYY-MM-DDTHH:MM', as QA / the job log write them) worked as plain minutes.
+const WORK_START_MIN = 8 * 60 + 10, WORK_END_MIN = 16 * 60 + 45;   // 8:10 am - 4:45 pm
+function wcMin(s) { const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(s || '')); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) / 60000 : NaN; }
+function wcStr(min) { return new Date(min * 60000).toISOString().slice(0, 16); }
+function businessNowWc() {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: BUSINESS_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date());
+  const g = t => (p.find(x => x.type === t) || {}).value || '00';
+  return `${g('year')}-${g('month')}-${g('day')}T${g('hour') === '24' ? '00' : g('hour')}:${g('minute')}`;
+}
+// Work minutes of start -> end, day by day: 8:10 - 4:45, but the start counts from the entry even before 8:10,
+// and a real end (an entry) counts up to the entry even after 4:45. A job still running stops at 4:45 each day.
+function workMinsByDay(start, end, endReal) {
+  const out = new Map();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return out;
+  const d0 = Math.floor(start / 1440), d1 = Math.floor(end / 1440);
+  for (let d = d0; d <= d1; d++) {
+    const ws = d * 1440 + WORK_START_MIN, we = d * 1440 + WORK_END_MIN;
+    const a = d === d0 ? start : ws;
+    const b = d === d1 ? (endReal ? end : Math.min(end, we)) : we;
+    const mins = Math.max(0, b - a);
+    if (mins > 0) out.set(new Date(d * 1440 * 60000).toISOString().slice(0, 10), mins);
+  }
+  return out;
+}
+// Completion entries in a job's log: { machine (lower case), min }.
+function jobLogEnds(log) {
+  const out = [];
+  for (const e of (Array.isArray(log) ? log : [])) {
+    const m = /^(.+?)\s*·\s*([^()]+?)\s*\((.+?)\)$/.exec(String((e && e.by) || ''));
+    const t = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/.exec(String((e && e.time) || ''));
+    if (m && t) out.push({ machine: m[2].trim().toLowerCase(), min: wcMin(`${t[3]}-${t[2]}-${t[1]}T${t[4]}:${t[5]}`) });
+  }
+  return out;
+}
+// date|machine (lower case) -> { machine, date, mins, jobs: [{ job_id, job, name, start, end, running, mins }] }.
+async function machineHoursMap(sql, from, to) {
+  const rows = await sql`
+    SELECT machine, entry_date, entry_time, new_job FROM line_clearance
+     WHERE deleted_at IS NULL AND entry_date <= ${to}
+     ORDER BY machine, entry_date, entry_time, created_at`;
+  const at = r => String(r.entry_date instanceof Date ? r.entry_date.toISOString() : r.entry_date).slice(0, 10) + 'T' + (r.entry_time || '00:00');
+  const ids = [...new Set(rows.map(r => lcJobId(r.new_job)).filter(Boolean))];
+  const jobs = ids.length ? await sql`SELECT id, name, log FROM jobs WHERE id = ANY(${ids})` : [];
+  const byId = new Map(jobs.map(j => [j.id, { name: j.name, ends: jobLogEnds(j.log) }]));
+  const nowMin = wcMin(businessNowWc()), fromMin = wcMin(from + 'T00:00'), toEnd = wcMin(to + 'T00:00') + 1440;
+  const out = new Map();
+  rows.forEach((r, i) => {
+    const start = wcMin(at(r));
+    const nx = rows[i + 1] && rows[i + 1].machine === r.machine ? wcMin(at(rows[i + 1])) : null;
+    const id = lcJobId(r.new_job), j = id ? byId.get(id) : null;
+    const mLow = String(r.machine || '').trim().toLowerCase();
+    // End: its completion entry by this machine (before the machine's next QA entry), else that next entry,
+    // else still running (now).
+    let end = null, real = false;
+    if (j) {
+      const ends = j.ends.filter(l => l.machine === mLow && l.min >= start && (nx == null || l.min < nx)).map(l => l.min);
+      if (ends.length) { end = Math.max(...ends); real = true; }
+    }
+    if (end == null && nx != null) { end = nx; real = true; }
+    if (end == null) { end = nowMin; real = false; }
+    if (end < fromMin || start >= toEnd) return;
+    for (const [date, mins] of workMinsByDay(start, end, real)) {
+      if (date < from || date > to) continue;
+      const key = date + '|' + mLow;
+      const e = out.get(key) || { machine: r.machine, date, mins: 0, jobs: [] };
+      e.mins += mins;
+      e.jobs.push({ job_id: id || null, job: String(r.new_job || ''), name: j ? j.name || '' : '', start: at(r), end: real ? wcStr(end) : null, running: !real, mins });
+      out.set(key, e);
+    }
+  });
+  return out;
+}
+const hoursText = mins => { mins = Math.round(mins); return mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm'; };
+// Daily Production rows: Hours = the machine's work time that day; hours_jobs = each job's time, plus the jobs
+// it worked that day with no QA entry (no hours for them).
+async function attachMachineHours(sql, date, rows) {
+  const m = await machineHoursMap(sql, date, date);
+  for (const r of rows || []) {
+    const e = m.get(date + '|' + String(r.machine || '').trim().toLowerCase());
+    const worked = [...new Set((String(r.jobs || '').match(/E-(\d+)/g) || []).map(x => parseInt(x.slice(2), 10)))];
+    const withQa = new Set(e ? e.jobs.map(x => x.job_id).filter(Boolean) : []);
+    r.hours = e && e.mins > 0 ? Math.round(e.mins / 60 * 100) / 100 : '';
+    r.hours_text = e && e.mins > 0 ? hoursText(e.mins) : '';
+    r.hours_jobs = [...(e ? e.jobs : []), ...worked.filter(x => !withQa.has(x)).map(x => ({ job_id: x, job: 'E-' + x, no_qa: true }))];
+  }
+}
 function jobsDisplayPair(jobsMap) {
   if (!jobsMap || !jobsMap.size) return { jobs: '', jobs_count: 0 };
   const ordered = [...jobsMap.entries()]
@@ -4211,7 +4298,7 @@ app.get('/api/reports/daily-production/printing/:date', managerPinOr(requirePerm
         plates_count: isCustom ? (parseInt(note.plates, 10) || 0) : platesCount,
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
-        hours: note.hours || '',
+        hours: '',
         remarks: note.remarks || '',
         is_custom: isCustom,
         // Raw per-entry breakdown behind the sheets total, e.g.
@@ -4220,6 +4307,7 @@ app.get('/api/reports/daily-production/printing/:date', managerPinOr(requirePerm
         print_breakdown: isCustom ? [] : (row ? row.printBreakdown : []),
       };
     });
+    await attachMachineHours(sql, date, out);   // Hours from QA's line clearance (owner, 2026-11-11)
     res.json(out);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -4436,12 +4524,13 @@ app.get('/api/reports/daily-production/coatings/:date', managerPinOr(requirePerm
         finishes,
         waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
-        hours: note.hours || '',
+        hours: '',
         blankets: note.blankets || '',
         remarks: note.remarks || '',
         is_custom: isCustom,
       };
     });
+    await attachMachineHours(sql, date, out);   // Hours from QA's line clearance (owner, 2026-11-11)
     res.json(out);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -4540,11 +4629,12 @@ app.get('/api/reports/daily-production/pasting/:date', managerPinOr(requirePermi
         jobs_count: isCustom ? (parseInt(note.jobs, 10) || 0) : jobs_count,
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
-        hours: note.hours || '',
+        hours: '',
         remarks: note.remarks || '',
         is_custom: isCustom,
       };
     });
+    await attachMachineHours(sql, date, out);   // Hours from QA's line clearance (owner, 2026-11-11)
     res.json(out);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -4582,7 +4672,7 @@ app.get('/api/reports/daily-production/die/:date', managerPinOr(requirePermissio
         jobs_count: isCustom ? (parseInt(note.jobs, 10) || 0) : jobs_count,
         operators: isCustom ? (note.operators_text || '') : operators.join(', '),
         waste: isCustom ? (note.waste || '') : (row ? row.waste : 0),
-        hours: note.hours || '',
+        hours: '',
         make_ready: note.make_ready || '',
         settings: note.settings || '',
         remarks: note.remarks || '',
@@ -4595,6 +4685,7 @@ app.get('/api/reports/daily-production/die/:date', managerPinOr(requirePermissio
           : '',
       };
     });
+    await attachMachineHours(sql, date, out);   // Hours from QA's line clearance (owner, 2026-11-11)
     res.json(out);
   } catch (err) {
     console.error(err); res.status(500).json({ error: err.message });
@@ -4850,6 +4941,7 @@ async function aggregateProductionRange(sql, { from, to }) {
   // operator-keyed in the paper register), so that section contributes
   // to byOperator, never byMachine.
   const notes = await sql`SELECT date, machine, hours, operators_text, section FROM daily_production_notes WHERE date BETWEEN ${from} AND ${to}`;
+  for (const e of (await machineHoursMap(sql, from, to)).values()) ensureMD(e.date, e.machine).hours += Math.round(e.mins / 60 * 100) / 100;
   for (const n of notes) {
     const hrs = parseFloat(String(n.hours || '').replace(/[^0-9.]/g, '')) || 0;
     if (hrs <= 0) continue;
@@ -4859,7 +4951,7 @@ async function aggregateProductionRange(sql, { from, to }) {
     if (n.section === 'breaking') {
       if (n.machine) ensureOD(dateStr, n.machine).hours += hrs;
     } else {
-      if (n.machine) ensureMD(dateStr, n.machine).hours += hrs;
+      // Machine hours come from QA's line clearance now (owner, 2026-11-11) - see below.
       // operators_text is a comma/semicolon list. Split the hours
       // evenly so two operators on a 6-hour shift each get 3h credit.
       if (n.operators_text) {

@@ -6993,8 +6993,7 @@ function ceoDashCloseMore() { ceoDash.open = ''; ceoDash.saleCo = ''; renderCeoD
 // ── Running now (owner, 2026-11-11) ── each machine's latest line clearance: its New Job is on it now.
 function ceoRunSince(x) {
   const at = new Date(String(x.entry_date).slice(0, 10) + 'T' + (x.entry_time || '00:00') + ':00');
-  const mins = Math.max(0, Math.round((Date.now() - at.getTime()) / 60000));
-  const ago = mins < 60 ? mins + 'm' : mins < 1440 ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : Math.floor(mins / 1440) + 'd';
+  const ago = jrDur(workMins(at.getTime(), Date.now(), false));   // work time only (owner, 2026-11-11)
   const today = String(x.entry_date).slice(0, 10) === localDateISO();
   return (today ? '' : esc(fmtDMY(String(x.entry_date).slice(0, 10))) + ' ') + esc(x.entry_time || '') + ' · ' + ago;
 }
@@ -18653,6 +18652,22 @@ function loadJrTxBatches() {
     if (document.getElementById('rt-jobs-report') && typeof renderJobsReport === 'function') renderJobsReport();
   }).catch(() => {}).finally(() => { _jrTxBatchesLoading = false; });
 }
+// Work time (owner, 2026-11-11): 8:10 am - 4:45 pm a day; the start counts from the entry even before 8:10 and
+// a real end (an entry) counts up to it even after 4:45; still running = stops at 4:45. Mirrors the server.
+const WORK_START_MIN = 8 * 60 + 10, WORK_END_MIN = 16 * 60 + 45;
+function workMins(startMs, endMs, endReal) {
+  const w = ms => { const d = new Date(ms); return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes()) / 60000; };
+  const start = w(startMs), end = w(endMs);
+  if (!isFinite(start) || !isFinite(end) || end <= start) return 0;
+  const d0 = Math.floor(start / 1440), d1 = Math.floor(end / 1440);
+  let total = 0;
+  for (let d = d0; d <= d1; d++) {
+    const ws = d * 1440 + WORK_START_MIN, we = d * 1440 + WORK_END_MIN;
+    const a = d === d0 ? start : ws, b = d === d1 ? (endReal ? end : Math.min(end, we)) : we;
+    total += Math.max(0, b - a);
+  }
+  return total;
+}
 function jrDur(mins) {
   mins = Math.max(0, Math.round(mins));
   return mins < 60 ? mins + 'm' : mins < 1440 ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : Math.floor(mins / 1440) + 'd ' + Math.floor((mins % 1440) / 60) + 'h';
@@ -18671,7 +18686,7 @@ function jobTotalTimeText(j) {
   if (!j || !j.created_at) return '';
   const start = new Date(j.created_at).getTime();
   const end = jobEndMs(j);
-  return jrDur(((end != null ? end : Date.now()) - start) / 60000);   // like the job card tile
+  return jrDur(end != null ? workMins(start, end, true) : workMins(start, Date.now(), false));   // work time only
 }
 // "1, 2" for the main paper, then " · 2nd: 1" for a 2nd / 3rd paper. Blank when nothing was issued.
 function jobPaperBatchesText(j) {
@@ -24875,6 +24890,31 @@ function loadDailyProductionForCurrentTab() {
   else                       loadDailyProductionPasting();
 }
 
+// Hours (owner, 2026-11-11): automatic from QA's line clearance - each job on the machine from QA's start to its
+// completion entry, work time 8:10 - 4:45 (an entry after 4:45 counts up to the entry). The green dot lists each
+// job's time; a job with no QA entry is listed with no hours.
+const _dpHoursJobs = {};
+function dpHoursCell(row, sec) {
+  const jobs = Array.isArray(row.hours_jobs) ? row.hours_jobs : [];
+  const key = sec + '|' + row.machine;
+  _dpHoursJobs[key] = { machine: row.machine, jobs };
+  return `<span class="dp-hours">${row.hours_text ? esc(row.hours_text) : '—'}</span>${jobs.length ? ` <button class="lc-dot" title="Each job's time" onclick="dpHoursDetail(${esc(JSON.stringify(key))})"></button>` : ''}`;
+}
+function dpHoursDetail(key) {
+  const d = _dpHoursJobs[key];
+  if (!d) return;
+  const hm = s => String(s || '').slice(11, 16);
+  const rows = d.jobs.map(j => `<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;"><b>${esc(lcJobNo(j.job))}</b> ${esc(j.name || '')}</td>
+    <td style="padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;">${j.no_qa ? '<span style="color:#b45309;font-weight:700;">no QA entry - no hours</span>'
+      : `<span style="color:#1d4ed8;font-weight:700;">${esc(hm(j.start))}</span> - ${j.running ? '<span style="color:var(--text2);">still on the machine</span>' : `<span style="color:#15803d;font-weight:700;">${esc(hm(j.end))}</span>`}`}</td>
+    <td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;font-weight:700;">${j.no_qa ? '' : esc(jrDur(j.mins))}</td></tr>`).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:620px;">
+    <h2>${esc(d.machine)} &middot; each job's time</h2>
+    <div style="font-size:12px;color:var(--text2);margin:-6px 0 10px;">From QA's line clearance to the job's completion entry on this machine. Work time 8:10 am - 4:45 pm; an entry after 4:45 counts up to the entry.</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;">${rows}</table>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
+}
 async function loadDailyProductionPrinting() {
   const dateEl = document.getElementById('dp-date');
   const body = document.getElementById('dp-printing-body');
@@ -25110,8 +25150,7 @@ function renderDailyProductionPasting(rows, date) {
       <td class="dp-machine">${esc(row.machine)}</td>
       <td class="dp-num">${row.units ? Number(row.units).toLocaleString() : '—'}</td>
       <td class="dp-num">${row.waste ? Number(row.waste).toLocaleString() : '—'}</td>
-      <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="pasting" data-field="hours"
-                 value="${esc(row.hours || '')}" placeholder="—" maxlength="6" onblur="saveDailyProductionCell(this)"></td>
+      <td>${dpHoursCell(row, 'pasting')}</td>
       <td>${row.jobs ? esc(row.jobs) : '—'}</td>
       <td>${row.operators ? esc(row.operators) : '—'}</td>
       <td>
@@ -25181,8 +25220,7 @@ function renderDailyProductionCoatings(rows, date) {
       <td class="dp-machine">${esc(row.machine)}</td>
       <td class="dp-num">${row.sheets ? Number(row.sheets).toLocaleString() : '—'}</td>
       <td class="dp-num">${row.waste ? Number(row.waste).toLocaleString() : '—'}</td>
-      <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="coatings" data-field="hours"
-                 value="${esc(row.hours || '')}" placeholder="—" maxlength="6" onblur="saveDailyProductionCell(this)"></td>
+      <td>${dpHoursCell(row, 'coatings')}</td>
       <td>${row.jobs ? esc(row.jobs) : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="coatings" data-field="blankets"
                  value="${esc(row.blankets || '')}" placeholder="—" onblur="saveDailyProductionCell(this)"></td>
@@ -25255,8 +25293,7 @@ function renderDailyProductionDie(rows, date) {
       <td class="dp-machine">${esc(row.machine)}</td>
       <td class="dp-num">${row.sheets ? Number(row.sheets).toLocaleString() : '—'}</td>
       <td class="dp-num">${row.waste ? Number(row.waste).toLocaleString() : '—'}</td>
-      <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="die" data-field="hours"
-                 value="${esc(row.hours || '')}" placeholder="—" maxlength="6" onblur="saveDailyProductionCell(this)"></td>
+      <td>${dpHoursCell(row, 'die')}</td>
       <td>${row.jobs ? esc(row.jobs) : '—'}</td>
       <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="die" data-field="make_ready"
                  value="${esc(row.make_ready || '')}" placeholder="—" onblur="saveDailyProductionCell(this)"></td>
@@ -25347,8 +25384,7 @@ function renderDailyProductionPrinting(rows, date) {
       <td class="dp-machine">${esc(row.machine)}</td>
       <td class="dp-num">${row.sheets ? Number(row.sheets).toLocaleString() : '—'}${row.print_breakdown && row.print_breakdown.length ? ` <span class="dp-breakdown-dot" title="Show breakdown" onclick="showPrintBreakdown('${esc(row.machine)}')">&#9656;</span>` : ''}</td>
       <td class="dp-num">${row.waste ? Number(row.waste).toLocaleString() : '—'}</td>
-      <td><input type="text" ${cellAttrs} class="dp-cell" data-machine="${esc(row.machine)}" data-section="printing" data-field="hours"
-                 value="${esc(row.hours || '')}" placeholder="—" maxlength="6" onblur="saveDailyProductionCell(this)"></td>
+      <td>${dpHoursCell(row, 'printing')}</td>
       <td>${row.jobs ? esc(row.jobs) : '—'}</td>
       <td>${row.colors ? esc(row.colors) : '—'}</td>
       <td>${row.plates ? esc(row.plates) : '—'}</td>
