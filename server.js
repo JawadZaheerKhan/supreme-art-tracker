@@ -14360,7 +14360,11 @@ app.get('/favicon.ico', (req, res) => {
 
 // Where Fast Origin Transfer went, by route (see the origin-transfer meter at
 // the top of this file). ?days=N, default 7, counted in business-local days.
-app.get('/api/admin/transfer-stats', requireAdmin, async (req, res) => {
+app.get('/api/admin/transfer-stats', async (req, res) => {
+  // Admin or Super Admin. Not requireAdmin: that checks 'admin' alone, and an
+  // account can hold super_admin without it (it did on the preview database).
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!userHasRole(req.user, 'admin', 'super_admin')) return res.status(403).json({ error: 'Admin only' });
   try {
     await xferFlush();   // include what this instance has not written yet
     await dbReady;
