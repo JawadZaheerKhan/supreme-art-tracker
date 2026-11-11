@@ -3327,7 +3327,8 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 // hard client-role block above; letting it appear in the editor would
 // invite a mistaken edit into something that actually can't take effect
 // safely, which is worse than just not offering it.
-const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement', 'gate_admin', 'operator_qc', 'operator_qa'];
+// Gate Admin left the register (owner, 2026-11-11) - nobody holds it.
+const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement', 'operator_qc', 'operator_qa'];
 
 // Every signed-in user needs to know their OWN effective permissions
 // (client-side canWriteJobs() etc. read this at boot) — this is not
@@ -3485,7 +3486,9 @@ function operatorKindPerms(kind) {
   const out = {};
   for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) {
     const group = ROLE_PERMS[key] || {};
-    out[key] = group[role] || group.operator || (ROLE_PERMISSION_DEFAULTS[key].levels || {}).operator || 'no';
+    // Its own column only (owner, 2026-11-11): a change to Operator never reaches QC / QA. A row not saved yet
+    // starts from Operator's default, the same as the copy QC / QA were given.
+    out[key] = group[role] || (ROLE_PERMISSION_DEFAULTS[key].levels || {}).operator || 'no';
   }
   return out;
 }
