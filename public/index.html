@@ -2299,7 +2299,9 @@
   .lc-field input, .lc-field select, .lc-field textarea { width: 100%; min-width: 0; font-size: 14px; padding: 7px 8px; border: 1.5px solid var(--border2); border-radius: 7px; background: #fff; box-sizing: border-box; }
   .lc-field.lc-wide { grid-column: span 2; }
   .lc-hint { font-weight: 500; color: #b45309; font-size: 10.5px; }
-  .jc-stage-time { font-size: 10.5px; color: #1d4ed8; line-height: 1.3; margin-top: 2px; }
+  .jc-stage-time { font-size: 11px; color: var(--text2); line-height: 1.3; margin-top: 2px; }
+  .jc-stage-time .jc-t-start { color: #1d4ed8; font-weight: 700; }
+  .jc-stage-time .jc-t-end { color: #15803d; font-weight: 700; }
   .jc-stage-time:empty { display: none; }
   @media print { .jc-stage-time { display: none !important; } }
   .lc-sec-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
@@ -18613,7 +18615,7 @@ function jobTotalTimeText(j) {
   if (!j || !j.created_at) return '';
   const start = new Date(j.created_at).getTime();
   const end = jobEndMs(j);
-  return end != null ? jrDur((end - start) / 60000) : 'running ' + jrDur((Date.now() - start) / 60000);
+  return jrDur(((end != null ? end : Date.now()) - start) / 60000);   // like the job card tile
 }
 // "1, 2" for the main paper, then " · 2nd: 1" for a 2nd / 3rd paper. Blank when nothing was issued.
 function jobPaperBatchesText(j) {
@@ -31753,6 +31755,8 @@ function jcStageLog(job) {
   return out;
 }
 const jcHm = ms => { const d = new Date(ms); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+// Start in blue - completion in green (owner, 2026-11-11: short and simple).
+const jcSpan = (startMs, endMs) => `<span class="jc-t-start">${jcHm(startMs)}</span>${endMs != null ? ` - <span class="jc-t-end">${jcHm(endMs)}</span>` : ''}`;
 function jcStageTimeLines(job, stage, starts, log) {
   const lower = v => String(v || '').trim().toLowerCase();
   if (stage === 'Ready to Deliver') {
@@ -31761,8 +31765,7 @@ function jcStageTimeLines(job, stage, starts, log) {
     const startMs = pasted.length ? Math.max(...pasted) : (st && st.at ? new Date(st.at).getTime() : NaN);
     if (!isFinite(startMs)) return [];
     const end = jobEndMs(job);
-    return [end != null ? `Pasting done ${jcHm(startMs)} → delivered ${jcHm(end)} · <b>${jrDur((end - startMs) / 60000)}</b>`
-      : `Pasting done ${jcHm(startMs)} · ready <b>${jrDur((Date.now() - startMs) / 60000)}</b> so far`];
+    return [jcSpan(startMs, end)];
   }
   const mine = starts.filter(x => (x.sections || []).some(sec => LC_SECTION_STAGE[sec] === stage));
   return mine.map(x => {
@@ -31772,9 +31775,7 @@ function jcStageTimeLines(job, stage, starts, log) {
     const pool = sameM.length ? sameM : (mine.length === 1 ? ofStage : []);
     const after = pool.filter(l => l.ms >= startMs).map(l => l.ms);
     const endMs = after.length ? Math.max(...after) : (pool.length ? Math.max(...pool.map(l => l.ms)) : NaN);
-    return isFinite(endMs)
-      ? `${esc(x.machine)}: QA start ${jcHm(startMs)} → done ${jcHm(endMs)} · <b>${jrDur((endMs - startMs) / 60000)}</b>`
-      : `${esc(x.machine)}: QA start ${jcHm(startMs)} · running <b>${jrDur((Date.now() - startMs) / 60000)}</b>`;
+    return jcSpan(startMs, isFinite(endMs) ? endMs : null);
   });
 }
 async function fillJcStageTimes(job) {
