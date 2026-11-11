@@ -7043,7 +7043,7 @@ async function logout() {
 // The full list had grown to 3.86 MB / 1.4 s and was re-sent on every load
 // and every minute (owner, 2026-10-05: "the app has become very slow");
 // Vercel also refuses one response over 4.5 MB. So:
-//   - the FIRST load (and a safety reload every 30 min) fetches the list in
+//   - the FIRST load (and a safety reload every 4 hours) fetches the list in
 //     pages of 250 jobs;
 //   - every load after that asks only for jobs changed since the last one
 //     (server-side updated_at) plus the live job numbers, and merges them.
@@ -7051,7 +7051,16 @@ async function logout() {
 // plain list) falls back to the full load. Returns true when jobs changed.
 let jobsSyncAt = null;        // server time of the last successful load
 let jobsFullSyncAt = 0;       // when the last full (paged) load ran
-const JOBS_FULL_RELOAD_MS = 30 * 60 * 1000;
+// Was 30 min, which had every active tab re-download the whole list ~16 times
+// a working day. A full load measured 7.2 MB in Nov 2026 (1,336 jobs), so
+// that was ~115 MB of Vercel Fast Origin Transfer per active tab per day
+// against a 10 GB monthly limit. The changed-only refresh is complete on its own for the
+// jobs table: updated_at is set by a database trigger on every UPDATE, and
+// the live-id list catches deletes and inserts. What it cannot see is a
+// change to a linked inventory item's paper type with no change to the job
+// (paper_resolved / paper_is_offcut); that now waits up to 4 hours or a page
+// reload instead of 30 minutes.
+const JOBS_FULL_RELOAD_MS = 4 * 60 * 60 * 1000;
 let jobsSyncWho = null;       // who the loaded list belongs to (prices differ by role)
 async function fetchJobsSynced(forceFull) {
   const who = currentUser ? `${currentUser.id || currentUser.email}:${myRoles().join(',')}` : '';
