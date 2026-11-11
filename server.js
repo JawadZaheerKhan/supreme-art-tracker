@@ -144,6 +144,13 @@ const ROLES = [
   { id: 'loader',    label: 'Loader',            stage_index: null, info: true },
 ];
 const INFO_ROLE_IDS = new Set(ROLES.filter(r => r.info).map(r => r.id));
+// Line Clearance Log (owner, 2026-11-11) - the two paper forms; each section's check point numbers.
+const LC_FORMS = {
+  A: [['CTP', [1, 2, 3, 4]], ['Printing', [5, 6, 7, 8]], ['Coating', [9, 10]]],
+  B: [['Die Cutting', [1, 2]], ['Breaking', [3, 4]], ['Sorting', [5, 6]], ['Folder Gluer', [7, 8, 9]], ['FG Dispatch', [10, 11, 12]]],
+};
+// Station type of an operators entry -> its Access Register column.
+const OPERATOR_KIND_ROLE = { qc: 'operator_qc', qa: 'operator_qa' };
 const infoOnlyRoles = roles => Array.isArray(roles) && roles.length > 0 && roles.every(r => INFO_ROLE_IDS.has(r));
 const ROLE_FINISHES = {
   coatings:  ['UV','Spot UV','Varnish','Lacquer','Water Base','Lamination','Dripup','Color Seal'],
@@ -336,7 +343,8 @@ function getDb() {
 // Bumped again for finance.report_warning_ignores and the row dash_btn_ignore_warning (2026-11-11).
 // Bumped again for the Access Register row inv_btn_print_sticker (split off inv_btn_batches, 2026-11-11).
 // Bumped again for Edit / Hidden buttons - View on them becomes Hidden (Print: Edit), 2026-11-11.
-const SCHEMA_VERSION = 'v2026-11-11-edit-hidden-buttons';
+// Bumped again for QA Line Clearance (operators.kind, line_clearance, QC / QA access columns), 2026-11-11.
+const SCHEMA_VERSION = 'v2026-11-11-line-clearance';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -547,6 +555,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_chart_accounts:              { label: 'Chart of Accounts — view the coded account list', levels: { ceo: 'view', finance: 'view' } },
   // Cost Report: every job's cost from one saved list of rates. Super Admin only until opened up here.
   rpt_cost_report:                 { label: 'Cost Report — view every job\'s cost', levels: {} },
+  rpt_line_clearance:              { label: 'Line Clearance — QA\'s line clearance log for every machine (previous job, new job, check points), with Print', levels: { admin: 'view', ceo: 'view', production_manager: 'view' } },
   rpt_cost_settings:               { label: 'Cost Report — Cost Settings and each job\'s board rate (see and change the rates)', levels: {} },
   rpt_chart_accounts_edit:         { label: 'Chart of Accounts — add / edit / remove accounts and link customers', levels: { finance: 'yes' } },
 
@@ -1394,6 +1403,34 @@ async function initDb() {
     // client uses this flag to show the all-stages/search station screen
     // and to unlock the Machine field instead of a single-stage queue.
     await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS is_manager BOOLEAN NOT NULL DEFAULT false`;
+    // Station type (owner, 2026-11-11): '' operator, 'qc' QC, 'qa' QA Incharge - QC / QA follow their
+    // own Operator column in the Access Register; a QA PIN opens the Line Clearance screen.
+    await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT ''`;
+    // Line Clearance Log (owner, 2026-11-11): one row per changeover QA checks - everything typed by QA.
+    // form A = CTP / Printing / Coating (10 points), B = Die Cutting ... FG Dispatch (12 points);
+    // points = { "1": true, "2": false, ... } for the chosen sections; cleared = every one ticked.
+    await sql`
+      CREATE TABLE IF NOT EXISTS line_clearance (
+        id             SERIAL PRIMARY KEY,
+        entry_date     DATE NOT NULL,
+        entry_time     TEXT NOT NULL DEFAULT '',
+        form           TEXT NOT NULL,
+        sections       TEXT[] NOT NULL DEFAULT '{}',
+        machine        TEXT NOT NULL,
+        machine_no     TEXT NOT NULL DEFAULT '',
+        line_manager   TEXT NOT NULL DEFAULT '',
+        prev_job       TEXT NOT NULL DEFAULT '',
+        new_job        TEXT NOT NULL DEFAULT '',
+        points         JSONB NOT NULL DEFAULT '{}'::jsonb,
+        cleared        BOOLEAN NOT NULL DEFAULT false,
+        operator_name  TEXT NOT NULL DEFAULT '',
+        remarks        TEXT NOT NULL DEFAULT '',
+        qa_name        TEXT NOT NULL DEFAULT '',
+        qa_operator_id INT,
+        created_at     TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS line_clearance_date_idx ON line_clearance (entry_date)`;
     // Every floor operator (person) in one list (owner, 2026-10-24): a
     // machine picks its people from it. Filled from the machines' people
     // here, and kept in step whenever a machine's people are saved.
@@ -1719,6 +1756,14 @@ async function initDb() {
           ON CONFLICT (permission_key, role) DO NOTHING
         `;
       }
+    }
+    // QC and QA (owner, 2026-11-11) - their own Operator columns, starting with what Operator has.
+    for (const r of Object.values(OPERATOR_KIND_ROLE)) {
+      await sql`
+        INSERT INTO role_permissions (permission_key, role, level, updated_by)
+        SELECT permission_key, ${r}, level, 'copied from operator' FROM role_permissions WHERE role = 'operator'
+        ON CONFLICT (permission_key, role) DO NOTHING
+      `;
     }
     // Edit / Hidden buttons (owner, 2026-11-11): View there only greyed the button out, so it
     // becomes Hidden. Print was the one button View let you use, so its View becomes Edit.
@@ -3130,7 +3175,7 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 // hard client-role block above; letting it appear in the editor would
 // invite a mistaken edit into something that actually can't take effect
 // safely, which is worse than just not offering it.
-const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement', 'gate_admin'];
+const EDITABLE_PERMISSION_ROLES = ['admin', 'ceo', 'production_manager', 'store_manager', 'finance', 'operator', 'procurement', 'gate_admin', 'operator_qc', 'operator_qa'];
 
 // Every signed-in user needs to know their OWN effective permissions
 // (client-side canWriteJobs() etc. read this at boot) — this is not
@@ -3279,6 +3324,20 @@ function parseOperatorRoles(body) {
   return { roles: roleIds, stageIndices, primary: stageIndices[0] };
 }
 
+// Station type sent with an operators entry: 'qc', 'qa' or '' (owner, 2026-11-11).
+function operatorKindOf(body) { const k = String((body && body.kind) || ''); return OPERATOR_KIND_ROLE[k] ? k : ''; }
+// What a QC / QA PIN may do at the Station: its own Operator column in the Access Register.
+function operatorKindPerms(kind) {
+  const role = OPERATOR_KIND_ROLE[kind];
+  if (!role) return null;
+  const out = {};
+  for (const key of Object.keys(ROLE_PERMISSION_DEFAULTS)) {
+    const group = ROLE_PERMS[key] || {};
+    out[key] = group[role] || group.operator || (ROLE_PERMISSION_DEFAULTS[key].levels || {}).operator || 'no';
+  }
+  return out;
+}
+
 // Persons list belongs to a machine — pin/role gates the machine, the
 // signed-in operator is then picked from this list at the station screen.
 function parsePersons(body) {
@@ -3314,10 +3373,12 @@ app.post('/api/operators', requireOperatorAdmin, async (req, res) => {
     const isManager = req.body.is_manager === true;
     // Manager PINs always get every role, regardless of what (if anything)
     // was checked client-side — they're not scoped to a stage.
-    const parsed = isManager
+    let parsed = isManager
       ? { roles: ALL_ROLE_IDS, stageIndices: stageIndicesFromRoles(ALL_ROLE_IDS), primary: stageIndicesFromRoles(ALL_ROLE_IDS)[0] }
       : parseOperatorRoles(req.body);
     const persons = parsePersons(req.body);
+    const kind = operatorKindOf(req.body);
+    if (!parsed && kind === 'qa') parsed = { roles: [], stageIndices: [], primary: -1 };   // QA only: no stage
     if (!name) return res.status(400).json({ error: isManager ? 'Manager name is required' : 'Machine name is required' });
     if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
     const infoOnly = !isManager && infoOnlyRoles(parsed.roles);   // Breaking / Driver / Loader only: PIN optional
@@ -3326,8 +3387,8 @@ app.post('/api/operators', requireOperatorAdmin, async (req, res) => {
     const dupe = pin === '' ? [] : await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another machine' });
     const inserted = await sql`
-      INSERT INTO operators (name, pin, stage_index, stage_indices, roles, persons, is_manager)
-      VALUES (${name}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${JSON.stringify(persons)}, ${isManager}) RETURNING *
+      INSERT INTO operators (name, pin, stage_index, stage_indices, roles, persons, is_manager, kind)
+      VALUES (${name}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${JSON.stringify(persons)}, ${isManager}, ${kind}) RETURNING *
     `;
     await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added ${isManager ? 'manager' : 'machine'} ${name} (roles ${parsed.roles.join(',')}, ${persons.length} operator${persons.length === 1 ? '' : 's'})` });
     await syncFloorPeople(sql, persons);
@@ -3345,11 +3406,13 @@ app.put('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
     const name = (req.body.name || '').trim();
     const pin = String(req.body.pin || '').trim();
     const isManager = req.body.is_manager === true;
-    const parsed = isManager
+    let parsed = isManager
       ? { roles: ALL_ROLE_IDS, stageIndices: stageIndicesFromRoles(ALL_ROLE_IDS), primary: stageIndicesFromRoles(ALL_ROLE_IDS)[0] }
       : parseOperatorRoles(req.body);
     const persons = parsePersons(req.body);
     const active = req.body.active !== false;
+    const kind = operatorKindOf(req.body);
+    if (!parsed && kind === 'qa') parsed = { roles: [], stageIndices: [], primary: -1 };   // QA only: no stage
     if (!name) return res.status(400).json({ error: isManager ? 'Manager name is required' : 'Machine name is required' });
     if (!parsed) return res.status(400).json({ error: 'At least one role is required' });
     const infoOnly = !isManager && infoOnlyRoles(parsed.roles);   // Breaking / Driver / Loader only: PIN optional
@@ -3358,7 +3421,7 @@ app.put('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
     const dupe = pin === '' ? [] : await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another machine' });
     const updated = await sql`
-      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, persons=${JSON.stringify(persons)}, active=${active}, is_manager=${isManager}
+      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, persons=${JSON.stringify(persons)}, active=${active}, is_manager=${isManager}, kind=${kind}
       WHERE id=${id} RETURNING *
     `;
     if (!updated.length) return res.status(404).json({ error: 'Operator not found' });
@@ -3505,9 +3568,11 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
     const sql = getDb();
     const pin = String(req.body.pin || '').trim();
     if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
-    const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, persons, is_manager FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    const rows = await sql`SELECT id, name, stage_index, stage_indices, roles, persons, is_manager, kind FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
     if (!rows.length) return res.status(404).json({ error: 'PIN not recognized' });
     const op = rows[0];
+    // QC / QA: what this PIN may do follows its own Operator column (owner, 2026-11-11).
+    if (OPERATOR_KIND_ROLE[op.kind]) { await ensureRolePermsFresh(); op.perms = operatorKindPerms(op.kind); }
     if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
     if (!Array.isArray(op.roles) || !op.roles.length) op.roles = rolesOf(op);
     if (!op.is_manager && infoOnlyRoles(op.roles)) return res.status(403).json({ error: 'This entry is for information only - it has no Station sign-in' });
@@ -7783,6 +7848,74 @@ async function verifyPapercutPin(sql, rawPin) {
   }
   return { operator: op };
 }
+
+// ── Line Clearance Log (owner, 2026-11-11) ──────────────────
+// QA's PIN only. Everything is typed by QA - nothing filled in for him.
+async function verifyQaPin(sql, rawPin) {
+  const pin = String(rawPin || '').trim();
+  if (!validPin(pin)) return { status: 400, error: 'Enter a 3-digit PIN' };
+  const op = (await sql`SELECT id, name, kind FROM operators WHERE pin = ${pin} AND active LIMIT 1`)[0];
+  if (!op) return { status: 401, error: 'PIN not recognized' };
+  if (op.kind !== 'qa') return { status: 403, error: 'This PIN is not a QA Incharge.' };
+  return { operator: op };
+}
+const lcText = (v, max = 200) => String(v == null ? '' : v).trim().slice(0, max);
+app.post('/api/station/line-clearance', requireStationUser, async (req, res) => {
+  try {
+    if (!canProcessStation(req.user)) return res.status(403).json({ error: 'View-only: your role cannot save at the station.' });
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyQaPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const b = req.body || {};
+    const form = LC_FORMS[b.form] ? b.form : null;
+    if (!form) return res.status(400).json({ error: 'Pick the section' });
+    const names = LC_FORMS[form].map(x => x[0]);
+    const sections = Array.from(new Set((Array.isArray(b.sections) ? b.sections : []).map(String))).filter(x => names.includes(x));
+    if (!sections.length) return res.status(400).json({ error: 'Pick the section' });
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(b.entry_date || '')) ? b.entry_date : null;
+    if (!date) return res.status(400).json({ error: 'Enter the date' });
+    const machine = lcText(b.machine, 80);
+    if (!machine) return res.status(400).json({ error: 'Enter the machine name' });
+    const prev = lcText(b.prev_job, 40), next = lcText(b.new_job, 40);
+    if (!prev || !next) return res.status(400).json({ error: 'Enter the previous job and the new job' });
+    // Only the chosen sections' points; cleared = every one of them ticked.
+    const nums = LC_FORMS[form].filter(x => sections.includes(x[0])).flatMap(x => x[1]);
+    const given = (b.points && typeof b.points === 'object') ? b.points : {};
+    const points = {};
+    for (const n of nums) points[n] = given[n] === true;
+    const cleared = nums.every(n => points[n]);
+    const qaName = lcText(b.qa_name, 80) || v.operator.name;
+    const row = (await sql`
+      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, machine_no, line_manager, prev_job, new_job, points, cleared, operator_name, remarks, qa_name, qa_operator_id)
+      VALUES (${date}, ${lcText(b.entry_time, 10)}, ${form}, ${sections}, ${machine}, ${lcText(b.machine_no, 40)}, ${lcText(b.line_manager, 80)},
+              ${prev}, ${next}, ${JSON.stringify(points)}, ${cleared}, ${lcText(b.operator_name, 80)}, ${lcText(b.remarks, 500)}, ${qaName}, ${v.operator.id})
+      RETURNING *`)[0];
+    await logAudit(sql, req, { action: 'line_clearance.create', entityType: 'line_clearance', entityId: row.id,
+      summary: `Line clearance ${machine}: ${prev} → ${next} (${cleared ? 'cleared' : 'NOT cleared'}) by ${qaName}` });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// QA's own recent entries on his screen (PIN in the body, never the URL).
+app.post('/api/station/line-clearance/recent', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyQaPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    res.json(await sql`SELECT * FROM line_clearance ORDER BY created_at DESC LIMIT 30`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Reports -> Line Clearance.
+app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const okDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? d : null;
+    const from = okDate(req.query.from) || '1900-01-01', to = okDate(req.query.to) || '2999-12-31';
+    res.json(await sql`SELECT * FROM line_clearance WHERE entry_date BETWEEN ${from} AND ${to} ORDER BY entry_date, entry_time, id`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 
 // Paper Cutting station's Offcut Inventory tab: every offcut item, plus
 // distinct values from all inventory for the add-item form's suggestions
