@@ -333,7 +333,8 @@ function getDb() {
 // Bumped again for the Access Register row rpt_sale_report_bill (Sale Report Bill button, 2026-11-05).
 // Bumped again for the Access Register row inv_btn_brands (Brands & Suppliers window, 2026-11-05).
 // Bumped again for finance.cost_batch_rates (a board rate per paper batch, 2026-11-10).
-const SCHEMA_VERSION = 'v2026-11-10-batch-rates';
+// Bumped again for finance.report_warning_ignores and the row dash_btn_ignore_warning (2026-11-11).
+const SCHEMA_VERSION = 'v2026-11-11-warning-ignores';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -529,6 +530,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_sale_report:                 { label: 'Sale Report — full invoicing detail (Rate, Sale Tax, Company / Destination / NTN)', levels: { ceo: 'view', finance: 'view' } },
   rpt_sale_report_totals:          { label: 'Sale Report — totals row at the bottom (summed Rate w/o & w/ Sale Tax)', levels: { ceo: 'view' } },
   rpt_sale_report_company:         { label: 'Sale Report — Company Settings button (NTN / Destination per company)', levels: { finance: 'yes', ceo: 'view' } },
+  dash_btn_ignore_warning:         { label: 'Dashboard — Ignore button on Report warnings (hide a warning that is fine; Undo brings it back)', levels: { admin: 'yes' } },
   rpt_sale_report_bill:            { label: 'Sale Report — Bill button (deliveries still missing Invoice No., E-FBR No., MSI No., PO No. or Rate)', levels: { finance: 'view', ceo: 'view' } },
   // Party Ledger — each company's invoices (from the Sale Report), receipts
   // and running balance. Viewing and entering are separate rows.
@@ -1776,6 +1778,19 @@ async function initDb() {
     // A board rate per paper batch (owner, 2026-11-10): one row per item + batch that has its
     // own rate. A batch without one follows the batch before it of the same paper type + brand,
     // and the paper type + brand's own rate (Cost Settings) is the 1st batch / older stock.
+    // Report warnings the owner has looked at and ignored (owner, 2026-11-11): one row per warning,
+    // with the figure it had - when that figure changes the warning shows again.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.report_warning_ignores (
+        kind           TEXT NOT NULL,
+        job_id         INTEGER NOT NULL,
+        delivery_index INTEGER NOT NULL,
+        value          NUMERIC,
+        ignored_by     TEXT,
+        ignored_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (kind, job_id, delivery_index)
+      )
+    `;
     await sql`
       CREATE TABLE IF NOT EXISTS finance.cost_batch_rates (
         item_id    INTEGER NOT NULL,
@@ -2966,6 +2981,44 @@ app.get('/api/cost-batches', requirePermission('rpt_cost_report', 'view'), async
       allocs: allocs.map(r => ({ tx_id: r.id, item_id: r.item_id, alloc: r.batch_alloc })),
       rates: rates.map(r => ({ item_id: r.item_id, batch: r.batch, rate: Number(r.rate) || 0, per_qty: Number(r.per_qty) || 1, unit: r.unit, gst_pct: Number(r.gst_pct) || 0 })),
     });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Dashboard Report warnings: the ignored ones (owner, 2026-11-11).
+const WARNING_KINDS = new Set(['wastage-negative', 'packets-over']);
+app.get('/api/report-warnings/ignored', requirePermission('dashboard_tab_access', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const rows = await getDb()`SELECT kind, job_id, delivery_index, value, ignored_by, ignored_at FROM finance.report_warning_ignores`;
+    res.json(rows.map(r => ({ ...r, value: r.value === null ? null : Number(r.value) })));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/report-warnings/ignore', requirePermission('dash_btn_ignore_warning'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const b = req.body || {};
+    const kind = String(b.kind || ''), jobId = parseInt(b.job_id, 10), idx = parseInt(b.delivery_index, 10);
+    const value = b.value === null || b.value === undefined || b.value === '' ? null : Number(b.value);
+    if (!WARNING_KINDS.has(kind) || !(jobId > 0) || !(idx >= 0) || (value !== null && !Number.isFinite(value))) return res.status(400).json({ error: 'Not a warning that can be ignored.' });
+    await sql`
+      INSERT INTO finance.report_warning_ignores (kind, job_id, delivery_index, value, ignored_by)
+      VALUES (${kind}, ${jobId}, ${idx}, ${value}, ${req.user?.email || null})
+      ON CONFLICT (kind, job_id, delivery_index) DO UPDATE SET value = EXCLUDED.value, ignored_by = EXCLUDED.ignored_by, ignored_at = NOW()`;
+    await logAudit(sql, req, { action: 'report_warning.ignore', entityType: 'job', entityId: jobId,
+      summary: `Dashboard: ignored the ${kind === 'wastage-negative' ? 'wastage below 0' : 'packets over the job card'} warning on Job E-${jobId}, delivery #${idx + 1}${value !== null ? ' (' + value + ')' : ''}` });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/report-warnings/ignore/:kind/:job_id/:index', requirePermission('dash_btn_ignore_warning'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const kind = String(req.params.kind || ''), jobId = parseInt(req.params.job_id, 10), idx = parseInt(req.params.index, 10);
+    if (!WARNING_KINDS.has(kind) || !(jobId > 0) || !(idx >= 0)) return res.status(400).json({ error: 'Not a warning.' });
+    await sql`DELETE FROM finance.report_warning_ignores WHERE kind = ${kind} AND job_id = ${jobId} AND delivery_index = ${idx}`;
+    await logAudit(sql, req, { action: 'report_warning.unignore', entityType: 'job', entityId: jobId,
+      summary: `Dashboard: the ${kind === 'wastage-negative' ? 'wastage below 0' : 'packets over the job card'} warning on Job E-${jobId}, delivery #${idx + 1} shows again` });
+    res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Jobs Report Batch column (owner, 2026-11-10): the batch numbers each stock-out took.
