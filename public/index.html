@@ -2326,6 +2326,16 @@
   .lc-rep th, .lc-rep td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; vertical-align: middle; }
   .lc-rep th { background: var(--bg2); font-size: 11.5px; font-weight: 700; white-space: nowrap; }
   .lc-rep td.lc-ok { color: #166534; font-weight: 900; text-align: center; }
+  .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .lc-mchip { padding: 6px 12px; border-radius: 16px; border: 1.5px solid var(--border2); background: #fff; font-weight: 700; font-size: 13px; cursor: pointer; }
+  .lc-mchip.is-on { background: #155e75; border-color: #155e75; color: #fff; }
+  .lc-mchip-n { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 3px; border-radius: 9px; background: rgba(0,0,0,.08); font-size: 11px; }
+  .lc-mchip.is-on .lc-mchip-n { background: rgba(255,255,255,.25); }
+  .lc-legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin-bottom: 8px; }
+  .lc-legend-sec { border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
+  .lc-legend-name { font-weight: 900; text-transform: uppercase; letter-spacing: .04em; font-size: 11.5px; margin-bottom: 4px; }
+  .lc-legend-pt { line-height: 1.35; margin-bottom: 3px; }
+  .lc-legend .urdu { color: var(--text2); line-height: 1.6; font-size: 12px; }
   .lc-rep td.lc-no { color: #b91c1c; font-weight: 900; text-align: center; }
   .lc-rep td.lc-na { color: var(--text2); text-align: center; }
   .lc-rep td.lc-cl-y { background: #dcfce7; color: #166534; font-weight: 900; text-align: center; }
@@ -26346,9 +26356,9 @@ let _costRates = null;        // Map: key -> { key, category, label, rate, per_q
 let _costBoardRates = null;   // Map: job id -> this job's own Rs/kg
 let _costLastRows = null, _costLastTotals = null;
 // ── Line Clearance report (owner, 2026-11-11) ───────────────
-// Every entry QA saved at the Station, filtered by date / machine / form;
-// Print gives one page per machine laid out like the paper log.
-const lcState = { from: '', to: '', machine: '', form: '', rows: null };
+// A bar of machines (with a search box) - one log per machine. Picking a machine shows its check
+// points on top. Waste: the previous job's job card waste (green) and what QA counted (red).
+const lcState = { from: '', to: '', machine: '', search: '', rows: null };
 function openLineClearancePage() {
   openReportsGroup('line-clearance-group');
   setReportsTab('line-clearance');
@@ -26370,69 +26380,109 @@ function lcSetFilter(k, v) {
   lcState[k] = v;
   if (k === 'from' || k === 'to') openLineClearanceReport(); else renderLineClearanceReport();
 }
-function lcFilteredRows() {
-  return (lcState.rows || []).filter(r => (!lcState.machine || r.machine === lcState.machine) && (!lcState.form || r.form === lcState.form));
+// Typing in the search box keeps the cursor: only the bar and the logs redraw.
+function lcSearch(v) {
+  lcState.search = v;
+  const el = document.getElementById('lc-rep-body');
+  if (el) el.innerHTML = lcBodyHtml();
 }
+function lcMatches(r, q) {
+  if (!q) return true;
+  return [r.machine, r.prev_job, r.new_job, r.prev_company, r.new_company, r.qa_name, r.remarks].some(v => String(v || '').toLowerCase().includes(q));
+}
+function lcSearched() { const q = lcState.search.trim().toLowerCase(); return (lcState.rows || []).filter(r => lcMatches(r, q)); }
+function lcFilteredRows() { return lcSearched().filter(r => !lcState.machine || r.machine === lcState.machine); }
 // Point cell: ticked, not ticked, or not part of this entry's sections.
 function lcPointMark(e, n) {
   if (!lcPointNums(e.form, e.sections).includes(n)) return ['lc-na', '&ndash;'];
   return (e.points || {})[n] ? ['lc-ok', '&#10003;'] : ['lc-no', '&#10007;'];
 }
-function lcTableHtml(form, rows) {
-  const nums = lcAllNums(form);
-  const head = `<tr><th>#</th><th>Date</th><th>Time</th><th>Machine</th><th>Section</th><th>Previous Job</th><th>Waste</th><th>New Job</th>
-    ${nums.map(n => `<th style="background:${(lcSectionOf(form, n) || {}).color || ''};color:#1a1a1a;" title="${esc(((lcSectionOf(form, n) || {}).points || []).find(pt => pt[0] === n)?.[1] || '')}">${n}</th>`).join('')}
+// One log per machine (and per paper form, if a machine ever has both).
+function lcGroups(rows) {
+  const map = new Map();
+  for (const r of rows) { const k = r.machine + '\u0000' + r.form; if (!map.has(k)) map.set(k, { machine: r.machine, form: r.form, list: [] }); map.get(k).list.push(r); }
+  return [...map.values()].sort((x, y) => x.machine.localeCompare(y.machine) || x.form.localeCompare(y.form));
+}
+// The sections a machine's entries used, in the paper form's order, and their point numbers.
+function lcGroupSections(g) {
+  const used = new Set(g.list.flatMap(e => e.sections || []));
+  return LC_FORMS[g.form].sections.filter(x => used.has(x.name));
+}
+function lcCompanyText(e) {
+  const p = e.prev_company || '', n = e.new_company || '';
+  return p && n && p !== n ? `${esc(p)} &rarr; ${esc(n)}` : esc(p || n);   // HTML
+}
+function lcWasteHtml(e, print) {
+  const jc = e.jc_waste != null ? `<span style="color:#166534;font-weight:700;" title="Job card waste of the previous job">${esc(lcWaste(e.jc_waste))}</span>` : '';
+  const qa = e.waste != null && e.waste !== '' ? `<span style="color:#b91c1c;font-weight:700;" title="Waste QA counted">${esc(lcWaste(e.waste))}</span>` : '';
+  return jc && qa ? `${jc}${print ? ' / ' : '<br>'}${qa}` : (jc || qa);
+}
+function lcLegendHtml(secs) {
+  return `<div class="lc-legend">${secs.map(x => `<div class="lc-legend-sec" style="background:${x.color};">
+    <div class="lc-legend-name">${esc(x.name)} <span class="urdu" dir="rtl" lang="ur">${x.ur}</span></div>
+    ${x.points.map(([n, en, ur]) => `<div class="lc-legend-pt"><b>${n}</b> ${esc(en)} <span class="urdu" dir="rtl" lang="ur">${ur}</span></div>`).join('')}</div>`).join('')}</div>`;
+}
+function lcTableHtml(g, withLegend) {
+  const secs = lcGroupSections(g);
+  const nums = secs.flatMap(x => x.points.map(p => p[0]));
+  const head = `<tr><th>#</th><th>Date</th><th>Time</th><th>Previous Job</th><th>Company</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
+    ${nums.map(n => `<th style="background:${(lcSectionOf(g.form, n) || {}).color || ''};color:#1a1a1a;text-align:center;">${n}</th>`).join('')}
     <th>Line Cleared</th><th>QC</th><th>QA</th><th>Remarks</th></tr>`;
-  const body = rows.map((e, i) => `<tr><td>${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td>${esc(e.entry_time || '')}</td><td>${esc(e.machine)}</td>
-    <td>${esc((e.sections || []).join(', '))}</td><td>${esc(e.prev_job)}</td><td style="text-align:right;">${esc(lcWaste(e.waste))}</td><td>${esc(e.new_job)}</td>
+  const body = g.list.map((e, i) => `<tr><td>${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td>${esc(e.entry_time || '')}</td>
+    <td>${esc(e.prev_job)}</td><td>${lcCompanyText(e)}</td><td style="text-align:right;">${lcWasteHtml(e)}</td><td>${esc(e.new_job)}</td>
     ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.cleared ? 'lc-cl-y' : 'lc-cl-n'}">${e.cleared ? 'Y' : 'N'}</td><td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td></tr>`).join('');
-  return `<h3 style="margin:18px 0 8px;font-size:15px;">${esc(LC_FORMS[form].title)} <span style="font-weight:500;color:var(--text2);font-size:13px;">(${rows.length} entr${rows.length === 1 ? 'y' : 'ies'})</span></h3>
-    <div style="overflow-x:auto;"><table class="ss-table lc-rep" style="width:100%;"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
+  return `<div class="lc-log">
+    <h3 style="margin:14px 0 6px;font-size:15px;">${esc(g.machine)} <span style="font-weight:500;color:var(--text2);font-size:12.5px;">${esc(secs.map(x => x.name).join(' · '))} &middot; ${g.list.length} entr${g.list.length === 1 ? 'y' : 'ies'}</span></h3>
+    ${withLegend ? lcLegendHtml(secs) : ''}
+    <div style="overflow-x:auto;"><table class="ss-table lc-rep" style="width:100%;"><thead>${head}</thead><tbody>${body}</tbody></table></div></div>`;
+}
+function lcBodyHtml() {
+  const searched = lcSearched();
+  const counts = new Map();
+  for (const r of searched) counts.set(r.machine, (counts.get(r.machine) || 0) + 1);
+  const machines = [...counts.keys()].sort((x, y) => x.localeCompare(y));
+  if (lcState.machine && !counts.has(lcState.machine) && !lcState.search) lcState.machine = '';
+  const chip = (m, label, n) => `<button class="lc-mchip ${lcState.machine === m ? 'is-on' : ''}" onclick="lcSetFilter('machine', ${esc(JSON.stringify(m))})">${esc(label)} <span class="lc-mchip-n">${n}</span></button>`;
+  const bar = `<div class="lc-mbar">${chip('', 'All machines', searched.length)}${machines.map(m => chip(m, m, counts.get(m))).join('')}</div>`;
+  const rows = lcFilteredRows();
+  const groups = lcGroups(rows);
+  const notCleared = rows.filter(r => !r.cleared).length;
+  const summary = `<div style="color:var(--text2);font-size:13px;margin:4px 0 2px;">${rows.length} entr${rows.length === 1 ? 'y' : 'ies'}${rows.length ? ` &middot; <span style="color:#166534;font-weight:700;">${rows.length - notCleared} cleared</span> &middot; <span style="color:#b91c1c;font-weight:700;">${notCleared} not cleared</span>` : ''}</div>`;
+  return bar + summary + (groups.length ? groups.map(g => lcTableHtml(g, !!lcState.machine)).join('')
+    : '<div class="empty" style="padding:28px;text-align:center;">No line clearance entries for these filters.</div>');
 }
 function renderLineClearanceReport() {
   const pane = document.getElementById('rt-line-clearance');
   if (!pane) return;
-  const all = lcState.rows || [];
-  const machines = [...new Set(all.map(r => r.machine))].sort();
-  const rows = lcFilteredRows();
-  const bar = `<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:12px;">
-    <div><div class="dash-flbl">From</div><input type="date" value="${esc(lcState.from)}" onchange="lcSetFilter('from', this.value)"></div>
-    <div><div class="dash-flbl">To</div><input type="date" value="${esc(lcState.to)}" onchange="lcSetFilter('to', this.value)"></div>
-    <div><div class="dash-flbl">Machine</div><select onchange="lcSetFilter('machine', this.value)"><option value="">All machines</option>${machines.map(m => `<option value="${esc(m)}" ${lcState.machine === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></div>
-    <div><div class="dash-flbl">Log</div><select onchange="lcSetFilter('form', this.value)"><option value="">Both logs</option>${Object.entries(LC_FORMS).map(([k, f]) => `<option value="${k}" ${lcState.form === k ? 'selected' : ''}>${esc(f.title)}</option>`).join('')}</select></div>
-    <button class="btn btn-primary" style="margin-left:auto;" onclick="printLineClearance()">&#128424; Print</button>
-  </div>`;
-  const forms = Object.keys(LC_FORMS).filter(k => rows.some(r => r.form === k));
-  const notCleared = rows.filter(r => !r.cleared).length;
-  pane.innerHTML = `<h2 style="margin:0 0 4px;font-size:20px;">Line Clearance Log</h2>
-    <div style="color:var(--text2);font-size:13px;margin-bottom:12px;">${rows.length} entr${rows.length === 1 ? 'y' : 'ies'}${rows.length ? ` &middot; <span style="color:#166534;font-weight:700;">${rows.length - notCleared} cleared</span> &middot; <span style="color:#b91c1c;font-weight:700;">${notCleared} not cleared</span>` : ''}</div>
-    ${bar}
-    ${forms.length ? forms.map(k => lcTableHtml(k, rows.filter(r => r.form === k))).join('') : '<div class="empty" style="padding:28px;text-align:center;">No line clearance entries for these filters.</div>'}`;
+  pane.innerHTML = `<h2 style="margin:0 0 10px;font-size:20px;">Line Clearance Log</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:10px;">
+      <div><div class="dash-flbl">From</div><input type="date" value="${esc(lcState.from)}" onchange="lcSetFilter('from', this.value)"></div>
+      <div><div class="dash-flbl">To</div><input type="date" value="${esc(lcState.to)}" onchange="lcSetFilter('to', this.value)"></div>
+      <div style="flex:1;min-width:200px;max-width:360px;"><div class="dash-flbl">Search</div><input type="search" placeholder="Machine, job no., company..." value="${esc(lcState.search)}" oninput="lcSearch(this.value)" style="width:100%;"></div>
+      <button class="btn btn-primary" style="margin-left:auto;" onclick="printLineClearance()">&#128424; Print</button>
+    </div>
+    <div id="lc-rep-body">${lcBodyHtml()}</div>`;
 }
-// One page per log + machine, laid out like the paper form.
+// One page per machine, laid out like the paper log (only its own sections' points).
 function printLineClearance() {
   const rows = lcFilteredRows();
   if (!rows.length) { notify('Nothing to print - empty filter result.'); return; }
   const td = 'border:1px solid #000;padding:3px 4px;';
-  const groups = [];
-  for (const form of Object.keys(LC_FORMS)) {
-    const byMachine = new Map();
-    for (const r of rows.filter(x => x.form === form)) { if (!byMachine.has(r.machine)) byMachine.set(r.machine, []); byMachine.get(r.machine).push(r); }
-    for (const [machine, list] of [...byMachine.entries()].sort((a, b) => a[0].localeCompare(b[0]))) groups.push({ form, machine, list });
-  }
-  const uniq = arr => [...new Set(arr.filter(Boolean))].join(', ');
+  const groups = lcGroups(rows);
   const pages = groups.map((g, gi) => {
     const f = LC_FORMS[g.form];
-    const nums = lcAllNums(g.form);
-    const legend = f.sections.map(x => x.points.map((pt, j) => `<tr>
+    const secs = lcGroupSections(g);
+    const nums = secs.flatMap(x => x.points.map(p => p[0]));
+    const legend = secs.map(x => x.points.map((pt, j) => `<tr>
       ${j === 0 ? `<td rowspan="${x.points.length}" style="${td}background:${x.color};font-weight:bold;width:90px;">${esc(x.name)}<div style="font-weight:normal;" dir="rtl">${x.ur}</div></td>` : ''}
       <td style="${td}background:${x.color};text-align:center;font-weight:bold;width:22px;">${pt[0]}</td><td style="${td}">${esc(pt[1])}</td><td style="${td}text-align:right;" dir="rtl">${pt[2]}</td></tr>`).join('')).join('');
-    const head = `<tr style="background:#f7f1ea;"><th style="${td}">#</th><th style="${td}">Date</th><th style="${td}">Time</th><th style="${td}">Previous Job No.</th><th style="${td}">Waste</th><th style="${td}">New Job No.</th>
+    const head = `<tr style="background:#f7f1ea;"><th style="${td}">#</th><th style="${td}">Date</th><th style="${td}">Time</th><th style="${td}">Previous Job No.</th><th style="${td}">Company</th>
+      <th style="${td}">Waste <span style="font-weight:normal;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th style="${td}">New Job No.</th>
       ${nums.map(n => `<th style="${td}background:${(lcSectionOf(g.form, n) || {}).color};width:20px;">${n}</th>`).join('')}
       <th style="${td}">Line Cleared</th><th style="${td}">QC</th><th style="${td}">QA</th><th style="${td}">Remarks</th></tr>`;
     const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(e.entry_time || '')}</td>
-      <td style="${td}">${esc(e.prev_job)}</td><td style="${td}text-align:right;">${esc(lcWaste(e.waste))}</td><td style="${td}">${esc(e.new_job)}</td>
+      <td style="${td}">${esc(e.prev_job)}</td><td style="${td}">${lcCompanyText(e)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${esc(e.new_job)}</td>
       ${nums.map(n => { const [c] = lcPointMark(e, n); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;' : c === 'lc-no' ? 'color:#b91c1c;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
       <td style="${td}text-align:center;font-weight:bold;background:${e.cleared ? '#dcfce7' : '#fee2e2'};">${e.cleared ? 'Y' : 'N'}</td>
       <td style="${td}text-align:center;font-weight:bold;color:${e.qc_cleared ? '#166534' : '#b91c1c'};">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');
@@ -26442,7 +26492,7 @@ function printLineClearance() {
         dateText: `${fmtDMY(lcState.from)} - ${fmtDMY(lcState.to)}`, note: `Generated: ${fmtDMYT(new Date())}` })}</div>
       <table style="width:100%;font-size:8.5pt;border-collapse:collapse;margin-bottom:6px;"><tr>
         <td style="${td}"><b>Machine Name:</b> ${esc(g.machine)}</td>
-        <td style="${td}"><b>Section:</b> ${esc(uniq(g.list.flatMap(e => e.sections || [])))}</td>
+        <td style="${td}"><b>Section:</b> ${esc(secs.map(x => x.name).join(', '))}</td>
         <td style="${td}"><b>Period:</b> ${esc(fmtDMY(dates[0]))} to ${esc(fmtDMY(dates[dates.length - 1]))}</td></tr></table>
       <table style="width:100%;font-size:7.5pt;border-collapse:collapse;margin-bottom:6px;"><tr><td colspan="4" style="${td}font-weight:bold;">CHECK POINTS &middot; &#10003; OK &nbsp; &#10007; Not OK &nbsp; &ndash; N/A</td></tr>${legend}</table>
       <table style="width:100%;font-size:8pt;border-collapse:collapse;">${head}${body}</table>

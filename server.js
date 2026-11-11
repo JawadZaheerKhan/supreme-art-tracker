@@ -149,6 +149,11 @@ const LC_FORMS = {
   A: [['CTP', [1, 2, 3, 4]], ['Printing', [5, 6, 7, 8]], ['Coating', [9, 10]]],
   B: [['Die Cutting', [1, 2]], ['Breaking', [3, 4]], ['Sorting', [5, 6]], ['Folder Gluer', [7, 8, 9]], ['FG Dispatch', [10, 11, 12]]],
 };
+// Each section's waste row on the job card (CTP and FG Dispatch have none).
+const LC_SECTION_WASTE_KEYS = {
+  Printing: ['printed_waste_sheets'], Coating: ['uv_waste_sheets', 'embellish_waste_sheets'], 'Die Cutting': ['die_cutting_waste'],
+  Breaking: ['sorted_cartons_waste'], Sorting: ['sorted_cartons_waste'], 'Folder Gluer': ['pasting_waste_qty'],
+};
 // Station type of an operators entry -> its Access Register column.
 const OPERATOR_KIND_ROLE = { qc: 'operator_qc', qa: 'operator_qa' };
 const infoOnlyRoles = roles => Array.isArray(roles) && roles.length > 0 && roles.every(r => INFO_ROLE_IDS.has(r));
@@ -7921,7 +7926,34 @@ app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', '
     const sql = getDb();
     const okDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? d : null;
     const from = okDate(req.query.from) || '1900-01-01', to = okDate(req.query.to) || '2999-12-31';
-    res.json(await sql`SELECT * FROM line_clearance WHERE entry_date BETWEEN ${from} AND ${to} ORDER BY entry_date, entry_time, id`);
+    const rows = await sql`SELECT * FROM line_clearance WHERE entry_date BETWEEN ${from} AND ${to} ORDER BY entry_date, entry_time, id`;
+    // The jobs QA typed (E-1068, 1068 ...): their company, and the previous job's own waste on the
+    // job card for this machine's section(s) - entries on this machine when the card names it.
+    const jobIdOf = v => { const m = String(v || '').match(/\d+/); return m ? parseInt(m[0], 10) : null; };
+    const ids = [...new Set(rows.flatMap(r => [jobIdOf(r.prev_job), jobIdOf(r.new_job)]).filter(Boolean))];
+    const jobs = ids.length ? await sql`SELECT id, client, particulars FROM jobs WHERE id = ANY(${ids})` : [];
+    const byId = new Map(jobs.map(j => [j.id, j]));
+    const rowSum = (row, machine) => {
+      if (!row) return null;
+      if (Array.isArray(row.entries) && row.entries.length) {
+        const mine = row.entries.filter(e => e && String(e.machine || '').trim().toLowerCase() === String(machine || '').trim().toLowerCase());
+        return (mine.length ? mine : row.entries).reduce((a, e) => a + parseQtyMult((e && e.qty) || '').total, 0);
+      }
+      const q = String(row.quantity || '').trim();
+      return q ? q.split('|').reduce((a, x) => a + parseQtyMult(x).total, 0) : null;
+    };
+    for (const r of rows) {
+      const pj = byId.get(jobIdOf(r.prev_job)), nj = byId.get(jobIdOf(r.new_job));
+      r.prev_company = pj ? pj.client : null;
+      r.new_company = nj ? nj.client : null;
+      let total = null;
+      if (pj) {
+        const keys = new Set((r.sections || []).flatMap(sec => LC_SECTION_WASTE_KEYS[sec] || []));
+        for (const k of keys) { const v = rowSum((pj.particulars || {})[k], r.machine); if (v != null) total = (total || 0) + v; }
+      }
+      r.jc_waste = total;
+    }
+    res.json(rows);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
