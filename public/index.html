@@ -11723,7 +11723,7 @@ function renderInvCardHtml(it) {
         <button class="btn btn-sm btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was corrected today — a manual edit or a Reverse.', it.id) : ''}</button>
-        ${seeBtn('inv_btn_batches') ? `<button class="btn btn-sm" onclick="openInvBatches(${it.id})" title="Batches of this paper and their stickers">Batches</button>` : ''}
+        ${seeBtn('inv_btn_batches') && !it.is_offcut ? `<button class="btn btn-sm" onclick="openInvBatches(${it.id})" title="Batches of this paper and their stickers">Batches</button>` : ''}
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${seeBtn('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
@@ -11756,7 +11756,7 @@ function renderInvBrandRow(it) {
       <div class="ibr-actions">
         <button class="btn btn-sm btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
-        ${seeBtn('inv_btn_batches') ? `<button class="btn btn-sm" onclick="openInvBatches(${it.id})" title="Batches of this brand and their stickers">Batches</button>` : ''}
+        ${seeBtn('inv_btn_batches') && !it.is_offcut ? `<button class="btn btn-sm" onclick="openInvBatches(${it.id})" title="Batches of this brand and their stickers">Batches</button>` : ''}
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${seeBtn('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
       </div>
@@ -15234,7 +15234,7 @@ async function openInvSticker(itemId, n, tx) {
 // Every Stock In row (report, History) has a Sticker button; it finds its row here.
 let _invHistRows = [];
 function invStickerTxOk(t) {
-  return !!(t && t.item_id && (+t.change || 0) > 0 && !t.reverses_tx_id && (t.reason === 'delivery' || t.reason === 'import-received'));
+  return !!(t && t.item_id && !invIsOffcutItem(t.item_id) && (+t.change || 0) > 0 && !t.reverses_tx_id && (t.reason === 'delivery' || t.reason === 'import-received'));
 }
 function invStickerBtnHtml(t) {
   if (!invStickerTxOk(t) || !seeBtn('inv_btn_batches')) return '';
@@ -15426,7 +15426,10 @@ function invPkts(sheets, paperType) { const p = sheets / packetSize(paperType ||
 // with stock, the oldest ticked (owner, 2026-11-03); tick 2, 3 or more to take from
 // them, oldest first. Left as it opened, more than the oldest holds carries on into
 // the next batch. withItem: data-item-id for a brand line.
+// An offcut item: no batches anywhere (owner, 2026-11-11).
+function invIsOffcutItem(itemId) { const it = inventoryAll.find(x => Number(x.id) === Number(itemId)); return !!(it && it.is_offcut); }
 function invBatchSelectHtml(itemId, dir, cls, withItem) {
+  if (invIsOffcutItem(itemId)) return '';
   const it = inventoryAll.find(x => x.id === itemId);
   const list = _invBatchCache.get(itemId) || [];
   const u = it ? packetUnitLabel(it.paper_type).toLowerCase() : 'packets';
@@ -15530,6 +15533,7 @@ function invBatchShort(itemId, n, sheets) {
 }
 // The Batch cell of a ledger row: each batch it moved, with the amount when more than one.
 function txBatchHtml(t) {
+  if (t && t.item_id && invIsOffcutItem(t.item_id)) return '<span style="color:var(--text3)">&mdash;</span>';
   let alloc = t && t.batch_alloc;
   if (typeof alloc === 'string') { try { alloc = JSON.parse(alloc); } catch (e) { alloc = null; } }
   if (Array.isArray(alloc) && alloc.length) {
@@ -15559,7 +15563,7 @@ async function bulkOutRefreshBatches(idx) {
   const itemId = parseInt(tr.querySelector('.bulkout-item').value, 10);
   if (!cell) return;
   const it = itemId ? inventoryAll.find(x => x.id === itemId) : null;
-  if (!it) { cell.innerHTML = ''; return; }
+  if (!it || it.is_offcut) { cell.innerHTML = ''; return; }
   const members = paperGroupMembers(it);
   const ids = members.length > 1 ? [...members].sort((a, b) => (b.current_balance || 0) - (a.current_balance || 0)).map(m => m.id) : [itemId];
   await Promise.all(ids.map(invBatchesOf));
@@ -18195,6 +18199,7 @@ function jobPaperBatchesText(j) {
   const by = { primary: new Set(), secondary: new Set(), third: new Set() };
   for (const x of (Array.isArray(j.issued_items) ? j.issued_items : [])) {
     if (!x || !(parseFloat(x.sheets) > 0)) continue;
+    if (x.item_id && invIsOffcutItem(x.item_id)) continue;   // offcuts have no batches
     const src = x.source === 'secondary' || x.source === 'third' ? x.source : 'primary';
     const ns = x.tx_id ? _jrTxBatches.get(Number(x.tx_id)) : null;
     for (const n of (ns && ns.length ? ns : [1])) by[src].add(n);
@@ -25972,11 +25977,13 @@ function crBatchEntry(itemId, n) {
   const it = crItemById(itemId);
   if (!it || !_costRates) return null;
   const g = _crPaperKey(it.paper_type, it.brand);
+  if (it.is_offcut) return _costRates.get(g) || null;   // offcuts have no batches: the paper rate
   return _costRates.get(crGroupBatchKey(g, n)) || _costRates.get(g) || null;
 }
 function crBatchOwn(itemId, n) { const it = crItemById(itemId); return !!(it && _costRates && _costRates.get(crGroupBatchKey(_crPaperKey(it.paper_type, it.brand), n))); }
 function crBatchInfo(itemId, n) { return _costBatchList.find(b => Number(b.item_id) === Number(itemId) && Number(b.n) === Number(n)) || null; }
 function crBatchName(itemId, n) {
+  if (invIsOffcutItem(itemId)) return 'offcut';
   const b = crBatchInfo(itemId, n);
   return `${ordinalNum(n)} batch${b ? ' (' + (b.batch_label || (String(n).padStart(2, '0') + '-' + String(b.at || '').slice(0, 4))) + ')' : ''}`;
 }
@@ -26014,8 +26021,8 @@ function crJobBoardParts(j, main) {
       if (!(sh > 0)) continue;
       const alloc = x.tx_id ? _costAllocs.get(Number(x.tx_id)) : null;
       const allocSum = Array.isArray(alloc) ? alloc.reduce((a, b) => a + (+b.sheets || 0), 0) : 0;
-      if (allocSum > 0) for (const b of alloc) add(x.item_id, +b.n || 1, sh * (+b.sheets || 0) / allocSum);
-      else add(x.item_id, 1, sh);
+      if (allocSum > 0 && !invIsOffcutItem(x.item_id)) for (const b of alloc) add(x.item_id, +b.n || 1, sh * (+b.sheets || 0) / allocSum);
+      else add(x.item_id, 1, sh);   // no batch record, or an offcut (offcuts have no batches)
     }
     const total = [...split.values()].reduce((a, v) => a + v, 0);
     if (!(total > 0)) { split.clear(); add(pp.itemId || 0, 1, 1); }
@@ -26492,7 +26499,7 @@ function openCostSettings() {
 // sizes - worked out size by size as the Batches window does (a later batch holds what came in
 // less what went out, never more than the balance; the 1st batch the rest).
 function csGroupBatches(groupKey) {
-  const items = (inventoryAll || []).filter(i => i && !i.deleted_at && _crPaperKey(i.paper_type, i.brand) === groupKey);
+  const items = (inventoryAll || []).filter(i => i && !i.deleted_at && !i.is_offcut && _crPaperKey(i.paper_type, i.brand) === groupKey);
   const byN = new Map();
   const get = n => { if (!byN.has(n)) byN.set(n, { n, left: 0, sizes: new Set(), first: null, last: null, refs: new Set() }); return byN.get(n); };
   for (const it of items) {
