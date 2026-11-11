@@ -344,7 +344,7 @@ function getDb() {
 // Bumped again for the Access Register row inv_btn_print_sticker (split off inv_btn_batches, 2026-11-11).
 // Bumped again for Edit / Hidden buttons - View on them becomes Hidden (Print: Edit), 2026-11-11.
 // Bumped again for QA Line Clearance (operators.kind, line_clearance, QC / QA access columns), 2026-11-11.
-const SCHEMA_VERSION = 'v2026-11-11-line-clearance-qc';   // + line_clearance.qc_cleared
+const SCHEMA_VERSION = 'v2026-11-11-line-clearance-waste';   // + line_clearance.qc_cleared, .waste
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1435,6 +1435,8 @@ async function initDb() {
     await sql`CREATE INDEX IF NOT EXISTS line_clearance_date_idx ON line_clearance (entry_date)`;
     // QC's tick (owner, 2026-11-11): the line was cleared by QC (the line manager).
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS qc_cleared BOOLEAN NOT NULL DEFAULT false`;
+    // Waste QA counts for the previous job (owner, 2026-11-11); empty when not counted.
+    await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS waste NUMERIC`;
     // Every floor operator (person) in one list (owner, 2026-10-24): a
     // machine picks its people from it. Filled from the machines' people
     // here, and kept in step whenever a machine's people are saved.
@@ -7889,11 +7891,13 @@ app.post('/api/station/line-clearance', requireStationUser, async (req, res) => 
     const points = {};
     for (const n of nums) points[n] = given[n] === true;
     const cleared = nums.every(n => points[n]);
+    const waste = b.waste === '' || b.waste == null ? null : Number(b.waste);
+    if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return res.status(400).json({ error: 'Waste must be a number' });
     const qaName = lcText(b.qa_name, 80) || v.operator.name;
     const row = (await sql`
-      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, prev_job, new_job, points, cleared, qc_cleared, remarks, qa_name, qa_operator_id)
+      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, prev_job, new_job, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
       VALUES (${date}, ${lcText(b.entry_time, 10)}, ${form}, ${sections}, ${machine},
-              ${prev}, ${next}, ${JSON.stringify(points)}, ${cleared}, ${b.qc_cleared === true}, ${lcText(b.remarks, 500)}, ${qaName}, ${v.operator.id})
+              ${prev}, ${next}, ${JSON.stringify(points)}, ${cleared}, ${b.qc_cleared === true}, ${waste}, ${lcText(b.remarks, 500)}, ${qaName}, ${v.operator.id})
       RETURNING *`)[0];
     await logAudit(sql, req, { action: 'line_clearance.create', entityType: 'line_clearance', entityId: row.id,
       summary: `Line clearance ${machine}: ${prev} → ${next} (${cleared ? 'cleared' : 'NOT cleared'}) by ${qaName}` });
