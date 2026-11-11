@@ -12,6 +12,99 @@ const app = express();
 // limit (e.g. 437 KB of the 483 KB shell, then nothing). Its streaming relies
 // on the response emitting 'drain', which Vercel's wrapped response does not
 // reliably do. Vercel's CDN already compresses on the way to the browser.
+
+// ── Origin-transfer meter ────────────────────────────────────────
+// Vercel bills Fast Origin Transfer on the bytes this function sends, but its
+// free tier does not say WHICH routes they went to. This counts requests and
+// response bytes per route so that question has an answer:
+//   GET /api/admin/transfer-stats?days=7     (Admin)
+// Counts are kept in memory and written to transfer_stats about once a
+// minute, so it adds no query to a normal request. It is a sample, not an
+// audit: a batch still in memory when an instance is recycled is lost.
+// Nothing in here may ever break or slow a real request - every failure is
+// swallowed.
+const xferPending = new Map();          // 'GET /api/jobs?since' -> [requests, bytes]
+const XFER_FLUSH_MS = 60 * 1000;
+const XFER_MAX_KEYS = 400;
+let xferLastFlush = Date.now();
+let xferFlushing = false;
+let xferTableReady = false;
+function xferRouteKey(req, res) {
+  let route;
+  if (req.route && req.route.path) {
+    route = req.route.path === '*' ? '(app shell)' : String(req.route.path);
+    // Which query parameters were used (names only, never values): tells the
+    // changed-only job refresh (?since) from the full paged load (?sync).
+    if (route.startsWith('/api/')) {
+      const keys = Object.keys(req.query || {}).filter(k => /^[a-z_]{1,24}$/i.test(k)).sort().slice(0, 4);
+      if (keys.length) route += '?' + keys.join('&');
+    }
+  } else if (res.statusCode < 400 && !req.path.startsWith('/api/')) {
+    // No route matched but it succeeded: a file out of public/.
+    route = (req.path === '/' || req.path.endsWith('.html')) ? '(app shell)' : '(static) ' + req.path;
+  } else {
+    route = '(unmatched)';
+  }
+  return req.method + ' ' + route;
+}
+async function xferFlush() {
+  if (xferFlushing || !xferPending.size) return;
+  xferFlushing = true;
+  const batch = [...xferPending].map(([r, v]) => ({ r, n: v[0], b: v[1] }));
+  xferPending.clear();
+  xferLastFlush = Date.now();
+  try {
+    await dbReady;
+    const sql = getDb();
+    // Created here rather than in initDb so the meter needs no SCHEMA_VERSION
+    // bump: one extra roundtrip per cold instance, on its first flush only.
+    if (!xferTableReady) {
+      await sql`
+        CREATE TABLE IF NOT EXISTS transfer_stats (
+          day      DATE   NOT NULL,
+          route    TEXT   NOT NULL,
+          requests BIGINT NOT NULL DEFAULT 0,
+          bytes    BIGINT NOT NULL DEFAULT 0,
+          PRIMARY KEY (day, route)
+        )`;
+      xferTableReady = true;
+    }
+    await sql`
+      INSERT INTO transfer_stats (day, route, requests, bytes)
+      SELECT (NOW() AT TIME ZONE ${BUSINESS_TZ})::date, t.r, t.n, t.b
+      FROM jsonb_to_recordset(${JSON.stringify(batch)}::jsonb) AS t(r text, n bigint, b bigint)
+      ON CONFLICT (day, route) DO UPDATE
+        SET requests = transfer_stats.requests + EXCLUDED.requests,
+            bytes    = transfer_stats.bytes    + EXCLUDED.bytes`;
+  } catch (e) {
+    // Drop the batch. Losing a minute of counts is fine; affecting the app is not.
+  } finally {
+    xferFlushing = false;
+  }
+}
+app.use((req, res, next) => {
+  try {
+    // Flush at the START of a request, not after a response: Vercel may freeze
+    // the instance once nothing is in flight, and this write should ride
+    // along with a request that is.
+    if (Date.now() - xferLastFlush > XFER_FLUSH_MS) xferFlush();
+    res.on('finish', () => {
+      try {
+        // A 304 or a HEAD carries no body. Everything else this app sends
+        // (res.json, sendFile) sets Content-Length, which is the raw size -
+        // the same bytes Vercel meters.
+        const bytes = (res.statusCode === 304 || req.method === 'HEAD') ? 0 : (Number(res.getHeader('content-length')) || 0);
+        let key = xferRouteKey(req, res);
+        if (!xferPending.has(key) && xferPending.size >= XFER_MAX_KEYS) key = '(other)';
+        const v = xferPending.get(key) || [0, 0];
+        v[0] += 1; v[1] += bytes;
+        xferPending.set(key, v);
+      } catch (e) {}
+    });
+  } catch (e) {}
+  next();
+});
+
 // 6mb limit: station voice notes arrive as base64 audio (~1MB for 60s of
 // opus). Default 100kb would 413 them. Vercel itself caps bodies at 4.5MB.
 app.use(express.json({ limit: '6mb' }));
@@ -255,16 +348,31 @@ app.get('/config.js', (req, res) => {
 // The logo effectively never changes, so the CDN caches it for a year; a
 // deploy purges Vercel's cache anyway, so a replaced asset still ships
 // immediately. Browsers re-check daily as a safety valve.
-// index.html is the exception: the browser must check with us on EVERY load,
-// because that's what guarantees everyone picks up the newest deploy right
-// away. That is exactly what `no-cache` means ("store it, but revalidate
-// before each use"). Do NOT add `no-store`: it forbids keeping a copy, so the
-// browser can never send If-None-Match and every load re-downloads the whole
-// ~1.7 MB shell instead of getting a zero-byte 304 when nothing changed.
+// index.html is the exception: the browser must check on EVERY load, because
+// that's what guarantees everyone picks up the newest deploy right away.
+// Two headers, two audiences (see setShellCacheHeaders):
+//   Cache-Control: public, max-age=0, must-revalidate
+//     -> the BROWSER keeps a copy but revalidates before each use, getting a
+//        zero-byte 304 when nothing changed. Do NOT use `no-store` (forbids
+//        the copy, so no 304 ever) and do NOT use `no-cache` here either:
+//        Vercel's CDN refuses to cache a response carrying that directive.
+//   Vercel-CDN-Cache-Control: max-age=31536000
+//     -> Vercel's CDN keeps the shell and answers those checks ITSELF, so the
+//        ~2.4 MB file leaves this function once per deploy per region instead
+//        of once per device per deploy. Vercel strips this header before the
+//        browser sees it. It cannot go stale: the CDN's cache key includes the
+//        deployment, so every deploy starts from an empty cache.
+// The shell is one static file with no per-user content, which is what makes
+// sharing one cached copy between everyone safe. If it ever gains per-user
+// content (server-side templating, a Set-Cookie), remove the CDN header.
+function setShellCacheHeaders(res) {
+  res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+  res.setHeader('Vercel-CDN-Cache-Control', 'max-age=31536000');
+}
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.html')) {
-      res.setHeader('Cache-Control', 'no-cache');
+      setShellCacheHeaders(res);
     } else {
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000');
     }
@@ -14699,11 +14807,48 @@ app.get('/favicon.ico', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'favicon-32.png'));
 });
 
+// Where Fast Origin Transfer went, by route (see the origin-transfer meter at
+// the top of this file). ?days=N, default 7, counted in business-local days.
+app.get('/api/admin/transfer-stats', async (req, res) => {
+  // Admin or Super Admin. Not requireAdmin: that checks 'admin' alone, and an
+  // account can hold super_admin without it (it did on the preview database).
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!userHasRole(req.user, 'admin', 'super_admin')) return res.status(403).json({ error: 'Admin only' });
+  try {
+    await xferFlush();   // include what this instance has not written yet
+    await dbReady;
+    const sql = getDb();
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 7));
+    let rows = [];
+    try {
+      rows = await sql`
+        SELECT route, SUM(requests)::bigint AS requests, SUM(bytes)::bigint AS bytes
+        FROM transfer_stats
+        WHERE day > (NOW() AT TIME ZONE ${BUSINESS_TZ})::date - ${days}::int
+        GROUP BY route ORDER BY SUM(bytes) DESC`;
+    } catch (e) {
+      if (!/transfer_stats/.test(String(e.message))) throw e;   // table not created yet = nothing recorded
+    }
+    const total = rows.reduce((s, r) => s + Number(r.bytes), 0);
+    res.json({
+      days,
+      total_mb: +(total / 1048576).toFixed(1),
+      routes: rows.map(r => ({
+        route: r.route,
+        requests: Number(r.requests),
+        mb: +(Number(r.bytes) / 1048576).toFixed(2),
+        pct: total ? +(Number(r.bytes) * 100 / total).toFixed(1) : 0,
+        avg_kb: Number(r.requests) ? +(Number(r.bytes) / Number(r.requests) / 1024).toFixed(1) : 0,
+      })),
+    });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.get('*', (req, res) => {
   // Deep links (/jobs, /station, …) fall through to here and get the app
-  // shell. Same rule as above: always revalidate (never serve a stale copy),
-  // or users end up running an old build against the live API.
-  res.set('Cache-Control', 'no-cache');
+  // shell, under the same caching rule as the static copy above: the browser
+  // always revalidates, so nobody runs an old build against the live API.
+  setShellCacheHeaders(res);
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
