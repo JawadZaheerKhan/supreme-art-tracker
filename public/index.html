@@ -3165,10 +3165,23 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 .cd-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(118px, 1fr)); gap:6px; }
 .cd-tile { --c:#475569; --t:#f8fafc; background:var(--t); border:1px solid var(--border); border-left:4px solid var(--c); border-radius:9px; padding:6px 8px; min-width:0; display:flex; flex-direction:column; }
 .cd-tile.cd-wide { grid-column:span 2; }
-/* Running now (owner, 2026-11-11): the whole row, a line per machine, nothing cut off. */
-.cd-tile.cd-full { grid-column:1 / -1; }
-.cd-tile.cd-full .cd-list { font-size:13px; }
-.cd-tile.cd-full .cd-list span:first-child { white-space:normal; }
+/* Running now (owner, 2026-11-11): search + machine - job name, See more for the full table. */
+.cd-run { background:var(--bg); border:1px solid var(--border); border-left:4px solid #1d4ed8; border-radius:10px; padding:10px 12px; }
+.cd-run-bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
+.cd-run-bar input { flex:1; min-width:180px; max-width:360px; padding:7px 10px; font-size:13px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg); color:var(--text); }
+.cd-run-n { font-size:12px; font-weight:700; color:var(--text2); }
+.cd-run-bar .cd-more { margin-left:auto; }
+.cd-run-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:6px; }
+.cd-run-item { display:flex; flex-direction:column; gap:1px; padding:6px 9px; border:1px solid var(--border); border-radius:8px; background:var(--bg2); min-width:0; }
+.cd-run-item b { font-size:12px; letter-spacing:.02em; }
+.cd-run-item span { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cd-run-item.is-link { cursor:pointer; }
+.cd-run-item.is-link:hover { border-color:#1d4ed8; }
+.cd-run-manual { color:#b45309; font-weight:700; }
+.cd-run-tbl { width:100%; border-collapse:collapse; font-size:13px; }
+.cd-run-tbl th { text-align:left; padding:7px 9px; font-size:11px; text-transform:uppercase; letter-spacing:.04em; background:var(--bg2); }
+.cd-run-tbl td { padding:7px 9px; border-bottom:1px solid var(--border); }
+.cd-run-tbl a { color:var(--text); text-decoration:underline; cursor:pointer; }
 .cd-label { font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--text2); }
 .cd-value { font-size:16px; font-weight:800; color:var(--text); line-height:1.2; word-break:break-word; }
 .cd-sub { font-size:10px; color:var(--text2); line-height:1.3; }
@@ -6927,6 +6940,46 @@ async function ceoDashUnignoreWarning(kind, jobId, idx) {
 }
 function ceoDashMore(key) { ceoDash.open = key; ceoDash.saleCo = ''; renderCeoDash(); }
 function ceoDashCloseMore() { ceoDash.open = ''; ceoDash.saleCo = ''; renderCeoDash(); }
+// ── Running now (owner, 2026-11-11) ── each machine's latest line clearance: its New Job is on it now.
+function ceoRunSince(x) {
+  const at = new Date(String(x.entry_date).slice(0, 10) + 'T' + (x.entry_time || '00:00') + ':00');
+  const mins = Math.max(0, Math.round((Date.now() - at.getTime()) / 60000));
+  const ago = mins < 60 ? mins + 'm' : mins < 1440 ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : Math.floor(mins / 1440) + 'd';
+  const today = String(x.entry_date).slice(0, 10) === localDateISO();
+  return (today ? '' : esc(fmtDMY(String(x.entry_date).slice(0, 10))) + ' ') + esc(x.entry_time || '') + ' · ' + ago;
+}
+function ceoRunFiltered() {
+  const q = String(ceoDash.runQ || '').trim().toLowerCase();
+  return (ceoDash.running || []).filter(x => !q || [x.machine, lcJobNo(x.new_job), x.new_job, x.job_name, x.new_company]
+    .some(v => String(v || '').toLowerCase().includes(q)));
+}
+function ceoRunCountText() {
+  const all = (ceoDash.running || []).length, n = ceoRunFiltered().length;
+  return n === all ? `${all} machine${all === 1 ? '' : 's'}` : `${n} of ${all} machines`;
+}
+const ceoRunManualTag = x => lcIsSpecialJob(x.new_job) ? ' <small class="cd-run-manual">manual</small>' : '';
+// The list: machine - job name (the job number when the job is not in the app).
+function ceoRunListHtml() {
+  const r = ceoRunFiltered();
+  if (!r.length) return '<div class="cd-sub">No machine matches.</div>';
+  return '<div class="cd-run-grid">' + r.map(x => `<div class="cd-run-item${x.job_id ? ' is-link' : ''}"${x.job_id ? ` onclick="ceoDashOpenJob(${x.job_id})" title="Open ${esc(lcJobNo(x.new_job))}"` : ''}>
+      <b>${esc(x.machine)}</b><span>${esc(x.job_name || lcJobNo(x.new_job))}${ceoRunManualTag(x)}</span></div>`).join('') + '</div>';
+}
+// See more: machine - job no. - job name - company - since.
+function ceoRunTableHtml() {
+  const r = ceoRunFiltered();
+  if (!r.length) return '<div class="cd-sub">No machine matches.</div>';
+  return `<table class="cd-run-tbl"><thead><tr><th>Machine</th><th>Job No.</th><th>Job Name</th><th>Company</th><th>Since</th></tr></thead><tbody>${r.map(x => `<tr>
+      <td><b>${esc(x.machine)}</b></td>
+      <td>${x.job_id ? `<a onclick="ceoDashOpenJob(${x.job_id})">${esc(lcJobNo(x.new_job))}</a>` : esc(lcJobNo(x.new_job))}${ceoRunManualTag(x)}</td>
+      <td>${esc(x.job_name || '')}</td><td>${esc(x.new_company || '')}</td><td style="white-space:nowrap;">${ceoRunSince(x)}</td></tr>`).join('')}</tbody></table>`;
+}
+// Typing in the search keeps the cursor: only the list and the count redraw.
+function ceoDashRunSearch(v) {
+  ceoDash.runQ = v;
+  const el = document.getElementById('cd-run-list'); if (el) el.innerHTML = ceoRunListHtml();
+  const n = document.getElementById('cd-run-n'); if (n) n.textContent = ceoRunCountText();
+}
 function ceoDashOpenJob(id) { ceoDash.open = ''; renderCeoDash(); openEdit(id); }
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && ceoDash.open && mode === 'dashboard') ceoDashCloseMore(); });
 function ceoDashRangeBar(prefix, range, dfrom, dto, onRange, onCustom, reload) {
@@ -6977,6 +7030,7 @@ function renderCeoDash() {
           list(s.machines.map(m => row(esc(m.machine), `${fmt(m.sheets)} ${unit}${key === 'printing' && m.mult > m.sheets ? ` (${fmt(m.mult)} N-up)` : ''} · wastage ${fmt(m.waste)} · ${jobsTxt(m.jobs)}`)), 'Nothing recorded')
           + `<div class="cd-sub" style="margin-top:8px;">Total: ${fmt(s.sheets)} ${unit}${nUp} · wastage ${fmt(s.waste)} · ${jobsTxt(s.jobs)}</div>`);
       }).join('')}`;
+  if (ceoDash.running && ceoDash.running.length) details.running = { fam: 'prod', label: 'Running now', more: ceoRunTableHtml };
   const body = `
     ${ceoDashRangeBar('cd-', ceoDash.range, ceoDash.dfrom, ceoDash.dto, 'setCeoDashRange', 'setCeoDashCustom', 'loadCeoDash')}
     ${ceoDash.err ? `<div class="cd-sub" style="color:#991b1b;">Paper figures could not load: ${esc(ceoDash.err)}</div>` : ''}
@@ -7023,22 +7077,13 @@ function renderCeoDash() {
 
     ${ceoDash.running && ceoDash.running.length ? `<div class="cd-zone cd-zone-2">
     <div class="cd-sec">Running now <small>· from QA's line clearance - each machine's latest New Job</small></div>
-    <div class="cd-grid cd-fill">
-      ${(() => {
-        const r = ceoDash.running;
-        const since = x => {
-          const at = new Date(String(x.entry_date).slice(0, 10) + 'T' + (x.entry_time || '00:00') + ':00');
-          const mins = Math.max(0, Math.round((Date.now() - at.getTime()) / 60000));
-          const ago = mins < 60 ? mins + 'm' : mins < 1440 ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : Math.floor(mins / 1440) + 'd';
-          const today = String(x.entry_date).slice(0, 10) === localDateISO();
-          return (today ? '' : dmy(x.entry_date) + ' ') + esc(x.entry_time || '') + ' · ' + ago;
-        };
-        const jobTxt = x => (x.job_id ? `<a onclick="ceoDashOpenJob(${x.job_id})">${esc(lcJobNo(x.new_job))}</a> ${esc(x.job_name || '')}` : `<b>${esc(lcJobNo(x.new_job))}</b> <small style="color:#b45309;">manual</small>`)
-          + (x.new_company ? ` <small style="color:var(--text2);">· ${esc(x.new_company)}</small>` : '');
-        const rows = r.map(x => row(`<b>${esc(x.machine)}</b> ${jobTxt(x)}`, since(x)));
-        return tile('running', 'prod cd-full', 'Running now', fmt(r.length) + ' machine' + (r.length === 1 ? '' : 's'),
-          list(rows.slice(0, 6), ''), r.length > 6 ? () => list(rows, '') : null);
-      })()}
+    <div class="cd-run">
+      <div class="cd-run-bar">
+        <input type="search" class="filter" placeholder="Search machine, job, company..." value="${esc(ceoDash.runQ || '')}" oninput="ceoDashRunSearch(this.value)">
+        <span class="cd-run-n" id="cd-run-n">${ceoRunCountText()}</span>
+        <button class="cd-more" onclick="ceoDashMore('running')">See more &rsaquo;</button>
+      </div>
+      <div id="cd-run-list">${ceoRunListHtml()}</div>
     </div>
     </div>` : ''}
 
