@@ -334,7 +334,8 @@ function getDb() {
 // Bumped again for the Access Register row inv_btn_brands (Brands & Suppliers window, 2026-11-05).
 // Bumped again for finance.cost_batch_rates (a board rate per paper batch, 2026-11-10).
 // Bumped again for finance.report_warning_ignores and the row dash_btn_ignore_warning (2026-11-11).
-const SCHEMA_VERSION = 'v2026-11-11-warning-ignores';
+// Bumped again for the Access Register row inv_btn_print_sticker (split off inv_btn_batches, 2026-11-11).
+const SCHEMA_VERSION = 'v2026-11-11-print-sticker';
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -487,7 +488,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   inv_btn_reverse:         { label: 'Reverse button', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
   inv_btn_dismiss_pending: { label: 'Pending Stock — Dismiss button (remove a delivered job from the pending queue)', levels: { admin: 'yes' } },
   inv_btn_brands:          { label: 'Brands & Suppliers button — see every brand and supplier (View); fix a spelling or change an item\'s brand / supplier (Edit)', levels: { admin: 'yes', store_manager: 'yes', production_manager: 'view', finance: 'view', ceo: 'view' } },
-  inv_btn_batches:         { label: 'Batches button — the Batch window (View) and Print sticker (Edit; also keeps the P.O. / Invoice / Batch No. typed on the sticker)', levels: { admin: 'yes', store_manager: 'yes', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  inv_btn_batches:         { label: 'Batches button — the Batch window of a paper: its batches, stock left in each, dates and references', levels: { admin: 'yes', store_manager: 'yes', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  inv_btn_print_sticker:   { label: 'Print Sticker button — the hand-typed pallet sticker in the Inventory toolbar, and the Sticker buttons on a Stock In (History, Stock In report, Batches window, after a Stock In); Edit also keeps the P.O. / Invoice / Batch No. typed on it', levels: { admin: 'yes', store_manager: 'yes', ceo: 'view', production_manager: 'view', finance: 'view' } },
 
   // Access Register — Reports tab. All 2-state (view/hidden) — reports are
   // read-only, there's no "edit" concept for any of them. Same "not wired
@@ -1698,7 +1700,7 @@ async function initDb() {
       )
     `;
     // Rows split off another (owner, 2026-10-26) start with what each role had on it.
-    for (const [to, from] of [['job_btn_stage_moves', 'job_btn_stage_forward']]) {
+    for (const [to, from] of [['job_btn_stage_moves', 'job_btn_stage_forward'], ['inv_btn_print_sticker', 'inv_btn_batches']]) {
       await sql`
         INSERT INTO role_permissions (permission_key, role, level, updated_by)
         SELECT ${to}, role, level, 'copied from ' || ${from} FROM role_permissions WHERE permission_key = ${from}
@@ -12385,7 +12387,7 @@ app.get('/api/inventory/:id/batches', requireAuth, async (req, res) => {
 // the Stock In that opened it so a reprint has them ('' batch_label = the automatic one).
 app.put('/api/inventory/transactions/:id/sticker', requireAuth, async (req, res) => {
   try {
-    if (!userHasBtn(req.user, 'inv_btn_batches')) return res.status(403).json({ error: 'Not allowed' });
+    if (!userHasBtn(req.user, 'inv_btn_print_sticker')) return res.status(403).json({ error: 'Not allowed' });
     await dbReady;
     const sql = getDb();
     const txId = parseInt(req.params.id, 10);

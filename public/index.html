@@ -3778,7 +3778,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     </button>
     <button class="btn btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openBulkStockIn()">&#128230; Stock In (Bulk)</button>
     <button class="btn ceo-hide" onclick="openBulkStockOut()" style="background:#DC2626;color:#fff;border-color:#DC2626;">&#128228; Stock Out (Bulk)</button>
-    <button class="btn" onclick="openInvSticker(0)" title="Print a pallet sticker with every detail typed by hand - no Stock In needed">&#128424; Print Sticker</button>
+    <button class="btn" data-acc="inv_btn_print_sticker" onclick="openInvSticker(0)" title="Print a pallet sticker with every detail typed by hand - no Stock In needed">&#128424; Print Sticker</button>
     <button class="btn" id="inv-brands-btn" data-acc="inv_btn_brands" data-acc-need="view" onclick="openInvBrands()" title="Every brand and supplier - fix a spelling, or change an item's brand / supplier">&#127991; Brands &amp; Suppliers</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
@@ -6099,7 +6099,7 @@ const BTN_FN_ROWS = {
   openAdjustModal: ['job_btn_adjust', 'yes'], removeAdjustment: ['job_btn_adjust', 'yes'],
   // Inventory
   openInvHistory: ['inv_btn_history', 'view'], openInvHistoryAt: ['inv_btn_history', 'view'],
-  openInvBatches: ['inv_btn_batches', 'view'], openInvSticker: ['inv_btn_batches', 'yes'],
+  openInvBatches: ['inv_btn_batches', 'view'], openInvSticker: ['inv_btn_print_sticker', 'yes'], openInvStickerTx: ['inv_btn_print_sticker', 'yes'],
   openInvEdit: ['inv_btn_edit', 'yes'], invBalanceAdjust: ['inv_btn_edit', 'yes'],
   deleteInvItem: ['inv_btn_delete', 'yes'],
   openInvAddStock: ['inv_btn_stock_in', 'yes'], openBulkStockIn: ['inv_btn_stock_in', 'yes'], receiveImport: ['inv_btn_stock_in', 'yes'], bulkReceiveImports: ['inv_btn_stock_in', 'yes'],
@@ -11820,7 +11820,7 @@ function renderInvCardHtml(it) {
         <button class="btn btn-sm btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
         <button class="btn btn-sm" onclick="openInvHistory(${it.id})">History${hasRecentCorrection(it) ? correctionDot(0, 'Balance was corrected today — a manual edit or a Reverse.', it.id) : ''}</button>
-        ${seeBtn('inv_btn_batches') && !it.is_offcut ? `<button class="btn btn-sm" onclick="openInvBatches(${it.id})" title="Batches of this paper and their stickers">Batches</button>` : ''}
+        ${seeBtn('inv_btn_batches') && !it.is_offcut ? `<button class="btn btn-sm" data-acc="inv_btn_batches" data-acc-need="view" onclick="openInvBatches(${it.id})" title="Batches of this paper and their stickers">Batches</button>` : ''}
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${seeBtn('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only — removes this item and its full stock history">Delete</button>`:''}
       </div>
@@ -11853,7 +11853,7 @@ function renderInvBrandRow(it) {
       <div class="ibr-actions">
         <button class="btn btn-sm btn-primary ceo-hide" style="background:#166534;border-color:#166534;color:#fff;" onclick="openInvAddStock(${it.id})">+ Stock</button>
         <button class="btn btn-sm ceo-hide" onclick="openInvRemoveStock(${it.id})" style="background:#DC2626;color:#fff;border-color:#DC2626;">&minus; Stock</button>
-        ${seeBtn('inv_btn_batches') && !it.is_offcut ? `<button class="btn btn-sm" onclick="openInvBatches(${it.id})" title="Batches of this brand and their stickers">Batches</button>` : ''}
+        ${seeBtn('inv_btn_batches') && !it.is_offcut ? `<button class="btn btn-sm" data-acc="inv_btn_batches" data-acc-need="view" onclick="openInvBatches(${it.id})" title="Batches of this brand and their stickers">Batches</button>` : ''}
         <button class="btn btn-sm ceo-hide" onclick="openInvEdit(${it.id})">Edit</button>
         ${seeBtn('inv_btn_delete')?`<button class="btn btn-sm btn-danger" onclick="deleteInvItem(${it.id})" title="Admin only">Delete</button>`:''}
       </div>
@@ -13168,7 +13168,7 @@ async function saveInvAddStock(id) {
     await api('POST', `/api/inventory/${id}/transactions`, data);
     await loadInventory();
     closeModal(); notify(`+${qty.toLocaleString()} sheets added`);
-    if (data.reason === 'delivery' && seeBtn('inv_btn_batches') && hasPerm('inv_btn_batches')
+    if (data.reason === 'delivery' && seeBtn('inv_btn_print_sticker') && hasPerm('inv_btn_print_sticker')
         && await confirmDialog({ title: 'Print stickers?', message: 'Print the stickers for this Stock In now? You can also print them later from the Batches button, the Stock In report or History.', confirmText: 'Print stickers', cancelText: 'Not now' })) {
       const list = await invBatchesOf(id);
       const n = data.batch || (list.length ? list[list.length - 1].n : 1);
@@ -15243,7 +15243,7 @@ async function openInvBatches(id) {
       <td style="${td}white-space:nowrap;text-align:right;color:#993C1D;">${b.received != null ? invQtyHtml(Math.max(0, b.received - b.left), it) : '—'}</td>
       <td style="${td}white-space:nowrap;text-align:right;${b.left > 0 ? 'color:#166534;' : 'color:var(--text3);'}">${b.left > 0 ? invQtyHtml(b.left, it) : 'used up'}</td>
       <td style="${td}">${b.challan_no ? esc(b.challan_no) : '—'}</td>
-      <td style="${td}white-space:nowrap;">${seeBtn('inv_btn_batches') && (b.received != null || b.left > 0) ? `<button class="btn btn-sm" onclick="openInvSticker(${it.id}, ${b.n})" title="Print the stickers for this batch">&#128424; Sticker</button>` : ''}</td>
+      <td style="${td}white-space:nowrap;">${seeBtn('inv_btn_print_sticker') && (b.received != null || b.left > 0) ? `<button class="btn btn-sm" data-acc="inv_btn_print_sticker" onclick="openInvSticker(${it.id}, ${b.n})" title="Print the stickers for this batch">&#128424; Sticker</button>` : ''}</td>
     </tr>`).join('')
     : `<tr><td colspan="7" style="padding:18px;text-align:center;color:var(--text2);">No stock yet. The first Stock In will be the 1st batch.</td></tr>`;
   openModal(`<div class="modal" style="max-width:900px;" onclick="event.stopPropagation()">
@@ -15334,8 +15334,8 @@ function invStickerTxOk(t) {
   return !!(t && t.item_id && !invIsOffcutItem(t.item_id) && (+t.change || 0) > 0 && !t.reverses_tx_id && (t.reason === 'delivery' || t.reason === 'import-received'));
 }
 function invStickerBtnHtml(t) {
-  if (!invStickerTxOk(t) || !seeBtn('inv_btn_batches')) return '';
-  return `<button class="btn btn-sm" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); openInvStickerTx(${t.id})" title="Print the stickers for this Stock In">&#128424; Sticker</button>`;
+  if (!invStickerTxOk(t) || !seeBtn('inv_btn_print_sticker')) return '';
+  return `<button class="btn btn-sm" data-acc="inv_btn_print_sticker" style="padding:3px 8px;font-size:11px;" onclick="event.stopPropagation(); openInvStickerTx(${t.id})" title="Print the stickers for this Stock In">&#128424; Sticker</button>`;
 }
 function openInvStickerTx(txId) {
   const pools = [_invHistRows, (stockMovementStates.in || {}).rows || [], (stockMovementStates.out || {}).rows || []];
@@ -41715,6 +41715,7 @@ const ACC_INVENTORY_TAB_ROWS = [
   { key: 'inv_btn_reverse',         type: 'button-30day' },
   { key: 'inv_btn_dismiss_pending', type: 'button' },
   { key: 'inv_btn_batches',         type: 'button' },
+  { key: 'inv_btn_print_sticker',   type: 'button' },
   { key: 'inv_btn_brands',          type: 'button' },
 ];
 // Reports tab — every row is 2-state (view/hidden). Reports are read-only,
