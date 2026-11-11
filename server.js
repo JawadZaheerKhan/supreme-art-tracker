@@ -1406,6 +1406,8 @@ async function initDb() {
     // Station type (owner, 2026-11-11): '' operator, 'qc' QC, 'qa' QA Incharge - QC / QA follow their
     // own Operator column in the Access Register; a QA PIN opens the Line Clearance screen.
     await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT ''`;
+    // The line managers' Manager PINs are QC now (owner, 2026-11-11).
+    await sql`UPDATE operators SET kind = 'qc' WHERE is_manager AND kind = ''`;
     // Line Clearance Log (owner, 2026-11-11): one row per changeover QA checks - everything typed by QA.
     // form A = CTP / Printing / Coating (10 points), B = Die Cutting ... FG Dispatch (12 points);
     // points = { "1": true, "2": false, ... } for the chosen sections; cleared = every one ticked.
@@ -3370,7 +3372,7 @@ app.post('/api/operators', requireOperatorAdmin, async (req, res) => {
     const sql = getDb();
     const name = (req.body.name || '').trim();
     const pin = String(req.body.pin || '').trim();
-    const isManager = req.body.is_manager === true;
+    const isManager = operatorKindOf(req.body) === 'qc';   // QC is what the Manager PIN was (owner, 2026-11-11)
     // Manager PINs always get every role, regardless of what (if anything)
     // was checked client-side — they're not scoped to a stage.
     let parsed = isManager
@@ -3405,7 +3407,7 @@ app.put('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const name = (req.body.name || '').trim();
     const pin = String(req.body.pin || '').trim();
-    const isManager = req.body.is_manager === true;
+    const isManager = operatorKindOf(req.body) === 'qc';   // QC is what the Manager PIN was (owner, 2026-11-11)
     let parsed = isManager
       ? { roles: ALL_ROLE_IDS, stageIndices: stageIndicesFromRoles(ALL_ROLE_IDS), primary: stageIndicesFromRoles(ALL_ROLE_IDS)[0] }
       : parseOperatorRoles(req.body);

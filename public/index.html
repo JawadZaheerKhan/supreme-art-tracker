@@ -2319,6 +2319,13 @@
   .lc-rep td.lc-cl-y { background: #dcfce7; color: #166534; font-weight: 900; text-align: center; }
   .lc-rep td.lc-cl-n { background: #fee2e2; color: #b91c1c; font-weight: 900; text-align: center; }
   /* Access Register: the Operator column's Operator / QC / QA pick. */
+  .op-kind-pick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  @media (max-width: 560px) { .op-kind-pick { grid-template-columns: 1fr; } }
+  .op-kind-opt { display: flex; gap: 8px; align-items: flex-start; padding: 9px 10px; border: 1.5px solid var(--border2); border-radius: 8px; cursor: pointer; background: #fff; }
+  .op-kind-opt input { margin-top: 3px; }
+  .op-kind-opt b { display: block; font-size: 14px; }
+  .op-kind-opt .op-kind-hint { display: block; font-size: 11.5px; color: var(--text2); line-height: 1.3; margin-top: 2px; }
+  .op-kind-opt.is-on { border-color: #155e75; background: #ecfeff; }
   .acc-op-kind { font: inherit; font-size: 9.5px; font-weight: 800; text-transform: uppercase; color: #1a1a1a; background: #fff; border: 0; border-radius: 5px; padding: 2px 2px; max-width: 100%; cursor: pointer; }
   .station-queue { display: flex; flex-direction: column; gap: 10px; }
   /* Station search bar (operator queue + Manager · All Stages). */
@@ -38742,7 +38749,7 @@ function renderOpsFilterChips() {
   const none = found.filter(r => !opsRowRoles(r).length).length;
   el.innerHTML = chip('', 'All', found.length)
     + ROLES.map(r => chip(r.id, r.label, count(r.id))).join('')
-    + chip('manager', 'Line Manager', count('manager'))
+    + chip('manager', 'QC', count('manager'))
     + (none ? chip('none', opsSubTab === 'people' ? 'Not on a machine' : 'No role', none) : '');
 }
 function renderOpsLists() { renderOpsFilterChips(); if (opsSubTab === 'people') renderFloorPeople(); else renderOperators(); }
@@ -38773,7 +38780,7 @@ function renderOperators() {
     return `
     <div class="inv-card${o.active===false?' is-done':''}">
       <div class="inv-main">
-        <div class="inv-name">${o.is_manager ? '&#128100;' : '&#9881;'} ${esc(o.name || '(unnamed machine)')}${o.is_manager?' <span class="inv-badge" style="background:#f5f3ff;color:#5b21b6;">manager</span>':''}${o.kind==='qa'?' <span class="inv-badge" style="background:#ecfeff;color:#155e75;">QA</span>':o.kind==='qc'?' <span class="inv-badge" style="background:#ecfeff;color:#155e75;">QC</span>':''}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
+        <div class="inv-name">${o.is_manager ? '&#128100;' : '&#9881;'} ${esc(o.name || '(unnamed machine)')}${o.kind==='qa'?' <span class="inv-badge" style="background:#ecfeff;color:#155e75;">QA Incharge</span>':(o.kind==='qc'||o.is_manager)?' <span class="inv-badge" style="background:#f5f3ff;color:#5b21b6;">QC</span>':''}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
         <div class="inv-sub">${o.is_manager ? 'All stages' : (esc(operatorStageNames(o)) || (o.kind === 'qa' ? 'Line Clearance' : ''))} · ${_opsMgrActive ? '' : (o.pin ? 'PIN ' + esc(o.pin) : 'No PIN (info only)') + ' · '}${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
       </div>
       <div class="inv-actions">
@@ -38910,7 +38917,9 @@ function operatorStageNames(o) {
 function openOperatorModal(id) {
   const o = id ? operatorsList.find(x => x.id === id) : null;
   const assigned = o ? rolesOfOperator(o) : [];
-  const isManager = !!(o && o.is_manager);
+  const kind = (o && o.kind) || (o && o.is_manager ? 'qc' : '');   // a Manager PIN is QC now
+  const isManager = kind === 'qc';
+  const k = OP_KIND_TEXT[kind];
   const boxes = ROLES.map(r => {
     const hint = r.finishes ? ` <span style="font-weight:400;color:var(--text2);font-size:12px;">(${r.finishes.join(', ')})</span>` : r.info ? ' <span style="font-weight:400;color:var(--text2);font-size:12px;">(info only)</span>' : '';
     return `
@@ -38921,35 +38930,31 @@ function openOperatorModal(id) {
   }).join('');
   const startingPersons = (o && Array.isArray(o.persons) && o.persons.length) ? o.persons : [{ name: '', name_ur: '' }];
   openModal(`<div class="modal" onclick="event.stopPropagation()">
-    <h2>${o ? 'Edit' : 'Add'} ${isManager ? 'Manager' : 'Machine'}</h2>
+    <h2 id="op-modal-title">${o ? 'Edit' : 'Add'} ${k.title}</h2>
     <div class="form-group">
-      <label class="op-stage-chk" style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid #7c3aed;border-radius:6px;cursor:pointer;background:#f5f3ff;">
-        <input type="checkbox" id="op-is-manager" ${isManager ? 'checked' : ''} onchange="toggleOperatorManagerFields()">
-        <span style="font-weight:600;color:#5b21b6;">This is a Manager PIN — sees every stage &amp; can edit the Machine field, not tied to one machine</span>
-      </label>
-    </div>
-    <div class="form-group">
-      <label class="form-label">Type <span style="font-weight:400;color:var(--text2);font-size:12px;">(QC and QA each have their own Operator column in the Access Register; a QA PIN opens the Line Clearance screen)</span></label>
-      <select id="op-kind" style="max-width:260px;">
-        ${[['', 'Operator'], ['qc', 'QC'], ['qa', 'QA Incharge']].map(([v, l]) => `<option value="${v}" ${((o && o.kind) || '') === v ? 'selected' : ''}>${l}</option>`).join('')}
-      </select>
+      <label class="form-label">Type</label>
+      <div class="op-kind-pick">
+        ${Object.entries(OP_KIND_TEXT).map(([v, t]) => `<label class="op-kind-opt ${kind === v ? 'is-on' : ''}">
+          <input type="radio" name="op-kind" value="${v}" ${kind === v ? 'checked' : ''} onchange="opKindChanged(this)">
+          <span><b>${t.label}</b><span class="op-kind-hint">${t.hint}</span></span></label>`).join('')}
+      </div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label" id="op-name-label">${isManager ? 'Manager Station Name' : 'Machine Name'}</label>
+      <div class="form-group"><label class="form-label" id="op-name-label">${k.nameLabel}</label>
         <input type="text" id="op-name" value="${o?esc(o.name||''):''}" placeholder="e.g. SM-52, Heidelberg #2"></div>
       <div class="form-group"><label class="form-label">3-digit PIN <span style="font-weight:400;color:var(--text2);font-size:12px;">(not needed for Breaking / Driver / Loader only)</span></label>
         <input type="text" id="op-pin" inputmode="numeric" maxlength="3" value="${o?esc(o.pin):''}" placeholder="e.g. 123" style="max-width:160px;"></div>
     </div>
-    <div class="form-group" id="op-roles-group" style="${isManager ? 'display:none;' : ''}">
+    <div class="form-group" id="op-roles-group" style="${kind ? 'display:none;' : ''}">
       <label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(tick all this machine handles)</span></label>
       <div id="op-roles" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px;">${boxes}</div>
     </div>
     <div class="form-group">
-      <label class="form-label" id="op-persons-label">${isManager ? 'Managers using this PIN' : 'Operators on this Machine'} <span style="font-weight:400;color:var(--text2);">(after PIN, they pick themselves from this list)</span></label>
+      <label class="form-label" id="op-persons-label">${k.persons} <span style="font-weight:400;color:var(--text2);">(after PIN, they pick themselves from this list)</span></label>
       <div id="op-persons" style="display:flex;flex-direction:column;gap:6px;">
         ${startingPersons.map(p => personPickRowHtml(p)).join('')}
       </div>
-      <button type="button" class="btn btn-sm" style="margin-top:8px;" onclick="addPersonRow()">+ Add ${isManager ? 'manager' : 'operator'}</button>
+      <button type="button" class="btn btn-sm" style="margin-top:8px;" onclick="addPersonRow()" id="op-add-person">+ Add ${k.person}</button>
       <div style="font-size:12px;color:var(--text2);margin-top:6px;">Not in the list? Add them under <b>Operators</b> first.</div>
     </div>
     ${o ? `<div class="form-group"><label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="op-active" ${o.active!==false?'checked':''}> Active</label></div>` : ''}
@@ -38959,17 +38964,29 @@ function openOperatorModal(id) {
     </div>
   </div>`);
 }
-// Toggles the Roles checklist + a couple labels when the "Manager PIN"
-// checkbox flips — a manager gets every role automatically (see
-// saveOperator), so ticking individual stages would be misleading.
-function toggleOperatorManagerFields() {
-  const isManager = !!document.getElementById('op-is-manager')?.checked;
+// The three kinds of entry (owner, 2026-11-11). Only a Machine ticks roles: QC sees every stage
+// (what the line manager's Manager PIN was), QA opens the Line Clearance screen.
+const OP_KIND_TEXT = {
+  '': { label: 'Machine', hint: 'Operators on a machine - tick the roles it handles', title: 'Machine', nameLabel: 'Machine Name', persons: 'Operators on this Machine', person: 'operator' },
+  qc: { label: 'QC', hint: 'Sees every stage and can change the Machine field - no roles to tick', title: 'QC', nameLabel: 'QC Station Name', persons: 'QC people using this PIN', person: 'QC person' },
+  qa: { label: 'QA Incharge', hint: 'Opens the Line Clearance screen - no roles to tick', title: 'QA Incharge', nameLabel: 'QA Station Name', persons: 'QA people using this PIN', person: 'QA person' },
+};
+function opKindValue() { const r = document.querySelector('input[name="op-kind"]:checked'); return r ? r.value : ''; }
+// Switching the type: roles only for a Machine; the labels follow.
+function opKindChanged(el) {
+  const kind = opKindValue();
+  const k = OP_KIND_TEXT[kind];
+  document.querySelectorAll('.op-kind-opt').forEach(l => l.classList.toggle('is-on', !!l.querySelector('input:checked')));
   const rolesGroup = document.getElementById('op-roles-group');
-  if (rolesGroup) rolesGroup.style.display = isManager ? 'none' : '';
+  if (rolesGroup) rolesGroup.style.display = kind ? 'none' : '';
   const nameLabel = document.getElementById('op-name-label');
-  if (nameLabel) nameLabel.textContent = isManager ? 'Manager Station Name' : 'Machine Name';
+  if (nameLabel) nameLabel.textContent = k.nameLabel;
   const personsLabel = document.getElementById('op-persons-label');
-  if (personsLabel) personsLabel.firstChild.textContent = isManager ? 'Managers using this PIN ' : 'Operators on this Machine ';
+  if (personsLabel) personsLabel.firstChild.textContent = k.persons + ' ';
+  const addBtn = document.getElementById('op-add-person');
+  if (addBtn) addBtn.textContent = '+ Add ' + k.person;
+  const title = document.getElementById('op-modal-title');
+  if (title) title.textContent = title.textContent.replace(/^(Edit|Add) .*/, (m, v) => v + ' ' + k.title);
 }
 
 function personRowHtml(p, i) {
@@ -39123,21 +39140,21 @@ function suggestUrduFromRow(btn) {
 async function saveOperator(id) {
   const name = document.getElementById('op-name').value.trim();
   const pin = document.getElementById('op-pin').value.trim();
-  const isManager = !!document.getElementById('op-is-manager')?.checked;
-  // Manager PIN → every role, regardless of the (hidden) checkboxes.
-  const roles = isManager ? ROLES.filter(r => !r.info).map(r => r.id) : Array.from(document.querySelectorAll('.op-role-cb:checked')).map(cb => cb.value);
-  const kind = (document.getElementById('op-kind') || {}).value || '';
+  const kind = opKindValue();
+  const isManager = kind === 'qc';   // QC is what the Manager PIN was
+  // QC → every role (server sets it); QA → none; a Machine → the ticked ones.
+  const roles = isManager ? ROLES.filter(r => !r.info).map(r => r.id) : kind === 'qa' ? [] : Array.from(document.querySelectorAll('.op-role-cb:checked')).map(cb => cb.value);
   const seen = new Set();
   const persons = Array.from(document.querySelectorAll('#op-persons .op-person-pick')).map(sel => {
     const opt = sel.selectedOptions[0];
     return { name: sel.value.trim(), name_ur: (opt && opt.dataset.ur) || '' };
   }).filter(p => p.name && !seen.has(p.name.toLowerCase()) && seen.add(p.name.toLowerCase()));
   const activeEl = document.getElementById('op-active');
-  if (!name) { notify(isManager ? 'Manager name is required' : 'Machine name is required'); return; }
+  if (!name) { notify(OP_KIND_TEXT[kind].nameLabel + ' is required'); return; }
   const infoOnly = !isManager && infoOnlyRoles(roles);   // Breaking / Driver / Loader only: no PIN needed
   if (!(infoOnly && pin === '') && !/^\d{3}$/.test(pin)) { notify('PIN must be exactly 3 digits'); return; }
   if (!roles.length && kind !== 'qa') { notify('Select at least one role'); return; }   // QA Incharge needs none
-  if (!persons.length) { notify(isManager ? 'Add at least one manager' : 'Add at least one operator on this machine'); return; }
+  if (!persons.length) { notify('Add at least one ' + OP_KIND_TEXT[kind].person); return; }
   const body = { name, pin, roles, persons, is_manager: isManager, kind };
   if (activeEl) body.active = activeEl.checked;
   showSaving(true);
@@ -39434,7 +39451,7 @@ function mgrOpsSyncTab() {
 async function mgrOpsLoad() {
   const el = document.getElementById('mgr-ops-root');
   if (!el) return;
-  if (!mgrOpsUnlocked()) { el.innerHTML = '<div class="empty">Enter the Manager PIN at the Station to manage operators.</div>'; return; }
+  if (!mgrOpsUnlocked()) { el.innerHTML = '<div class="empty">Enter the QC PIN at the Station to manage operators.</div>'; return; }
   if (!mgrOpsList) el.innerHTML = '<div class="empty">Loading…</div>';
   try {
     mgrOpsList = await api('POST', '/api/operators/manager-roster', { pin: stationOperator.pin });
@@ -39466,7 +39483,7 @@ function mgrOpsRender() {
   if (!_opsMgrActive) _opsSectionHome = { parent: sec.parentNode, next: sec.nextSibling };
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
-      <div style="color:var(--text2);font-size:13px;">Signed in with the Manager PIN as <b>${esc(who)}</b></div>
+      <div style="color:var(--text2);font-size:13px;">Signed in with the QC PIN as <b>${esc(who)}</b></div>
       <button class="btn btn-danger" onclick="mgrOpsLogout()">&#x23FB; Log Out</button>
     </div>
     <div id="mgr-ops-slot"></div>`;
@@ -39503,7 +39520,7 @@ function mgrOpsAddRow(id) {
   if (rows.length) rows[rows.length - 1].focus();
 }
 async function mgrOpsSave(id, btn) {
-  if (!mgrOpsUnlocked()) { notify('Enter the Manager PIN at the Station first'); return; }
+  if (!mgrOpsUnlocked()) { notify('Enter the QC PIN at the Station first'); return; }
   const card = document.querySelector(`[data-op-id="${id}"]`);
   if (!card) return;
   const persons = [...card.querySelectorAll('.op-person-row')].map(row => ({
