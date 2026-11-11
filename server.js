@@ -8312,7 +8312,7 @@ app.post('/api/station/offcut-items/:id/stock-in', requireStationUser, async (re
     const who = `Paper Cutting ${v.operator.name}${req.body.person_name ? ' · ' + String(req.body.person_name).trim() : ''}`;
     const note = String(req.body.notes || '').trim();
     await applyInventoryChange(sql, {
-      itemId, change: +sheets, reason: 'delivery', jobId: null,
+      itemId, change: +sheets, reason: 'left-over', jobId: null,   // offcut stock in = left over (owner, 2026-11-11)
       notes: `Offcut stock-in at Station by ${who}${note ? ' · ' + note : ''}`,
       user: req.user,
     });
@@ -12885,6 +12885,8 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
       // 'sample' kept reversible for old rows even though it's no longer
       // a selectable reason going forward.
       'sold', 'damaged', 'sample', 'offcut', 'job-card', 'manual-job-card',
+      // Added with the new reason lists (owner, 2026-11-11).
+      'proofing', 'return', 'left-over',
     ]);
     // Full 'yes' tier (admin/Super Admin, or anyone explicitly granted it)
     // can reverse ANY reason (including bookkeeping rows like 'correction'

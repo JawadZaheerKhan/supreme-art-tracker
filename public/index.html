@@ -13447,6 +13447,19 @@ async function deleteInvItem(id) {
   showSaving(false);
 }
 
+// Stock reasons (owner, 2026-11-11), in the owner's order - paper and offcut each have their own.
+const STOCK_OUT_REASONS = {
+  paper:  [['job-card', 'Job Card (pending)'], ['manual-job-card', 'Manual Job Card'], ['offcut', 'Offcut'], ['proofing', 'Proofing'], ['sold', 'Sold'], ['damaged', 'Damaged'], ['adjustment', 'Adjustment']],
+  offcut: [['manual-job-card', 'Manual Job Card'], ['job-card', 'Job Card (pending)'], ['proofing', 'Proofing'], ['damaged', 'Damaged'], ['adjustment', 'Adjustment']],
+};
+const STOCK_IN_REASONS = {
+  paper:  [['delivery', 'Delivery'], ['return', 'Returned'], ['adjustment', 'Adjustment']],
+  offcut: [['left-over', 'Left over'], ['adjustment', 'Adjustment']],
+};
+// <option>s for a paper (it.is_offcut picks the offcut list); the first one is chosen.
+function stockReasonOptionsHtml(lists, it) {
+  return lists[it && it.is_offcut ? 'offcut' : 'paper'].map(([v, l], i) => `<option value="${v}"${i === 0 ? ' selected' : ''}>${l}</option>`).join('');
+}
 function openInvAddStock(id) {
   const it = inventoryAll.find(x => x.id === id); if (!it) return;
   const label = `${it.paper_type}${it.size?' · '+it.size:''}${it.gsm?' · '+it.gsm+'gsm':''}${it.brand?' · '+it.brand:''}`;
@@ -13468,11 +13481,7 @@ function openInvAddStock(id) {
     <div class="form-row">
       <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stock-challan" placeholder="e.g. CH-2026-042"></div>
       <div class="form-group"><label class="form-label">Reason</label>
-        <select id="stock-reason" onchange="stockInReasonChanged()">
-          <option value="delivery">Delivery</option>
-          <option value="adjustment">Manual adjustment</option>
-          <option value="return">Return / unused stock</option>
-        </select>
+        <select id="stock-reason" onchange="stockInReasonChanged()">${stockReasonOptionsHtml(STOCK_IN_REASONS, it)}</select>
       </div>
     </div>
     <div id="stock-batch-wrap"></div>
@@ -13563,13 +13572,7 @@ function openInvRemoveStock(id, opts) {
     <div class="form-row">
       ${it.is_offcut ? '' /* offcuts: no Challan No. (owner, 2026-11-11) */ : '<div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stockout-challan" placeholder="e.g. CH-2026-042"></div>'}
       <div class="form-group"><label class="form-label">Reason</label>
-        <select id="stockout-reason" onchange="stockOutReasonChanged(${id})">
-          ${['job-card','manual-job-card','sold','damaged','offcut','adjustment'].map(r => {
-            const labels = {sold:'Sold / Delivered to customer',damaged:'Damaged',offcut:'Offcut',adjustment:'Manual adjustment','job-card':'Job Card (pending)','manual-job-card':'Manual Job Card'};
-            const sel = r === 'job-card' ? ' selected' : '';
-            return `<option value="${r}"${sel}>${labels[r]}</option>`;
-          }).join('')}
-        </select>
+        <select id="stockout-reason" onchange="stockOutReasonChanged(${id})">${stockReasonOptionsHtml(STOCK_OUT_REASONS, it)}</select>
       </div>
     </div>
     <div id="stockout-batch-wrap"></div>
@@ -14022,6 +14025,16 @@ function bulkComboPick(prefix, idx, itemId, groupPick) {
   if (typeof syncFn === 'function') syncFn(idx, 'packets');
   if (prefix === 'bulk') bulkInRefreshBatch(idx);
   else bulkOutRefreshBatches(idx);
+  // Bulk Stock Out: an offcut paper has its own reasons (owner, 2026-11-11).
+  if (prefix === 'bulkout') {
+    const tr = document.querySelector(`#bulkout-rows tr[data-row="${idx}"]`);
+    const sel = tr && tr.querySelector('.bulkout-reason');
+    const want = it.is_offcut ? 'offcut' : 'paper';
+    if (sel && sel.dataset.list !== want) {
+      sel.innerHTML = stockReasonOptionsHtml(STOCK_OUT_REASONS, it); sel.dataset.list = want;
+      if (typeof bulkOutReasonChanged === 'function') bulkOutReasonChanged(idx);
+    }
+  }
   // For bulkout Job Card rows, refresh the multi-select of matching
   // pending jobs so the user sees only jobs waiting on THIS paper group.
   if (prefix === 'bulkout' && typeof bulkOutRefreshJobsForRow === 'function') {
@@ -14173,7 +14186,7 @@ async function saveBulkStockInRun() {
   for (const r of rows) {
     try {
       await api('POST', `/api/inventory/${r.itemId}/transactions`, {
-        change: r.qty, reason: 'delivery', notes: sharedNote, challan_no: ref || null, entry_date: entryDate, batch: r.batch,
+        change: r.qty, reason: invIsOffcutItem(r.itemId) ? 'left-over' : 'delivery', notes: sharedNote, challan_no: ref || null, entry_date: entryDate, batch: r.batch,
       });
       saved++;
     } catch (e) {
@@ -14206,14 +14219,7 @@ function bulkOutRowHtml(idx) {
     <tr data-row="${idx}">
       <td>${bulkComboRowHtml('bulkout', idx, false)}</td>
       <td>
-        <select class="bulkout-reason" onchange="bulkOutReasonChanged(${idx})">
-          <option value="job-card" selected>Job Card (pending)</option>
-          <option value="manual-job-card">Manual Job Card</option>
-          <option value="sold">Sold</option>
-          <option value="damaged">Damaged</option>
-          <option value="offcut">Offcut</option>
-          <option value="adjustment">Adjustment</option>
-        </select>
+        <select class="bulkout-reason" onchange="bulkOutReasonChanged(${idx})">${stockReasonOptionsHtml(STOCK_OUT_REASONS, null)}</select>
       </td>
       <td>
         <div class="bulkout-jobchips" data-row="${idx}" style="display:flex;flex-wrap:wrap;gap:4px;min-width:170px;max-width:300px;">
@@ -14990,6 +14996,7 @@ const REVERSIBLE_TX_REASONS = new Set([
   // Manual stock-out reasons. 'sample' kept reversible for old rows
   // even though it's no longer a selectable reason going forward.
   'sold', 'damaged', 'sample', 'offcut', 'job-card', 'manual-job-card',
+  'proofing', 'return', 'left-over',   // the new reason lists (owner, 2026-11-11)
 ]);
 // ── Entry Date on every stock form ──
 // Defaults to today. Pick an earlier day to record a missed entry ON the
@@ -29352,7 +29359,7 @@ async function loadOffcutConsumption() {
 // What the Offcut report writes in its Job / Reason columns.
 const OFFCUT_OUT_REASON_LABELS = {
   'job-consumed': 'Job issue', 'job-auto-offcut': 'Auto (CTP)', 'manual-job-card': 'Manual Job Card',
-  'job-edit-apply': 'Job edit', sold: 'Sold', damaged: 'Damaged', adjustment: 'Manual adjustment',
+  'job-edit-apply': 'Job edit', sold: 'Sold', damaged: 'Damaged', adjustment: 'Manual adjustment', proofing: 'Proofing',
 };
 function offcutRowJobText(t) {
   if (t && t.job_id) return 'E-' + t.job_id;
