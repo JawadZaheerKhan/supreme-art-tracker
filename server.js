@@ -5683,7 +5683,33 @@ function stockEntryInstant(rawDate) {
 const BATCH_REASONS = new Set(['delivery', 'import-received']);
 function ordinalN(n) { const v = n % 100, sx = ['th', 'st', 'nd', 'rd']; return n + (sx[(v - 20) % 10] || sx[v] || sx[0]); }
 // As a sticker writes it: the number and the year the batch came in, 02-2026.
-function batchNoOf(n, at) { return String(n).padStart(2, '0') + '-' + businessDateISO(at ? new Date(at) : new Date()).slice(0, 4); }
+// NN-MM-YY (owner, 2026-11-11): 01-11-26 = the 1st batch, received November 2026.
+function batchNoOf(n, at) {
+  const d = businessDateISO(at ? new Date(at) : new Date());
+  return String(n).padStart(2, '0') + '-' + d.slice(5, 7) + '-' + d.slice(2, 4);
+}
+// Ledger rows show each batch's number as it is now (its first Stock In's date, or the number typed on
+// its sticker), so rows saved with the old NN-YYYY read the same as the Batches window.
+async function relabelBatches(sql, txs) {
+  const ids = [...new Set((txs || []).filter(t => t.batch != null || t.batch_alloc).map(t => t.item_id).filter(Boolean))];
+  if (!ids.length) return txs;
+  const firsts = await sql`
+    SELECT DISTINCT ON (item_id, batch) item_id, batch, created_at, batch_label
+      FROM inventory_transactions
+     WHERE item_id = ANY(${ids}) AND batch IS NOT NULL AND change > 0
+       AND reverses_tx_id IS NULL   -- same Stock Ins the Batches window counts
+       AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = inventory_transactions.id)
+     ORDER BY item_id, batch, created_at, id`;
+  const lab = new Map(firsts.map(f => [f.item_id + ':' + f.batch, f.batch_label || batchNoOf(f.batch, f.created_at)]));
+  const labelOf = (itemId, n) => lab.get(itemId + ':' + n) || batchNoOf(n);
+  for (const t of txs) {
+    if (t.batch != null && t.item_id) t.label = labelOf(t.item_id, t.batch);
+    let a = t.batch_alloc;
+    if (typeof a === 'string') { try { a = JSON.parse(a); } catch (e) { a = null; } }
+    if (Array.isArray(a) && t.item_id) t.batch_alloc = a.map(x => (x && x.n ? { ...x, label: labelOf(t.item_id, x.n) } : x));
+  }
+  return txs;
+}
 async function itemBatches(sql, itemId) {
   const [item] = await sql`SELECT id, current_balance, is_offcut FROM inventory_items WHERE id = ${itemId}`;
   if (!item) return null;
@@ -13109,6 +13135,7 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
         AND (NOT ${offcutOnly} OR (COALESCE(i.is_offcut, false) = true AND t.job_id IS NOT NULL))
       ORDER BY t.created_at DESC, t.id DESC
     `;
+    await relabelBatches(sql, txs);
     res.json(txs);
   } catch (err) {
     console.error(err);
@@ -13177,6 +13204,7 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
       WHERE t.item_id = ANY(${memberIds})
       ORDER BY t.created_at DESC, t.id DESC
     `;
+    await relabelBatches(sql, txs);
     if (!grouped) return res.json(txs);
     const currentBalance = members.reduce((sum, x) => sum + (x.deleted_at ? 0 : (parseFloat(x.current_balance) || 0)), 0);
     res.json({
