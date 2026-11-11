@@ -9756,7 +9756,7 @@ function jobStockBadge(j) {
   // just the one item's balance here made a job read "Low Stock" whenever
   // ITS brand happened to be short, even with plenty in another brand.
   const have = invIt ? paperGroupMembers(invIt).reduce((a, x) => a + (x.current_balance || 0), 0) : 0;
-  const need  = parseFloat(j.sheets) || 0;
+  const need  = jobStockNeedSheets(j);
   const pendingBadge = '<span class="badge badge-pending">&#9201; Pending Stock</span>';
   if (!invIt || !need || have >= need) return pendingBadge;
   if (have <= 0) {
@@ -9765,11 +9765,21 @@ function jobStockBadge(j) {
   return pendingBadge + ' <span class="badge badge-low-stock">&#9888; Low Stock</span>';
 }
 
+// The sheets of paper a pending job still needs from its paper item (owner, 2026-11-11): what is still
+// owed after a partial issue, else its packets in sheets less offcut / 2nd / 3rd paper
+// (jobFreshNeedSheets); the job card's Sheets only when it has no packets.
+function jobStockNeedSheets(j) {
+  const owed = typeof partialPendingSheets === 'function' ? partialPendingSheets(j) : 0;
+  if (owed > 0) return owed;
+  const fresh = jobFreshNeedSheets(j);
+  if (fresh > 0) return fresh;
+  return parseFloat(j.sheets) || 0;
+}
 function cardIssueStockBtn(j) {
   const invIt   = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
   // Pooled across the paper group — see the matching comment in jobStockBadge.
   const have    = invIt ? paperGroupMembers(invIt).reduce((a, x) => a + (x.current_balance || 0), 0) : 0;
-  const need    = parseFloat(j.sheets) || 0;
+  const need    = jobStockNeedSheets(j);
   const enough  = !need || (invIt && have >= need);
   // Three states once stock isn't 'enough':
   //   - On-hand = 0 → Out of Stock (red).
@@ -12103,7 +12113,7 @@ function renderInvPendingList() {
     // so at a glance you see which brands make up that pooled balance.
     const groupMembers = invIt ? paperGroupMembers(invIt) : [];
     const have     = groupMembers.reduce((a, x) => a + (x.current_balance || 0), 0);
-    const need     = parseFloat(j.sheets) || 0;
+    const need     = jobStockNeedSheets(j);
     const enough   = !need || (invIt && have >= need);
     const isOut    = !enough && have <= 0;
     const shortBy  = enough ? 0 : (need - have);
@@ -13118,7 +13128,7 @@ function openInvRemoveStock(id, opts) {
       </div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stockout-challan" placeholder="e.g. CH-2026-042"></div>
+      ${it.is_offcut ? '' /* offcuts: no Challan No. (owner, 2026-11-11) */ : '<div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stockout-challan" placeholder="e.g. CH-2026-042"></div>'}
       <div class="form-group"><label class="form-label">Reason</label>
         <select id="stockout-reason" onchange="stockOutReasonChanged(${id})">
           ${['job-card','manual-job-card','sold','damaged','offcut','adjustment'].map(r => {
@@ -13291,7 +13301,7 @@ async function saveInvRemoveStock(id) {
   const have = it ? (it.current_balance || 0) : 0;
   if (qty > have) { await alertDialog({ title: 'Not enough stock', message: `On hand is ${have.toLocaleString()} sheets. Requested ${qty.toLocaleString()}. Reconcile the count first (Edit → Adjust by).`, kind: 'warn' }); return; }
   const reason = document.getElementById('stockout-reason').value;
-  const challanNo = (document.getElementById('stockout-challan').value || '').trim() || null;
+  const challanNo = ((document.getElementById('stockout-challan') || {}).value || '').trim() || null;
   const entryDate = await readStockEntryDate('stockout-date');
   if (entryDate === false) return;
   const notes = document.getElementById('stockout-notes').value.trim();
