@@ -2298,6 +2298,7 @@
   .lc-field label { display: block; font-size: 11.5px; font-weight: 700; color: var(--text2); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .lc-field input, .lc-field select, .lc-field textarea { width: 100%; min-width: 0; font-size: 14px; padding: 7px 8px; border: 1.5px solid var(--border2); border-radius: 7px; background: #fff; box-sizing: border-box; }
   .lc-field.lc-wide { grid-column: span 2; }
+  .lc-hint { font-weight: 500; color: #b45309; font-size: 10.5px; }
   .lc-sec-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
   .lc-sec-row .lc-form-name { font-size: 10.5px; font-weight: 800; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; min-width: 108px; }
   .lc-sec { padding: 5px 11px; font-size: 13px; font-weight: 800; border-radius: 7px; border: 1.5px solid var(--border2); background: #fff; cursor: pointer; }
@@ -2327,9 +2328,12 @@
   .lc-rep th { background: var(--bg2); font-size: 11.5px; font-weight: 700; white-space: nowrap; }
   .lc-rep td.lc-ok { color: #166534; font-weight: 900; text-align: center; }
   .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-  .lc-mchip { padding: 6px 12px; border-radius: 16px; border: 1.5px solid var(--border2); background: #fff; font-weight: 700; font-size: 13px; cursor: pointer; }
+  .lc-mchip { padding: 2px 9px; border-radius: 12px; border: 1px solid var(--border2); background: #fff; font-weight: 700; font-size: 11.5px; line-height: 18px; cursor: pointer; }
+  .lc-searchbar { display: flex; border: 1.5px solid var(--border2); border-radius: 8px; background: #fff; overflow: hidden; }
+  .lc-searchbar select { border: 0; border-right: 1px solid var(--border2); border-radius: 0; background: var(--bg2); font-weight: 700; font-size: 13px; padding: 6px 8px; max-width: 45%; }
+  .lc-searchbar input { flex: 1; min-width: 0; border: 0; outline: 0; padding: 6px 10px; font-size: 13px; background: transparent; }
   .lc-mchip.is-on { background: #155e75; border-color: #155e75; color: #fff; }
-  .lc-mchip-n { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 3px; border-radius: 9px; background: rgba(0,0,0,.08); font-size: 11px; }
+  .lc-mchip-n { display: inline-block; min-width: 14px; padding: 0 4px; margin-left: 2px; border-radius: 8px; background: rgba(0,0,0,.08); font-size: 10px; line-height: 14px; }
   .lc-mchip.is-on .lc-mchip-n { background: rgba(255,255,255,.25); }
   .lc-legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin-bottom: 8px; }
   .lc-legend-sec { border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
@@ -26459,7 +26463,11 @@ function renderLineClearanceReport() {
     <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:10px;">
       <div><div class="dash-flbl">From</div><input type="date" value="${esc(lcState.from)}" onchange="lcSetFilter('from', this.value)"></div>
       <div><div class="dash-flbl">To</div><input type="date" value="${esc(lcState.to)}" onchange="lcSetFilter('to', this.value)"></div>
-      <div style="flex:1;min-width:200px;max-width:360px;"><div class="dash-flbl">Search</div><input type="search" placeholder="Machine, job no., company..." value="${esc(lcState.search)}" oninput="lcSearch(this.value)" style="width:100%;"></div>
+      <div style="flex:1;min-width:260px;max-width:520px;"><div class="dash-flbl">Search</div>
+        <div class="lc-searchbar">
+          <select onchange="lcSetFilter('machine', this.value)" title="Machine"><option value="">All machines</option>${[...new Set((lcState.rows || []).map(r => r.machine))].sort((x, y) => x.localeCompare(y)).map(m => `<option value="${esc(m)}" ${lcState.machine === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>
+          <input type="search" placeholder="Job no., company..." value="${esc(lcState.search)}" oninput="lcSearch(this.value)">
+        </div></div>
       <button class="btn btn-primary" style="margin-left:auto;" onclick="printLineClearance()">&#128424; Print</button>
     </div>
     <div id="lc-rep-body">${lcBodyHtml()}</div>`;
@@ -39885,7 +39893,7 @@ function stationHasQa() { return !!(stationOperator && stationOperator.kind === 
 function stationQaNowTime() { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
 function stationQaBlank() {
   return { entry_date: localDateISO(), entry_time: stationQaNowTime(), form: '', sections: [], machine: '',
-    qc_cleared: false, prev_job: '', waste: '', new_job: '', points: {}, remarks: '' };
+    qc_cleared: false, prev_job: '', prev_company: '', waste: '', new_job: '', new_company: '', points: {}, remarks: '' };
 }
 async function stationOpenQa() {
   stationView = 'qa';
@@ -39908,6 +39916,26 @@ async function stationQaLoadRecent() {
   if (el && stationView === 'qa') el.innerHTML = stationQaRecentHtml();
 }
 function stationQaSet(field, value) { if (stationQa) stationQa[field] = value; stationResetIdle(); }
+// Special jobs (not in the app) always start with 4 (owner, 2026-11-11) - their company is typed.
+function lcIsSpecialJob(v) { const m = String(v || '').match(/\d+/); return !!(m && m[0].startsWith('4')); }
+// Typing a job number fills its company from the job card (QA can still change it).
+const _lcJobTimers = {};
+function stationQaJob(which, value) {
+  stationQaSet(which + '_job', value);
+  clearTimeout(_lcJobTimers[which]);
+  const hint = document.getElementById('lc-' + which + '-hint');
+  if (hint) hint.textContent = lcIsSpecialJob(value) ? 'special job - type the company' : '';
+  if (!String(value).trim() || lcIsSpecialJob(value)) return;
+  _lcJobTimers[which] = setTimeout(async () => {
+    try {
+      const r = await api('GET', '/api/station/job-company?job=' + encodeURIComponent(value));
+      if (!stationQa || stationQa[which + '_job'] !== value) return;   // typed on since
+      const el = document.getElementById('lc-' + which + '-company');
+      if (r && r.found) { stationQa[which + '_company'] = r.client; if (el) el.value = r.client; if (hint) hint.textContent = ''; }
+      else if (hint) hint.textContent = 'not in the app - type the company';
+    } catch (e) { /* offline: QA types it */ }
+  }, 450);
+}
 // Picking the machine ticks its sections (from its roles); they can still be changed.
 function stationQaMachine(name) {
   const q = stationQa;
@@ -39961,10 +39989,10 @@ function stationQaHtml() {
           <div class="lc-field"><label>Time <span class="urdu" dir="rtl" lang="ur">وقت</span></label><input type="time" value="${esc(q.entry_time)}" onchange="stationQaSet('entry_time', this.value)"></div>
           <div class="lc-field"><label>QC <span class="urdu" dir="rtl" lang="ur">کیو سی</span></label>
             <label class="lc-qc ${q.qc_cleared ? 'is-on' : ''}"><input type="checkbox" ${q.qc_cleared ? 'checked' : ''} onchange="stationQaSet('qc_cleared', this.checked); this.closest('.lc-qc').classList.toggle('is-on', this.checked)"> Cleared by QC</label></div>
-          ${field('prev_job', 'Previous Job No.', 'پچھلی جاب نمبر')}
+          ${lcJobFields(q, 'prev', 'Previous Job No.', 'پچھلی جاب نمبر', 'Previous Company')}
           <div class="lc-field"><label>Waste <span style="font-weight:500;">(prev. job)</span> <span class="urdu" dir="rtl" lang="ur">ویسٹ</span></label>
             <input type="number" inputmode="numeric" min="0" step="any" value="${esc(q.waste == null ? '' : String(q.waste))}" oninput="stationQaSet('waste', this.value)"></div>
-          ${field('new_job', 'New Job No.', 'نئی جاب نمبر')}
+          ${lcJobFields(q, 'new', 'New Job No.', 'نئی جاب نمبر', 'New Company')}
           <div class="lc-field lc-wide"><label>Remarks <span class="urdu" dir="rtl" lang="ur">ریمارکس</span></label>
             <input type="text" value="${esc(q.remarks || '')}" oninput="stationQaSet('remarks', this.value)"></div>
         </div>
@@ -39977,6 +40005,13 @@ function stationQaHtml() {
       <div class="lc-card"><h3>Latest entries</h3><div id="lc-recent">${stationQaRecentHtml()}</div></div>
     </div>`;
 }
+// A job number box + its company box (filled from the job card; typed for a special job).
+function lcJobFields(q, which, label, ur, coLabel) {
+  return `<div class="lc-field"><label>${label} <span class="urdu" dir="rtl" lang="ur">${ur}</span></label>
+      <input type="text" value="${esc(q[which + '_job'] || '')}" oninput="stationQaJob('${which}', this.value)"></div>
+    <div class="lc-field"><label>${coLabel} <span id="lc-${which}-hint" class="lc-hint">${lcIsSpecialJob(q[which + '_job']) ? 'special job - type the company' : ''}</span></label>
+      <input type="text" id="lc-${which}-company" placeholder="from the job card" value="${esc(q[which + '_company'] || '')}" oninput="stationQaSet('${which}_company', this.value)"></div>`;
+}
 function stationQaRecentHtml() {
   if (stationQaRecent == null) return '<div class="empty">Loading…</div>';
   if (!stationQaRecent.length) return '<div style="color:var(--text2);">Nothing saved yet.</div>';
@@ -39984,7 +40019,7 @@ function stationQaRecentHtml() {
     const miss = lcMissing(e);
     return `<div class="lc-entry ${e.cleared ? 'ok' : 'no'}">
       <b>${esc(fmtDMY(e.entry_date))} ${esc(e.entry_time || '')}</b> &middot; ${esc(e.machine)} &middot; ${esc((e.sections || []).join(', '))}<br>
-      Job ${esc(e.prev_job)}${e.waste != null ? ` (waste ${esc(lcWaste(e.waste))})` : ''} &rarr; ${esc(e.new_job)} &middot; Line Cleared: ${e.cleared ? '<b class="lc-y">Y</b>' : `<b class="lc-x">N</b> (not ticked: ${miss.join(', ')})`} &middot; QC: ${e.qc_cleared ? '<b class="lc-y">&#10003;</b>' : '<b class="lc-x">&#10007;</b>'}
+      Job ${esc(e.prev_job)}${e.prev_company ? ' (' + esc(e.prev_company) + ')' : ''}${e.waste != null ? ` (waste ${esc(lcWaste(e.waste))})` : ''} &rarr; ${esc(e.new_job)} &middot; Line Cleared: ${e.cleared ? '<b class="lc-y">Y</b>' : `<b class="lc-x">N</b> (not ticked: ${miss.join(', ')})`} &middot; QC: ${e.qc_cleared ? '<b class="lc-y">&#10003;</b>' : '<b class="lc-x">&#10007;</b>'}
       ${e.remarks ? `<br><span style="color:var(--text2);">${esc(e.remarks)}</span>` : ''}</div>`;
   }).join('');
 }

@@ -149,6 +149,13 @@ const LC_FORMS = {
   A: [['CTP', [1, 2, 3, 4]], ['Printing', [5, 6, 7, 8]], ['Coating', [9, 10]]],
   B: [['Die Cutting', [1, 2]], ['Breaking', [3, 4]], ['Sorting', [5, 6]], ['Folder Gluer', [7, 8, 9]], ['FG Dispatch', [10, 11, 12]]],
 };
+// A job number QA typed (E-1068, 1068 ...) -> the app's job id. Special jobs, not in the app,
+// always start with 4 (owner, 2026-11-11): never looked up.
+function lcJobId(v) {
+  const m = String(v || '').match(/\d+/);
+  if (!m || m[0].startsWith('4')) return null;
+  return parseInt(m[0], 10);
+}
 // Each section's waste row on the job card (CTP and FG Dispatch have none).
 const LC_SECTION_WASTE_KEYS = {
   Printing: ['printed_waste_sheets'], Coating: ['uv_waste_sheets', 'embellish_waste_sheets'], 'Die Cutting': ['die_cutting_waste'],
@@ -349,7 +356,7 @@ function getDb() {
 // Bumped again for the Access Register row inv_btn_print_sticker (split off inv_btn_batches, 2026-11-11).
 // Bumped again for Edit / Hidden buttons - View on them becomes Hidden (Print: Edit), 2026-11-11.
 // Bumped again for QA Line Clearance (operators.kind, line_clearance, QC / QA access columns), 2026-11-11.
-const SCHEMA_VERSION = 'v2026-11-11-line-clearance-waste';   // + line_clearance.qc_cleared, .waste
+const SCHEMA_VERSION = 'v2026-11-11-line-clearance-company';   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1442,6 +1449,9 @@ async function initDb() {
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS qc_cleared BOOLEAN NOT NULL DEFAULT false`;
     // Waste QA counts for the previous job (owner, 2026-11-11); empty when not counted.
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS waste NUMERIC`;
+    // The two jobs' companies as QA saved them (filled from the job card, or typed for a special job).
+    await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS prev_company TEXT NOT NULL DEFAULT ''`;
+    await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS new_company TEXT NOT NULL DEFAULT ''`;
     // Every floor operator (person) in one list (owner, 2026-10-24): a
     // machine picks its people from it. Filled from the machines' people
     // here, and kept in step whenever a machine's people are saved.
@@ -7900,13 +7910,24 @@ app.post('/api/station/line-clearance', requireStationUser, async (req, res) => 
     if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return res.status(400).json({ error: 'Waste must be a number' });
     const qaName = lcText(b.qa_name, 80) || v.operator.name;
     const row = (await sql`
-      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, prev_job, new_job, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
+      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, prev_job, prev_company, new_job, new_company, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
       VALUES (${date}, ${lcText(b.entry_time, 10)}, ${form}, ${sections}, ${machine},
-              ${prev}, ${next}, ${JSON.stringify(points)}, ${cleared}, ${b.qc_cleared === true}, ${waste}, ${lcText(b.remarks, 500)}, ${qaName}, ${v.operator.id})
+              ${prev}, ${lcText(b.prev_company, 120)}, ${next}, ${lcText(b.new_company, 120)}, ${JSON.stringify(points)}, ${cleared}, ${b.qc_cleared === true}, ${waste}, ${lcText(b.remarks, 500)}, ${qaName}, ${v.operator.id})
       RETURNING *`)[0];
     await logAudit(sql, req, { action: 'line_clearance.create', entityType: 'line_clearance', entityId: row.id,
       summary: `Line clearance ${machine}: ${prev} → ${next} (${cleared ? 'cleared' : 'NOT cleared'}) by ${qaName}` });
     res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// The company on a job card, for the QA screen's company boxes (special jobs starting with 4: none).
+app.get('/api/station/job-company', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = lcJobId(req.query.job);
+    if (!id) return res.json({ found: false });
+    const j = (await sql`SELECT id, client FROM jobs WHERE id = ${id} AND deleted_at IS NULL`)[0];
+    res.json(j ? { found: true, client: j.client || '' } : { found: false });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // QA's own recent entries on his screen (PIN in the body, never the URL).
@@ -7929,7 +7950,7 @@ app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', '
     const rows = await sql`SELECT * FROM line_clearance WHERE entry_date BETWEEN ${from} AND ${to} ORDER BY entry_date, entry_time, id`;
     // The jobs QA typed (E-1068, 1068 ...): their company, and the previous job's own waste on the
     // job card for this machine's section(s) - entries on this machine when the card names it.
-    const jobIdOf = v => { const m = String(v || '').match(/\d+/); return m ? parseInt(m[0], 10) : null; };
+    const jobIdOf = lcJobId;
     const ids = [...new Set(rows.flatMap(r => [jobIdOf(r.prev_job), jobIdOf(r.new_job)]).filter(Boolean))];
     const jobs = ids.length ? await sql`SELECT id, client, particulars FROM jobs WHERE id = ANY(${ids})` : [];
     const byId = new Map(jobs.map(j => [j.id, j]));
@@ -7944,8 +7965,9 @@ app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', '
     };
     for (const r of rows) {
       const pj = byId.get(jobIdOf(r.prev_job)), nj = byId.get(jobIdOf(r.new_job));
-      r.prev_company = pj ? pj.client : null;
-      r.new_company = nj ? nj.client : null;
+      // What QA saved wins; older entries fall back to the job card.
+      r.prev_company = r.prev_company || (pj ? pj.client : '') || null;
+      r.new_company = r.new_company || (nj ? nj.client : '') || null;
       let total = null;
       if (pj) {
         const keys = new Set((r.sections || []).flatMap(sec => LC_SECTION_WASTE_KEYS[sec] || []));
