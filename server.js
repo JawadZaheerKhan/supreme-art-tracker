@@ -464,7 +464,7 @@ function getDb() {
 // Bumped again for the Access Register row inv_btn_print_sticker (split off inv_btn_batches, 2026-11-11).
 // Bumped again for Edit / Hidden buttons - View on them becomes Hidden (Print: Edit), 2026-11-11.
 // Bumped again for QA Line Clearance (operators.kind, line_clearance, QC / QA access columns), 2026-11-11.
-const SCHEMA_VERSION = 'v2026-11-11-line-clearance-edit';   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-11-machine-id';   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1530,6 +1530,11 @@ async function initDb() {
     await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT ''`;
     // The line managers' Manager PINs are QC now (owner, 2026-11-11).
     await sql`UPDATE operators SET kind = 'qc' WHERE is_manager AND kind = ''`;
+    // Machine ID (owner, 2026-11-11): SAPL/PR/ + the machine's PIN, editable afterwards. Machines only -
+    // not QC / QA / manager entries, nor the PIN-less info-only ones (Breaking / Driver / Loader).
+    await sql`ALTER TABLE operators ADD COLUMN IF NOT EXISTS machine_code TEXT NOT NULL DEFAULT ''`;
+    await sql`UPDATE operators SET machine_code = 'SAPL/PR/' || pin
+               WHERE machine_code = '' AND COALESCE(pin, '') <> '' AND COALESCE(kind, '') = '' AND NOT is_manager`;
     // Line Clearance Log (owner, 2026-11-11): one row per changeover QA checks - everything typed by QA.
     // form A = CTP / Printing / Coating (10 points), B = Die Cutting ... FG Dispatch (12 points);
     // points = { "1": true, "2": false, ... } for the chosen sections; cleared = every one ticked.
@@ -1563,6 +1568,7 @@ async function initDb() {
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS prev_company TEXT NOT NULL DEFAULT ''`;
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS new_company TEXT NOT NULL DEFAULT ''`;
     // Corrected / deleted from the report (owner, 2026-11-11). A deleted entry is only hidden.
+    await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS machine_code TEXT NOT NULL DEFAULT ''`;   // the machine's ID when saved
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`;
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS edited_by TEXT`;
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
@@ -3477,6 +3483,12 @@ function parseOperatorRoles(body) {
   return { roles: roleIds, stageIndices, primary: stageIndices[0] };
 }
 
+// A machine's ID as saved (owner, 2026-11-11): what was typed, else SAPL/PR/ + its PIN. QC / QA / managers have none.
+function machineCodeOf(body, kind, isManager, pin) {
+  if (kind || isManager) return '';
+  const typed = String((body && body.machine_code) || '').trim().slice(0, 40);
+  return typed || (pin ? 'SAPL/PR/' + pin : '');
+}
 // Station type sent with an operators entry: 'qc', 'qa' or '' (owner, 2026-11-11).
 function operatorKindOf(body) { const k = String((body && body.kind) || ''); return OPERATOR_KIND_ROLE[k] ? k : ''; }
 // What a QC / QA PIN may do at the Station: its own Operator column in the Access Register.
@@ -3542,8 +3554,8 @@ app.post('/api/operators', requireOperatorAdmin, async (req, res) => {
     const dupe = pin === '' ? [] : await sql`SELECT id FROM operators WHERE pin = ${pin} AND active`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another machine' });
     const inserted = await sql`
-      INSERT INTO operators (name, pin, stage_index, stage_indices, roles, persons, is_manager, kind)
-      VALUES (${name}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${JSON.stringify(persons)}, ${isManager}, ${kind}) RETURNING *
+      INSERT INTO operators (name, pin, stage_index, stage_indices, roles, persons, is_manager, kind, machine_code)
+      VALUES (${name}, ${pin}, ${parsed.primary}, ${parsed.stageIndices}, ${parsed.roles}, ${JSON.stringify(persons)}, ${isManager}, ${kind}, ${machineCodeOf(req.body, kind, isManager, pin)}) RETURNING *
     `;
     await logAudit(sql, req, { action: 'operator.create', entityType: 'operator', entityId: inserted[0].id, summary: `Added ${isManager ? 'manager' : 'machine'} ${name} (roles ${parsed.roles.join(',')}, ${persons.length} operator${persons.length === 1 ? '' : 's'})` });
     await syncFloorPeople(sql, persons);
@@ -3576,7 +3588,7 @@ app.put('/api/operators/:id', requireOperatorAdmin, async (req, res) => {
     const dupe = pin === '' ? [] : await sql`SELECT id FROM operators WHERE pin = ${pin} AND active AND id <> ${id}`;
     if (dupe.length) return res.status(409).json({ error: 'That PIN is already in use by another machine' });
     const updated = await sql`
-      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, persons=${JSON.stringify(persons)}, active=${active}, is_manager=${isManager}, kind=${kind}
+      UPDATE operators SET name=${name}, pin=${pin}, stage_index=${parsed.primary}, stage_indices=${parsed.stageIndices}, roles=${parsed.roles}, persons=${JSON.stringify(persons)}, active=${active}, is_manager=${isManager}, kind=${kind}, machine_code=${machineCodeOf(req.body, kind, isManager, pin)}
       WHERE id=${id} RETURNING *
     `;
     if (!updated.length) return res.status(404).json({ error: 'Operator not found' });
@@ -3807,7 +3819,7 @@ app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const rows = await sql`SELECT name, persons, roles, is_manager FROM operators WHERE active AND persons IS NOT NULL`;
+    const rows = await sql`SELECT name, persons, roles, is_manager, kind, machine_code FROM operators WHERE active AND persons IS NOT NULL`;
     const out = [];
     const seen = new Set();
     for (const r of rows) {
@@ -3824,7 +3836,7 @@ app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
         // Daily Production print pulls everyone whose machine has the
         // 'break' role). Additive — existing all-persons consumers are
         // free to ignore it.
-        out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName, roles, manager: !!r.is_manager });
+        out.push({ name: n, name_ur: (p.name_ur || '').trim(), machine: machineName, roles, manager: !!r.is_manager, kind: r.kind || '', machine_code: r.machine_code || '' });
       }
     }
     out.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
@@ -8073,8 +8085,8 @@ app.post('/api/station/line-clearance', requireStationUser, async (req, res) => 
     if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return res.status(400).json({ error: 'Waste must be a number' });
     const qaName = lcText(b.qa_name, 80) || v.operator.name;
     const row = (await sql`
-      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, prev_job, prev_company, new_job, new_company, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
-      VALUES (${date}, ${lcText(b.entry_time, 10)}, ${form}, ${sections}, ${machine},
+      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, machine_code, prev_job, prev_company, new_job, new_company, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
+      VALUES (${date}, ${lcText(b.entry_time, 10)}, ${form}, ${sections}, ${machine}, ${lcText(b.machine_code, 40)},
               ${prev}, ${lcText(b.prev_company, 120)}, ${next}, ${lcText(b.new_company, 120)}, ${JSON.stringify(points)}, ${cleared}, ${b.qc_cleared === true}, ${waste}, ${lcText(b.remarks, 500)}, ${qaName}, ${v.operator.id})
       RETURNING *`)[0];
     await logAudit(sql, req, { action: 'line_clearance.create', entityType: 'line_clearance', entityId: row.id,
@@ -8109,7 +8121,7 @@ app.get('/api/dashboard/running-now', requirePermission('dashboard_tab_access', 
     await dbReady;
     const sql = getDb();
     const rows = await sql`
-      SELECT DISTINCT ON (machine) id, machine, sections, new_job, new_company, prev_job, entry_date, entry_time, created_at, qa_name
+      SELECT DISTINCT ON (machine) id, machine, machine_code, sections, new_job, new_company, prev_job, entry_date, entry_time, created_at, qa_name
         FROM line_clearance
        WHERE deleted_at IS NULL
        ORDER BY machine, entry_date DESC, entry_time DESC, created_at DESC`;

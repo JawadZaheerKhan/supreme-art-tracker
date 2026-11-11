@@ -26629,7 +26629,7 @@ function lcTableHtml(g, withLegend) {
     ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
   return `<div class="lc-log">
-    <div class="lc-machine">${esc(g.machine)} <span>${esc(secs.map(x => x.name).join(' · '))} &middot; ${g.list.length} entr${g.list.length === 1 ? 'y' : 'ies'}</span></div>
+    <div class="lc-machine">${esc(g.machine)}${(g.list.find(e => e.machine_code) || {}).machine_code ? ` <b style="font-size:12px;color:var(--text2);">${esc(g.list.find(e => e.machine_code).machine_code)}</b>` : ''} <span>${esc(secs.map(x => x.name).join(' · '))} &middot; ${g.list.length} entr${g.list.length === 1 ? 'y' : 'ies'}</span></div>
     ${withLegend ? lcLegendHtml(secs) : ''}
     <div class="report-scroll-wrap lc-wrap-tbl"><table class="ss-table lc-rep"><thead>${head}</thead><tbody>${body}</tbody></table></div></div>`;
 }
@@ -26743,7 +26743,7 @@ function printLineClearance() {
       <div style="margin-bottom:6px;">${reportPrintHeading({ title: 'LINE CLEARANCE LOG', formCode: `Doc No: ${f.doc} · Rev:00 · Effective Date: 01-10-2026`, scope: f.title,
         dateText: `${fmtDMY(lcState.from)} - ${fmtDMY(lcState.to)}`, note: `Generated: ${fmtDMYT(new Date())}` })}</div>
       <table style="width:100%;font-size:8.5pt;border-collapse:collapse;margin-bottom:6px;"><tr>
-        <td style="${td}"><b>Machine Name:</b> ${esc(g.machine)}</td>
+        <td style="${td}"><b>Machine Name:</b> ${esc(g.machine)}</td><td style="${td}"><b>Machine ID:</b> ${esc((g.list.find(e => e.machine_code) || {}).machine_code || '')}</td>
         <td style="${td}"><b>Section:</b> ${esc(secs.map(x => x.name).join(', '))}</td>
         <td style="${td}"><b>Period:</b> ${esc(fmtDMY(dates[0]))} to ${esc(fmtDMY(dates[dates.length - 1]))}</td></tr></table>
       <table style="width:100%;font-size:7.5pt;border-collapse:collapse;margin-bottom:6px;"><tr><td colspan="4" style="${td}font-weight:bold;">CHECK POINTS &middot; &#10003; OK &nbsp; &#10007; Not OK &nbsp; &ndash; N/A</td></tr>${legend}</table>
@@ -39187,7 +39187,7 @@ function renderOperators() {
     <div class="inv-card${o.active===false?' is-done':''}">
       <div class="inv-main">
         <div class="inv-name">${o.is_manager ? '&#128100;' : '&#9881;'} ${esc(o.name || '(unnamed machine)')}${o.kind==='qa'?' <span class="inv-badge" style="background:#ecfeff;color:#155e75;">QA Incharge</span>':(o.kind==='qc'||o.is_manager)?' <span class="inv-badge" style="background:#f5f3ff;color:#5b21b6;">QC</span>':''}${o.active===false?' <span class="inv-badge" style="background:var(--bg2);color:var(--text2);">inactive</span>':''}</div>
-        <div class="inv-sub">${o.is_manager ? 'All stages' : (esc(operatorStageNames(o)) || (o.kind === 'qa' ? 'Line Clearance' : ''))} · ${_opsMgrActive ? '' : (o.pin ? 'PIN ' + esc(o.pin) : 'No PIN (info only)') + ' · '}${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
+        <div class="inv-sub">${o.machine_code ? `<b>${esc(o.machine_code)}</b> · ` : ''}${o.is_manager ? 'All stages' : (esc(operatorStageNames(o)) || (o.kind === 'qa' ? 'Line Clearance' : ''))} · ${_opsMgrActive ? '' : (o.pin ? 'PIN ' + esc(o.pin) : 'No PIN (info only)') + ' · '}${persons.length} operator${persons.length === 1 ? '' : 's'}: ${peopleStr}</div>
       </div>
       <div class="inv-actions">
         ${_opsMgrActive
@@ -39349,7 +39349,12 @@ function openOperatorModal(id) {
       <div class="form-group"><label class="form-label" id="op-name-label">${k.nameLabel}</label>
         <input type="text" id="op-name" value="${o?esc(o.name||''):''}" placeholder="e.g. SM-52, Heidelberg #2"></div>
       <div class="form-group"><label class="form-label">3-digit PIN <span style="font-weight:400;color:var(--text2);font-size:12px;">(not needed for Breaking / Driver / Loader only)</span></label>
-        <input type="text" id="op-pin" inputmode="numeric" maxlength="3" value="${o?esc(o.pin):''}" placeholder="e.g. 123" style="max-width:160px;"></div>
+        <input type="text" id="op-pin" inputmode="numeric" maxlength="3" value="${o?esc(o.pin):''}" placeholder="e.g. 123" style="max-width:160px;" oninput="opPinTyped()"></div>
+    </div>
+    <div class="form-group" id="op-code-group" style="${kind ? 'display:none;' : ''}">
+      <label class="form-label">Machine ID <span style="font-weight:400;color:var(--text2);font-size:12px;">(SAPL/PR/ + the PIN - change it if needed)</span></label>
+      <input type="text" id="op-code" maxlength="40" value="${esc((o && o.machine_code) || (o && o.pin && !kind ? 'SAPL/PR/' + o.pin : ''))}" placeholder="SAPL/PR/005" style="max-width:220px;"
+        data-auto="${!(o && o.machine_code) || (o && o.machine_code === 'SAPL/PR/' + o.pin) ? '1' : ''}" oninput="this.dataset.auto = ''">
     </div>
     <div class="form-group" id="op-roles-group" style="${kind ? 'display:none;' : ''}">
       <label class="form-label">Roles <span style="font-weight:400;color:var(--text2);">(tick all this machine handles)</span></label>
@@ -39377,6 +39382,11 @@ const OP_KIND_TEXT = {
   qc: { label: 'QC', hint: 'Sees every stage and can change the Machine field - no roles to tick', title: 'QC', nameLabel: 'QC Station Name', persons: 'QC people using this PIN', person: 'QC person' },
   qa: { label: 'QA Incharge', hint: 'Opens the Line Clearance screen - no roles to tick', title: 'QA Incharge', nameLabel: 'QA Station Name', persons: 'QA people using this PIN', person: 'QA person' },
 };
+// The Machine ID follows the PIN (SAPL/PR/ + PIN) until it is typed over.
+function opPinTyped() {
+  const code = document.getElementById('op-code'), pin = (document.getElementById('op-pin') || {}).value || '';
+  if (code && code.dataset.auto) code.value = pin.trim() ? 'SAPL/PR/' + pin.trim() : '';
+}
 function opKindValue() { const r = document.querySelector('input[name="op-kind"]:checked'); return r ? r.value : ''; }
 // Switching the type: roles only for a Machine; the labels follow.
 function opKindChanged(el) {
@@ -39385,6 +39395,8 @@ function opKindChanged(el) {
   document.querySelectorAll('.op-kind-opt').forEach(l => l.classList.toggle('is-on', !!l.querySelector('input:checked')));
   const rolesGroup = document.getElementById('op-roles-group');
   if (rolesGroup) rolesGroup.style.display = kind ? 'none' : '';
+  const codeGroup = document.getElementById('op-code-group');
+  if (codeGroup) codeGroup.style.display = kind ? 'none' : '';
   const nameLabel = document.getElementById('op-name-label');
   if (nameLabel) nameLabel.textContent = k.nameLabel;
   const personsLabel = document.getElementById('op-persons-label');
@@ -39561,7 +39573,7 @@ async function saveOperator(id) {
   if (!(infoOnly && pin === '') && !/^\d{3}$/.test(pin)) { notify('PIN must be exactly 3 digits'); return; }
   if (!roles.length && kind !== 'qa') { notify('Select at least one role'); return; }   // QA Incharge needs none
   if (!persons.length) { notify('Add at least one ' + OP_KIND_TEXT[kind].person); return; }
-  const body = { name, pin, roles, persons, is_manager: isManager, kind };
+  const body = { name, pin, roles, persons, is_manager: isManager, kind, machine_code: kind ? '' : ((document.getElementById('op-code') || {}).value || '').trim() };
   if (activeEl) body.active = activeEl.checked;
   showSaving(true);
   try {
@@ -40236,8 +40248,10 @@ async function stationOpenQa() {
   if (!stationQaMachines.length) {
     api('GET', '/api/operators/all-persons').then(list => {
       const byName = new Map();
-      for (const x of list || []) if (x.machine && !x.manager && lcSectionsForRoles(x.roles)) byName.set(x.machine, x.roles || []);
-      stationQaMachines = [...byName.entries()].map(([name, roles]) => ({ name, roles })).sort((a, b) => a.name.localeCompare(b.name));
+      // Machines only - QC / QA (and old Manager PINs) are people, not machines (owner, 2026-11-11).
+      for (const x of list || []) if (x.machine && !x.manager && !x.kind && lcSectionsForRoles(x.roles)) byName.set(x.machine, { roles: x.roles || [], code: x.machine_code || '' });
+      stationQaMachines = [...byName.entries()].map(([name, v]) => ({ name, roles: v.roles, code: v.code }))
+        .sort((a, b) => (a.code || '~').localeCompare(b.code || '~', undefined, { numeric: true }) || a.name.localeCompare(b.name));
       if (stationView === 'qa') stationRender();
     }).catch(() => {});
   }
@@ -40274,6 +40288,7 @@ function stationQaMachine(name) {
   const q = stationQa;
   q.machine = name;
   const m = stationQaMachines.find(x => x.name === name);
+  q.machine_code = (m && m.code) || '';
   const hit = m && lcSectionsForRoles(m.roles);
   if (hit) { q.form = hit.form; q.sections = hit.sections; q.points = {}; }
   stationRender();
@@ -40317,7 +40332,7 @@ function stationQaHtml() {
         <h3>Machine &amp; jobs</h3>
         <div class="lc-grid">
           <div class="lc-field lc-wide"><label>Machine <span class="urdu" dir="rtl" lang="ur">مشین</span>${q.sections.map(n => ` <span class="lc-sec-tag">${esc(n)}</span>`).join('')}</label>
-            <select onchange="stationQaMachine(this.value)"><option value="">- Pick the machine -</option>${machineOpts.map(m => `<option value="${esc(m.name)}" ${q.machine === m.name ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div>
+            <select onchange="stationQaMachine(this.value)"><option value="">- Pick the machine -</option>${machineOpts.map(m => `<option value="${esc(m.name)}" ${q.machine === m.name ? 'selected' : ''}>${m.code ? esc(m.code) + ' · ' : ''}${esc(m.name)}</option>`).join('')}</select></div>
           <div class="lc-field"><label>Date <span class="urdu" dir="rtl" lang="ur">تاریخ</span></label><input type="date" value="${esc(q.entry_date)}" onchange="stationQaSet('entry_date', this.value)"></div>
           <div class="lc-field"><label>Time <span class="urdu" dir="rtl" lang="ur">وقت</span></label><input type="time" value="${esc(q.entry_time)}" onchange="stationQaSet('entry_time', this.value)"></div>
           <div class="lc-field"><label>QC <span class="urdu" dir="rtl" lang="ur">کیو سی</span></label>
