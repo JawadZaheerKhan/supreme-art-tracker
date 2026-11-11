@@ -5527,8 +5527,9 @@ function ordinalN(n) { const v = n % 100, sx = ['th', 'st', 'nd', 'rd']; return 
 // As a sticker writes it: the number and the year the batch came in, 02-2026.
 function batchNoOf(n, at) { return String(n).padStart(2, '0') + '-' + businessDateISO(at ? new Date(at) : new Date()).slice(0, 4); }
 async function itemBatches(sql, itemId) {
-  const [item] = await sql`SELECT id, current_balance FROM inventory_items WHERE id = ${itemId}`;
+  const [item] = await sql`SELECT id, current_balance, is_offcut FROM inventory_items WHERE id = ${itemId}`;
   if (!item) return null;
+  if (item.is_offcut) return [];   // offcuts have no batches (owner, 2026-11-11)
   const rows = await sql`
     SELECT t.id, t.batch, t.change, t.created_at, t.challan_no, t.po_no, t.invoice_no, t.batch_label, t.batch_alloc
       FROM inventory_transactions t
@@ -5573,6 +5574,9 @@ async function itemBatches(sql, itemId) {
 // oldest first, else the oldest with stock first. batch: a number or a list of them.
 async function batchPlan(sql, itemId, change, reason, batch, reversesTxId, occurredAt) {
   if (reversesTxId) return { batch: null, alloc: null };
+  // Offcuts have no batches (owner, 2026-11-11): nothing recorded either way.
+  const [offc] = await sql`SELECT is_offcut FROM inventory_items WHERE id = ${itemId}`;
+  if (offc && offc.is_offcut) return { batch: null, alloc: null };
   // A stock-out with an amount per batch ([{ n, sheets }], owner 2026-11-04): exactly those.
   if (change < 0 && Array.isArray(batch) && batch.some(x => x && typeof x === 'object')) {
     const byN = new Map();
