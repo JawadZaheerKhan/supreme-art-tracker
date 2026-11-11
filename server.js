@@ -3215,6 +3215,27 @@ app.delete('/api/report-warnings/ignore/:kind/:job_id/:index', requirePermission
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Jobs Report Batch column (owner, 2026-11-10): the batch numbers each stock-out took.
+// Jobs Report Machine Time (owner, 2026-11-11): each machine's line clearances in order - the New Job of one
+// entry runs until the machine's next entry (end null = still on the machine). Times are as QA typed them.
+app.get('/api/reports/job-machine-times', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT machine, entry_date, entry_time, new_job FROM line_clearance
+       WHERE deleted_at IS NULL
+       ORDER BY machine, entry_date, entry_time, created_at`;
+    const at = r => String(r.entry_date instanceof Date ? r.entry_date.toISOString() : r.entry_date).slice(0, 10) + 'T' + (r.entry_time || '00:00');
+    const out = [];
+    rows.forEach((r, i) => {
+      const id = lcJobId(r.new_job);
+      if (!id) return;
+      const next = rows[i + 1] && rows[i + 1].machine === r.machine ? rows[i + 1] : null;
+      out.push({ job_id: id, machine: r.machine, start: at(r), end: next ? at(next) : null });
+    });
+    res.json(out);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 app.get('/api/reports/paper-batches', requireAuth, async (req, res) => {
   try {
     await dbReady;
@@ -8122,7 +8143,7 @@ app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', '
     // job card for this machine's section(s) - entries on this machine when the card names it.
     const jobIdOf = lcJobId;
     const ids = [...new Set(rows.flatMap(r => [jobIdOf(r.prev_job), jobIdOf(r.new_job)]).filter(Boolean))];
-    const jobs = ids.length ? await sql`SELECT id, client, particulars FROM jobs WHERE id = ANY(${ids})` : [];
+    const jobs = ids.length ? await sql`SELECT id, name, client, particulars FROM jobs WHERE id = ANY(${ids})` : [];
     const byId = new Map(jobs.map(j => [j.id, j]));
     const rowSum = (row, machine) => {
       if (!row) return null;
@@ -8136,6 +8157,8 @@ app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', '
     for (const r of rows) {
       const pj = byId.get(jobIdOf(r.prev_job)), nj = byId.get(jobIdOf(r.new_job));
       // What QA saved wins; older entries fall back to the job card.
+      r.prev_job_name = pj ? pj.name || '' : '';
+      r.new_job_name = nj ? nj.name || '' : '';
       r.prev_company = r.prev_company || (pj ? pj.client : '') || null;
       r.new_company = r.new_company || (nj ? nj.client : '') || null;
       let total = null;

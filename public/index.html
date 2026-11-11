@@ -18592,6 +18592,36 @@ function loadJrTxBatches() {
     if (document.getElementById('rt-jobs-report') && typeof renderJobsReport === 'function') renderJobsReport();
   }).catch(() => {}).finally(() => { _jrTxBatchesLoading = false; });
 }
+// Jobs Report Machine Time (owner, 2026-11-11): job id -> [{ machine, start, end }] from QA's line clearances.
+let _jrMachineTimes = null, _jrMachineTimesLoading = false;
+function loadJrMachineTimes() {
+  if (_jrMachineTimesLoading) return;
+  _jrMachineTimesLoading = true;
+  api('GET', '/api/reports/job-machine-times').then(rows => {
+    const m = new Map();
+    for (const r of rows || []) { const l = m.get(Number(r.job_id)) || []; l.push(r); m.set(Number(r.job_id), l); }
+    _jrMachineTimes = m;
+    if (document.getElementById('rt-jobs-report') && typeof renderJobsReport === 'function') renderJobsReport();
+  }).catch(() => {}).finally(() => { _jrMachineTimesLoading = false; });
+}
+function jrDur(mins) {
+  mins = Math.max(0, Math.round(mins));
+  return mins < 60 ? mins + 'm' : mins < 1440 ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : Math.floor(mins / 1440) + 'd ' + Math.floor((mins % 1440) / 60) + 'h';
+}
+// "SM-102 1h 20m · Die Cut 1 running 45m" - each machine the job was on, how long (QA's times).
+function jobMachineTimeText(j) {
+  const list = _jrMachineTimes && _jrMachineTimes.get(Number(j.id));
+  if (!list || !list.length) return '';
+  const byM = new Map();
+  for (const x of list) {
+    const end = x.end ? new Date(x.end) : new Date();
+    const mins = (end - new Date(x.start)) / 60000;
+    const e = byM.get(x.machine) || { mins: 0, running: false };
+    e.mins += Math.max(0, mins); if (!x.end) e.running = true;
+    byM.set(x.machine, e);
+  }
+  return [...byM.entries()].map(([m, e]) => `${m} ${e.running ? 'running ' : ''}${jrDur(e.mins)}`).join(' · ');
+}
 // "1, 2" for the main paper, then " · 2nd: 1" for a 2nd / 3rd paper. Blank when nothing was issued.
 function jobPaperBatchesText(j) {
   if (!_jrTxBatches) return '';
@@ -18611,6 +18641,7 @@ function openJobsReport() {
   const pane = document.getElementById('rt-jobs-report');
   if (!pane) return;
   loadJrTxBatches();
+  loadJrMachineTimes();
   if (jobsReportState.period !== 'custom') {   // re-applied every open so "Today" stays today
     const r = periodToDateRange(jobsReportState.period);
     jobsReportState.dfrom = r.from; jobsReportState.dto = r.to;
@@ -19266,6 +19297,7 @@ function buildJobsReportRows() {
       weightKg: (() => { const f = jobPaperFifo(j, SF, packKgJR); return f ? fifoSum(f.whole(), 'kg') : jrWeightKg(packets, packKgJR); })(),
       paperBatches: jobPaperBatchesText(j),
       machine: j.machine || '',
+      machineTime: jobMachineTimeText(j),
       coatings: Array.isArray(j.coatings) ? j.coatings.join(', ') : '',
       colors: String((((j.particulars || {}).no_of_colors) || {}).quantity || '').trim(),
       plates: String((((j.particulars || {}).plates) || {}).quantity || '').trim(),
@@ -19379,6 +19411,7 @@ function buildJobsReportRows() {
         // kg a packet across the members, weighted by their packets.
         packKg: (() => { const w = sorted.filter(b => b.packKg != null && +b.packets > 0); const pk = w.reduce((a, b) => a + (+b.packets), 0); return pk > 0 ? w.reduce((a, b) => a + (+b.packets) * b.packKg, 0) / pk : (sorted[0].packKg ?? null); })(),
         paperBatches: dedupePipe(sorted.map(b => b.paperBatches)),
+        machineTime: dedupePipe(sorted.map(b => b.machineTime)),
         weightKg: sorted.some(b => b.weightKg != null) ? sorted.reduce((a, b) => a + (+b.weightKg || 0), 0) : null,
         extraPapers: [], fifo: null, paperParts: null, overInfo: null, pkOver: null,
         machine: dedupePipe(sorted.map(b => b.machine)),
@@ -19786,6 +19819,7 @@ function renderJobsReport() {
       <td ${td}>${esc(r.paper)}${(r.extraPapers || []).filter(e => e.paper).map(e => `<div style="font-size:11px;font-weight:600;color:#15803d;">${e.label}: ${esc(e.paper)}</div>`).join('')}</td>
       <td ${td} style="padding:8px 10px;white-space:nowrap;">${esc(r.paperBatches || '')}</td>
       <td ${td}>${esc(r.machine)}</td>
+      <td ${td} style="padding:8px 10px;font-size:12px;">${(r.machineTime || '').split(' · ').filter(Boolean).map(t => `<div style="white-space:nowrap;">${esc(t)}</div>`).join('')}</td>
       <td ${td}>${esc(r.coatings)}</td>
       <td ${td}>${esc(r.colors)}</td>
       <td ${td}>${esc(r.plates)}</td>
@@ -19823,6 +19857,7 @@ function renderJobsReport() {
           <th ${th}>${jrColHeaderHtml('paper', 'Paper')}</th>
           <th ${th} title="Which batch(es) of the paper the job was issued from - 1st, 2nd... (2nd / 3rd paper after the dot)">Batch</th>
           <th ${th}>${jrColHeaderHtml('machine', 'Machine')}</th>
+          <th ${th} title="From QA's line clearance: on each machine, from the entry where this job is the New Job to that machine's next entry">Machine Time</th>
           <th ${th}>${jrColHeaderHtml('coatings', 'Coatings')}</th>
           <th ${th}>${jrColHeaderHtml('colors', 'Colors')}</th>
           <th ${th}>${jrColHeaderHtml('plates', 'Plates')}</th>
@@ -19842,7 +19877,7 @@ function renderJobsReport() {
           <td style="padding:8px 10px;text-align:right;white-space:nowrap;" title="Black: still on the shelf now. Green: the shipped Ready figures shown on the rows, added up.">${fmt(totals.readyQty)}${totals.readyShipped > 0 ? ` <span style="color:#166534;font-weight:700;">(${fmt(totals.readyShipped)} shipped)</span>` : ''}</td>
           <td style="padding:8px 10px;text-align:right;">${[totals.packets ? fmt(totals.packets) + (totals.sheetsCount ? ' pkts' : '') : '', totals.sheetsCount ? `${fmt(totals.sheetsCount)} sheets (${fmt(totals.sheetsPackets)} pkts)` : ''].filter(Boolean).join(' + ')}</td>
           <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${totals.weightKg ? fmtKg(totals.weightKg) : ''}</td>
-          <td colspan="6"></td>
+          <td colspan="7"></td>
         </tr>
       </tfoot>
     </table>
@@ -19861,7 +19896,7 @@ async function exportJobsReport() {
   const readyMode = jobsReportState.mode === 'ready';
   const header = ['Job ID', 'Job Name', 'Created', readyMode ? 'Ready' : 'Delivered', 'Company', 'PO No.', 'Batch No.', 'Invoice No.',
     ...(milMode ? ['Mil Qty'] : []),
-    'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage UPS', 'Ready Qty', 'Packets / Sheets', 'Weight (kg)', 'Paper', 'Batch', 'Machine', 'Coatings', 'Colors', 'Plates'];
+    'PO Qty', 'Printed UC Qty', 'Delivered Qty', 'Wastage UPS', 'Ready Qty', 'Packets / Sheets', 'Weight (kg)', 'Paper', 'Batch', 'Machine', 'Machine Time', 'Coatings', 'Colors', 'Plates'];
   const aoa = reportExcelAoa(header);
   for (const r of rows) {
     // Suffix "(PARTIAL)" on the delivered qty for partial rows so a
@@ -19892,6 +19927,7 @@ async function exportJobsReport() {
       r.paper,
       r.paperBatches || '',
       r.machine,
+      r.machineTime || '',
       r.coatings,
       r.colors,
       r.plates,
@@ -20310,6 +20346,7 @@ function printJobsReport() {
     <td ${tdL}>${esc(r.paper)}</td>
     <td ${tdL}>${esc(r.paperBatches || '')}</td>
     <td ${tdL}>${esc(r.machine)}</td>
+    <td ${tdL}>${esc(r.machineTime || '')}</td>
     <td ${tdL}>${esc(r.coatings)}</td>
   </tr>`;
   }).join('');
@@ -20343,6 +20380,7 @@ function printJobsReport() {
           <th ${tdL}>Paper</th>
           <th ${tdL}>Batch</th>
           <th ${tdL}>Machine</th>
+          <th ${tdL}>Machine Time</th>
           <th ${tdL}>Coatings</th>
         </tr>
         ${tableRows}
@@ -26498,7 +26536,7 @@ function lcSearch(v) {
 }
 function lcMatches(r, q) {
   if (!q) return true;
-  return [r.machine, r.prev_job, r.new_job, r.prev_company, r.new_company, r.qa_name, r.remarks].some(v => String(v || '').toLowerCase().includes(q));
+  return [r.machine, r.prev_job, r.new_job, r.prev_job_name, r.new_job_name, r.prev_company, r.new_company, r.qa_name, r.remarks].some(v => String(v || '').toLowerCase().includes(q));
 }
 function lcSearched() { const q = lcState.search.trim().toLowerCase(); return (lcState.rows || []).filter(r => lcMatches(r, q)); }
 function lcFilteredRows() { return lcSearched().filter(r => !lcState.machine || r.machine === lcState.machine); }
@@ -26519,8 +26557,8 @@ function lcGroupSections(g) {
   return LC_FORMS[g.form].sections.filter(x => used.has(x.name));
 }
 // A job number with its company under it.
-function lcJobCell(job, co, print) {
-  return `<b>${esc(lcJobNo(job))}</b>${String(job || '').match(/^\D*4/) ? ' <span style="font-size:10px;font-weight:700;color:#b45309;">manual</span>' : ''}${co ? (print ? `<div style="font-size:7pt;">${esc(co)}</div>` : `<div class="lc-co">${esc(co)}</div>`) : ''}`;
+function lcJobCell(job, co, print, name) {
+  return `<b>${esc(lcJobNo(job))}</b>${name ? ` <span style="font-weight:600;">${esc(name)}</span>` : ''}${String(job || '').match(/^\D*4/) ? ' <span style="font-size:10px;font-weight:700;color:#b45309;">manual</span>' : ''}${co ? (print ? `<div style="font-size:7pt;">${esc(co)}</div>` : `<div class="lc-co">${esc(co)}</div>`) : ''}`;
 }
 function lcCompanyText(e) {
   const p = e.prev_company || '', n = e.new_company || '';
@@ -26544,7 +26582,7 @@ function lcTableHtml(g, withLegend) {
     ${nums.map(n => { const sec = lcSectionOf(g.form, n) || {}; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === n) || [])[1] || '')}">${n}</th>`; }).join('')}
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
   const body = g.list.map((e, i) => `<tr class="row-hover-red"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td>${esc(e.entry_time || '')}</td>
-    <td>${lcJobCell(e.prev_job, e.prev_company)}</td><td style="text-align:right;">${lcWasteHtml(e)}</td><td>${lcJobCell(e.new_job, e.new_company)}</td>
+    <td>${lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${lcWasteHtml(e)}</td><td>${lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
     ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
   return `<div class="lc-log">
@@ -26654,7 +26692,7 @@ function printLineClearance() {
       ${nums.map(n => `<th style="${td}background:${(lcSectionOf(g.form, n) || {}).color};width:20px;">${n}</th>`).join('')}
       <th style="${td}">QC</th><th style="${td}">QA</th><th style="${td}">Remarks</th></tr>`;
     const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(e.entry_time || '')}</td>
-      <td style="${td}">${lcJobCell(e.prev_job, e.prev_company, true)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${lcJobCell(e.new_job, e.new_company, true)}</td>
+      <td style="${td}">${lcJobCell(e.prev_job, e.prev_company, true, e.prev_job_name)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${lcJobCell(e.new_job, e.new_company, true, e.new_job_name)}</td>
       ${nums.map(n => { const [c] = lcPointMark(e, n); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;background:#dcfce7;' : c === 'lc-no' ? 'color:#b91c1c;background:#fee2e2;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
       <td style="${td}text-align:center;font-weight:bold;color:${e.qc_cleared ? '#166534' : '#b91c1c'};background:${e.qc_cleared ? '#dcfce7' : '#fee2e2'};">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');
     const dates = g.list.map(e => String(e.entry_date).slice(0, 10)).sort();
