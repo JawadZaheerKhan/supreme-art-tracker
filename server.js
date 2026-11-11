@@ -356,7 +356,7 @@ function getDb() {
 // Bumped again for the Access Register row inv_btn_print_sticker (split off inv_btn_batches, 2026-11-11).
 // Bumped again for Edit / Hidden buttons - View on them becomes Hidden (Print: Edit), 2026-11-11.
 // Bumped again for QA Line Clearance (operators.kind, line_clearance, QC / QA access columns), 2026-11-11.
-const SCHEMA_VERSION = 'v2026-11-11-line-clearance-company';   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-11-line-clearance-edit';   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -386,7 +386,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_record_delivery', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_record_delivery', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -568,6 +568,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   // Cost Report: every job's cost from one saved list of rates. Super Admin only until opened up here.
   rpt_cost_report:                 { label: 'Cost Report — view every job\'s cost', levels: {} },
   rpt_line_clearance:              { label: 'Line Clearance — QA\'s line clearance log for every machine (previous job, new job, check points), with Print', levels: { admin: 'view', ceo: 'view', production_manager: 'view' } },
+  rpt_line_clearance_edit:         { label: 'Line Clearance — green dot: open an entry and correct it', levels: { admin: 'yes' } },
+  rpt_line_clearance_delete:       { label: 'Line Clearance — delete an entry', levels: { admin: 'yes' } },
   rpt_cost_settings:               { label: 'Cost Report — Cost Settings and each job\'s board rate (see and change the rates)', levels: {} },
   rpt_chart_accounts_edit:         { label: 'Chart of Accounts — add / edit / remove accounts and link customers', levels: { finance: 'yes' } },
 
@@ -1452,6 +1454,11 @@ async function initDb() {
     // The two jobs' companies as QA saved them (filled from the job card, or typed for a special job).
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS prev_company TEXT NOT NULL DEFAULT ''`;
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS new_company TEXT NOT NULL DEFAULT ''`;
+    // Corrected / deleted from the report (owner, 2026-11-11). A deleted entry is only hidden.
+    await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS edited_by TEXT`;
+    await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
     // Every floor operator (person) in one list (owner, 2026-10-24): a
     // machine picks its people from it. Filled from the machines' people
     // here, and kept in step whenever a machine's people are saved.
@@ -7937,7 +7944,7 @@ app.post('/api/station/line-clearance/recent', requireStationUser, async (req, r
     const sql = getDb();
     const v = await verifyQaPin(sql, req.body.pin);
     if (v.error) return res.status(v.status).json({ error: v.error });
-    res.json(await sql`SELECT * FROM line_clearance ORDER BY created_at DESC LIMIT 30`);
+    res.json(await sql`SELECT * FROM line_clearance WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 30`);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Reports -> Line Clearance.
@@ -7947,7 +7954,7 @@ app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', '
     const sql = getDb();
     const okDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? d : null;
     const from = okDate(req.query.from) || '1900-01-01', to = okDate(req.query.to) || '2999-12-31';
-    const rows = await sql`SELECT * FROM line_clearance WHERE entry_date BETWEEN ${from} AND ${to} ORDER BY entry_date, entry_time, id`;
+    const rows = await sql`SELECT * FROM line_clearance WHERE deleted_at IS NULL AND entry_date BETWEEN ${from} AND ${to} ORDER BY entry_date, entry_time, id`;
     // The jobs QA typed (E-1068, 1068 ...): their company, and the previous job's own waste on the
     // job card for this machine's section(s) - entries on this machine when the card names it.
     const jobIdOf = lcJobId;
@@ -7976,6 +7983,49 @@ app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', '
       r.jc_waste = total;
     }
     res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Correct an entry from the report (green dot). Machine and sections stay; Line Cleared is worked out again.
+app.put('/api/line-clearance/:id', requirePermission('rpt_line_clearance_edit'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const cur = (await sql`SELECT * FROM line_clearance WHERE id = ${id} AND deleted_at IS NULL`)[0];
+    if (!cur) return res.status(404).json({ error: 'Entry not found' });
+    const b = req.body || {};
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(b.entry_date || '')) ? b.entry_date : null;
+    if (!date) return res.status(400).json({ error: 'Enter the date' });
+    const prev = lcText(b.prev_job, 40), next = lcText(b.new_job, 40);
+    if (!prev || !next) return res.status(400).json({ error: 'Enter the previous job and the new job' });
+    const waste = b.waste === '' || b.waste == null ? null : Number(b.waste);
+    if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return res.status(400).json({ error: 'Waste must be a number' });
+    const nums = (LC_FORMS[cur.form] || []).filter(x => (cur.sections || []).includes(x[0])).flatMap(x => x[1]);
+    const given = (b.points && typeof b.points === 'object') ? b.points : {};
+    const points = {};
+    for (const n of nums) points[n] = given[n] === true;
+    const cleared = nums.every(n => points[n]);
+    const row = (await sql`
+      UPDATE line_clearance SET entry_date = ${date}, entry_time = ${lcText(b.entry_time, 10)}, prev_job = ${prev}, prev_company = ${lcText(b.prev_company, 120)},
+        new_job = ${next}, new_company = ${lcText(b.new_company, 120)}, waste = ${waste}, points = ${JSON.stringify(points)}, cleared = ${cleared},
+        qc_cleared = ${b.qc_cleared === true}, remarks = ${lcText(b.remarks, 500)}, edited_at = NOW(), edited_by = ${req.user.email}
+      WHERE id = ${id} RETURNING *`)[0];
+    await logAudit(sql, req, { action: 'line_clearance.update', entityType: 'line_clearance', entityId: id,
+      summary: `Line clearance ${cur.machine} corrected: ${prev} → ${next} (${cleared ? 'cleared' : 'NOT cleared'})` });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/line-clearance/:id', requirePermission('rpt_line_clearance_delete'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const row = (await sql`UPDATE line_clearance SET deleted_at = NOW(), deleted_by = ${req.user.email} WHERE id = ${id} AND deleted_at IS NULL RETURNING *`)[0];
+    if (!row) return res.status(404).json({ error: 'Entry not found' });
+    await logAudit(sql, req, { action: 'line_clearance.delete', entityType: 'line_clearance', entityId: id,
+      summary: `Line clearance deleted: ${row.machine} ${row.prev_job} → ${row.new_job} (${String(row.entry_date).slice(0, 10)})` });
+    res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 

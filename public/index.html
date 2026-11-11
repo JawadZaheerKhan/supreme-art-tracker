@@ -2326,7 +2326,10 @@
   .lc-rep { border-collapse: collapse; background: var(--bg); font-size: 13px; }
   .lc-rep th, .lc-rep td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; vertical-align: middle; }
   .lc-rep th { background: var(--bg2); font-size: 11.5px; font-weight: 700; white-space: nowrap; }
-  .lc-rep td.lc-ok { color: #166534; font-weight: 900; text-align: center; }
+  .lc-rep td.lc-ok { color: #166534; background: #dcfce7; font-weight: 900; text-align: center; }
+  .lc-rep .lc-co { font-size: 11px; color: var(--text2); line-height: 1.25; }
+  .lc-dot { width: 13px; height: 13px; border-radius: 50%; background: #16a34a; border: 0; padding: 0; margin-right: 6px; vertical-align: -1px; cursor: pointer; box-shadow: 0 0 0 2px #dcfce7; }
+  .lc-dot:hover { background: #15803d; }
   .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   .lc-mchip { padding: 2px 9px; border-radius: 12px; border: 1px solid var(--border2); background: #fff; font-weight: 700; font-size: 11.5px; line-height: 18px; cursor: pointer; }
   .lc-searchbar { display: flex; border: 1.5px solid var(--border2); border-radius: 8px; background: #fff; overflow: hidden; }
@@ -2340,7 +2343,7 @@
   .lc-legend-name { font-weight: 900; text-transform: uppercase; letter-spacing: .04em; font-size: 11.5px; margin-bottom: 4px; }
   .lc-legend-pt { line-height: 1.35; margin-bottom: 3px; }
   .lc-legend .urdu { color: var(--text2); line-height: 1.6; font-size: 12px; }
-  .lc-rep td.lc-no { color: #b91c1c; font-weight: 900; text-align: center; }
+  .lc-rep td.lc-no { color: #b91c1c; background: #fee2e2; font-weight: 900; text-align: center; }
   .lc-rep td.lc-na { color: var(--text2); text-align: center; }
   .lc-rep td.lc-cl-y { background: #dcfce7; color: #166534; font-weight: 900; text-align: center; }
   .lc-rep td.lc-cl-n { background: #fee2e2; color: #b91c1c; font-weight: 900; text-align: center; }
@@ -6283,6 +6286,7 @@ const BTN_FN_ROWS = {
   openHistory: ['job_btn_history', 'view'],
   openLinkJobPicker: ['job_btn_link', 'yes'], unlinkJob: ['job_btn_link', 'yes'],
   printJobCard: ['job_btn_print', 'yes'], printSelectedJobs: ['job_btn_print', 'yes'],
+  openLcEdit: ['rpt_line_clearance_edit', 'yes'], deleteLcEntry: ['rpt_line_clearance_delete', 'yes'],
   toggleBlock: ['job_btn_block', 'yes'],
   deleteJob: ['job_btn_delete', 'yes'],
   openDuplicateJob: ['job_btn_duplicate', 'yes'], duplicateGroupIntoJob: ['job_btn_duplicate', 'yes'], createNextJobInGroup: ['job_btn_duplicate', 'yes'],
@@ -26412,6 +26416,10 @@ function lcGroupSections(g) {
   const used = new Set(g.list.flatMap(e => e.sections || []));
   return LC_FORMS[g.form].sections.filter(x => used.has(x.name));
 }
+// A job number with its company under it.
+function lcJobCell(job, co, print) {
+  return `<b>${esc(job || '')}</b>${co ? (print ? `<div style="font-size:7pt;">${esc(co)}</div>` : `<div class="lc-co">${esc(co)}</div>`) : ''}`;
+}
 function lcCompanyText(e) {
   const p = e.prev_company || '', n = e.new_company || '';
   return p && n && p !== n ? `${esc(p)} &rarr; ${esc(n)}` : esc(p || n);   // HTML
@@ -26429,13 +26437,14 @@ function lcLegendHtml(secs) {
 function lcTableHtml(g, withLegend) {
   const secs = lcGroupSections(g);
   const nums = secs.flatMap(x => x.points.map(p => p[0]));
-  const head = `<tr><th>#</th><th>Date</th><th>Time</th><th>Previous Job</th><th>Company</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
+  const canEdit = seeBtn('rpt_line_clearance_edit'), canDel = seeBtn('rpt_line_clearance_delete');
+  const head = `<tr><th>#</th><th>Date</th><th>Time</th><th>Previous Job</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
     ${nums.map(n => `<th style="background:${(lcSectionOf(g.form, n) || {}).color || ''};color:#1a1a1a;text-align:center;">${n}</th>`).join('')}
-    <th>Line Cleared</th><th>QC</th><th>QA</th><th>Remarks</th></tr>`;
-  const body = g.list.map((e, i) => `<tr><td>${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td>${esc(e.entry_time || '')}</td>
-    <td>${esc(e.prev_job)}</td><td>${lcCompanyText(e)}</td><td style="text-align:right;">${lcWasteHtml(e)}</td><td>${esc(e.new_job)}</td>
+    <th>Line Cleared</th><th>QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
+  const body = g.list.map((e, i) => `<tr><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td>${esc(e.entry_time || '')}</td>
+    <td>${lcJobCell(e.prev_job, e.prev_company)}</td><td style="text-align:right;">${lcWasteHtml(e)}</td><td>${lcJobCell(e.new_job, e.new_company)}</td>
     ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
-    <td class="${e.cleared ? 'lc-cl-y' : 'lc-cl-n'}">${e.cleared ? 'Y' : 'N'}</td><td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td></tr>`).join('');
+    <td class="${e.cleared ? 'lc-cl-y' : 'lc-cl-n'}">${e.cleared ? 'Y' : 'N'}</td><td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
   return `<div class="lc-log">
     <h3 style="margin:14px 0 6px;font-size:15px;">${esc(g.machine)} <span style="font-weight:500;color:var(--text2);font-size:12.5px;">${esc(secs.map(x => x.name).join(' · '))} &middot; ${g.list.length} entr${g.list.length === 1 ? 'y' : 'ies'}</span></h3>
     ${withLegend ? lcLegendHtml(secs) : ''}
@@ -26472,6 +26481,60 @@ function renderLineClearanceReport() {
     </div>
     <div id="lc-rep-body">${lcBodyHtml()}</div>`;
 }
+// Green dot: open an entry and correct it (machine and sections stay as saved).
+function openLcEdit(id) {
+  const e = (lcState.rows || []).find(r => r.id === id);
+  if (!e) return;
+  const f = LC_FORMS[e.form];
+  const secs = f ? f.sections.filter(x => (e.sections || []).includes(x.name)) : [];
+  const inp = (key, label, type = 'text', extra = '') => `<div class="form-group"><label class="form-label">${label}</label><input type="${type}" id="lce-${key}" value="${esc(e[key] == null ? '' : String(e[key]).slice(0, key === 'entry_date' ? 10 : 500))}" ${extra}></div>`;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:720px;">
+    <h2>Correct Line Clearance &middot; ${esc(e.machine)}</h2>
+    <div style="color:var(--text2);font-size:13px;margin:-6px 0 10px;">${esc(secs.map(x => x.name).join(' · '))} &middot; saved by ${esc(e.qa_name || 'QA')}</div>
+    <div class="form-row">${inp('entry_date', 'Date', 'date')}${inp('entry_time', 'Time', 'time')}</div>
+    <div class="form-row">${inp('prev_job', 'Previous Job No.')}${inp('prev_company', 'Previous Company')}${inp('waste', 'Waste (QA)', 'number', 'min="0" step="any"')}</div>
+    <div class="form-row">${inp('new_job', 'New Job No.')}${inp('new_company', 'New Company')}</div>
+    <div class="form-group"><label class="form-label">Check points</label>
+      ${secs.map(x => `<div style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;padding:3px 8px;border-radius:6px;background:${x.color};margin:6px 0 4px;">${esc(x.name)}</div>${x.points.map(([n, en]) => `<label style="display:flex;gap:8px;align-items:center;padding:3px 0;cursor:pointer;"><input type="checkbox" class="lce-pt" value="${n}" ${(e.points || {})[n] ? 'checked' : ''}> <b>${n}</b> ${esc(en)}</label>`).join('')}`).join('')}
+    </div>
+    <div class="form-group"><label style="display:flex;gap:8px;align-items:center;cursor:pointer;font-weight:700;"><input type="checkbox" id="lce-qc" ${e.qc_cleared ? 'checked' : ''}> Cleared by QC</label></div>
+    ${inp('remarks', 'Remarks')}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveLcEdit(${e.id})">Save</button>
+    </div>
+  </div>`);
+}
+async function saveLcEdit(id) {
+  const v = k => (document.getElementById('lce-' + k) || {}).value || '';
+  const points = {};
+  document.querySelectorAll('.lce-pt').forEach(cb => { points[cb.value] = cb.checked; });
+  const body = { entry_date: v('entry_date'), entry_time: v('entry_time'), prev_job: v('prev_job').trim(), prev_company: v('prev_company').trim(),
+    waste: v('waste'), new_job: v('new_job').trim(), new_company: v('new_company').trim(), points, qc_cleared: !!document.getElementById('lce-qc')?.checked, remarks: v('remarks').trim() };
+  if (!body.prev_job || !body.new_job) { notify('Enter the previous job and the new job'); return; }
+  showSaving(true);
+  try {
+    await api('PUT', '/api/line-clearance/' + id, body);
+    closeModal();
+    notify('Line clearance corrected');
+    await openLineClearanceReport();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function deleteLcEntry(id) {
+  const e = (lcState.rows || []).find(r => r.id === id);
+  if (!e) return;
+  const ok = await confirmDialog({ title: 'Delete this line clearance?', danger: true, confirmText: 'Delete',
+    message: `${e.machine} · ${fmtDMY(e.entry_date)} ${e.entry_time || ''} · job ${e.prev_job} → ${e.new_job}. It leaves the report and the QA screen.` });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', '/api/line-clearance/' + id);
+    notify('Line clearance deleted');
+    await openLineClearanceReport();
+  } catch (err) { notify('Error: ' + err.message); }
+  showSaving(false);
+}
 // One page per machine, laid out like the paper log (only its own sections' points).
 function printLineClearance() {
   const rows = lcFilteredRows();
@@ -26485,15 +26548,15 @@ function printLineClearance() {
     const legend = secs.map(x => x.points.map((pt, j) => `<tr>
       ${j === 0 ? `<td rowspan="${x.points.length}" style="${td}background:${x.color};font-weight:bold;width:90px;">${esc(x.name)}<div style="font-weight:normal;" dir="rtl">${x.ur}</div></td>` : ''}
       <td style="${td}background:${x.color};text-align:center;font-weight:bold;width:22px;">${pt[0]}</td><td style="${td}">${esc(pt[1])}</td><td style="${td}text-align:right;" dir="rtl">${pt[2]}</td></tr>`).join('')).join('');
-    const head = `<tr style="background:#f7f1ea;"><th style="${td}">#</th><th style="${td}">Date</th><th style="${td}">Time</th><th style="${td}">Previous Job No.</th><th style="${td}">Company</th>
+    const head = `<tr style="background:#f7f1ea;"><th style="${td}">#</th><th style="${td}">Date</th><th style="${td}">Time</th><th style="${td}">Previous Job No.</th>
       <th style="${td}">Waste <span style="font-weight:normal;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th style="${td}">New Job No.</th>
       ${nums.map(n => `<th style="${td}background:${(lcSectionOf(g.form, n) || {}).color};width:20px;">${n}</th>`).join('')}
       <th style="${td}">Line Cleared</th><th style="${td}">QC</th><th style="${td}">QA</th><th style="${td}">Remarks</th></tr>`;
     const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(e.entry_time || '')}</td>
-      <td style="${td}">${esc(e.prev_job)}</td><td style="${td}">${lcCompanyText(e)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${esc(e.new_job)}</td>
-      ${nums.map(n => { const [c] = lcPointMark(e, n); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;' : c === 'lc-no' ? 'color:#b91c1c;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
+      <td style="${td}">${lcJobCell(e.prev_job, e.prev_company, true)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${lcJobCell(e.new_job, e.new_company, true)}</td>
+      ${nums.map(n => { const [c] = lcPointMark(e, n); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;background:#dcfce7;' : c === 'lc-no' ? 'color:#b91c1c;background:#fee2e2;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
       <td style="${td}text-align:center;font-weight:bold;background:${e.cleared ? '#dcfce7' : '#fee2e2'};">${e.cleared ? 'Y' : 'N'}</td>
-      <td style="${td}text-align:center;font-weight:bold;color:${e.qc_cleared ? '#166534' : '#b91c1c'};">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');
+      <td style="${td}text-align:center;font-weight:bold;color:${e.qc_cleared ? '#166534' : '#b91c1c'};background:${e.qc_cleared ? '#dcfce7' : '#fee2e2'};">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');
     const dates = g.list.map(e => String(e.entry_date).slice(0, 10)).sort();
     return `<div style="${REPORT_PRINT_WRAP}${gi < groups.length - 1 ? 'page-break-after:always;break-after:page;' : ''}">
       <div style="margin-bottom:6px;">${reportPrintHeading({ title: 'LINE CLEARANCE LOG', formCode: `Doc No: ${f.doc} · Rev:00 · Effective Date: 01-10-2026`, scope: f.title,
@@ -42316,6 +42379,8 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_cost_report',                 type: 'tab' },
   { key: 'rpt_cost_settings',               type: 'button' },
   { key: 'rpt_line_clearance',              type: 'tab' },
+  { key: 'rpt_line_clearance_edit',         type: 'action' },
+  { key: 'rpt_line_clearance_delete',       type: 'action' },
 ];
 // Products tab (Product Rate), merged in from the Finance app.
 const ACC_PRODUCTS_TAB_ROWS = [
