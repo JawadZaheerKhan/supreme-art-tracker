@@ -8071,6 +8071,35 @@ app.get('/api/station/job-company', requireStationUser, async (req, res) => {
     res.json(j ? { found: true, client: j.client || '' } : { found: false });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
+// Every company on a job card - QA picks a manual job's (4...) company from it.
+app.get('/api/station/companies', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`SELECT DISTINCT TRIM(client) AS c FROM jobs WHERE deleted_at IS NULL AND COALESCE(TRIM(client), '') <> '' ORDER BY 1`;
+    res.json(rows.map(r => r.c));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Dashboard "Running now" (owner, 2026-11-11): each machine's latest line clearance - its New Job is on
+// the machine now, since that entry.
+app.get('/api/dashboard/running-now', requirePermission('dashboard_tab_access', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const rows = await sql`
+      SELECT DISTINCT ON (machine) id, machine, sections, new_job, new_company, prev_job, entry_date, entry_time, created_at, qa_name
+        FROM line_clearance
+       WHERE deleted_at IS NULL
+       ORDER BY machine, entry_date DESC, entry_time DESC, created_at DESC`;
+    const ids = [...new Set(rows.map(r => lcJobId(r.new_job)).filter(Boolean))];
+    const jobs = ids.length ? await sql`SELECT id, name, client FROM jobs WHERE id = ANY(${ids}) AND deleted_at IS NULL` : [];
+    const byId = new Map(jobs.map(j => [j.id, j]));
+    res.json(rows.map(r => {
+      const j = byId.get(lcJobId(r.new_job));
+      return { ...r, job_id: j ? j.id : null, job_name: j ? j.name : '', new_company: r.new_company || (j ? j.client : '') || '' };
+    }));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 // QA's own recent entries on his screen (PIN in the body, never the URL).
 app.post('/api/station/line-clearance/recent', requireStationUser, async (req, res) => {
   try {

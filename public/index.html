@@ -3165,6 +3165,10 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 .cd-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(118px, 1fr)); gap:6px; }
 .cd-tile { --c:#475569; --t:#f8fafc; background:var(--t); border:1px solid var(--border); border-left:4px solid var(--c); border-radius:9px; padding:6px 8px; min-width:0; display:flex; flex-direction:column; }
 .cd-tile.cd-wide { grid-column:span 2; }
+/* Running now (owner, 2026-11-11): the whole row, a line per machine, nothing cut off. */
+.cd-tile.cd-full { grid-column:1 / -1; }
+.cd-tile.cd-full .cd-list { font-size:13px; }
+.cd-tile.cd-full .cd-list span:first-child { white-space:normal; }
 .cd-label { font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--text2); }
 .cd-value { font-size:16px; font-weight:800; color:var(--text); line-height:1.2; word-break:break-word; }
 .cd-sub { font-size:10px; color:var(--text2); line-height:1.3; }
@@ -4609,6 +4613,13 @@ function lcPointNums(form, sections) {
 function lcAllNums(form) { const f = LC_FORMS[form]; return f ? f.sections.flatMap(x => x.points.map(pt => pt[0])) : []; }
 const LC_SEC_STRONG = { '#dbeafe': '#3b82f6', '#fef3c7': '#f59e0b', '#dcfce7': '#16a34a', '#fce7f3': '#db2777', '#ede9fe': '#7c3aed' };
 function lcSectionOf(form, n) { const f = LC_FORMS[form]; return f ? f.sections.find(x => x.points.some(pt => pt[0] === n)) : null; }
+// E-1068 for a job in the app; a manual job (number starting with 4, not in the app) as typed.
+function lcJobNo(v) {
+  const t = String(v == null ? '' : v).trim();
+  const m = t.match(/\d+/);
+  if (!m || m[0].startsWith('4')) return t;
+  return 'E-' + m[0];
+}
 function lcWaste(v) { return v == null || v === '' ? '' : (+(+v).toFixed(2)).toLocaleString(); }
 function lcMissing(e) { return lcPointNums(e.form, e.sections).filter(n => !(e.points || {})[n]); }
 // A machine's roles (Users -> Operators) -> its sections on the log (owner, 2026-11-11).
@@ -6563,11 +6574,13 @@ function setCeoDashProdCustom() {
 async function loadCeoDash(withProd) {
   renderCeoDash();
   if (withProd !== false) loadCeoDashProd();
-  const [imports, stale, ignored] = await Promise.all([
+  const [imports, stale, ignored, running] = await Promise.all([
     api('GET', '/api/imports').catch(() => []),
     api('GET', '/api/reports/stale-paper-issues').catch(() => []),
     api('GET', '/api/report-warnings/ignored').catch(() => []),
+    api('GET', '/api/dashboard/running-now').catch(() => null),
   ]);
+  ceoDash.running = Array.isArray(running) ? running : null;
   ceoDash.ignored = new Map((Array.isArray(ignored) ? ignored : []).map(x => [ceoWarnKey(x.kind, x.job_id, x.delivery_index), x]));
   ceoDash.imports = Array.isArray(imports) ? imports : [];
   ceoDash.stalePaper = Array.isArray(stale) ? stale : [];
@@ -7007,6 +7020,27 @@ function renderCeoDash() {
       ${tile('blocked', 'block', 'Blocked', fmt(f.blocked.length), '', jobList(f.blocked, j => { const s = (j.stages || {})[j.stage_index || 0] || {}; return esc(STAGES[j.stage_index || 0] || '') + (s.notes ? ' · ' + esc(s.notes) : ''); }, 'Nothing blocked'))}
     </div>
     </div>
+
+    ${ceoDash.running && ceoDash.running.length ? `<div class="cd-zone cd-zone-2">
+    <div class="cd-sec">Running now <small>· from QA's line clearance - each machine's latest New Job</small></div>
+    <div class="cd-grid cd-fill">
+      ${(() => {
+        const r = ceoDash.running;
+        const since = x => {
+          const at = new Date(String(x.entry_date).slice(0, 10) + 'T' + (x.entry_time || '00:00') + ':00');
+          const mins = Math.max(0, Math.round((Date.now() - at.getTime()) / 60000));
+          const ago = mins < 60 ? mins + 'm' : mins < 1440 ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : Math.floor(mins / 1440) + 'd';
+          const today = String(x.entry_date).slice(0, 10) === localDateISO();
+          return (today ? '' : dmy(x.entry_date) + ' ') + esc(x.entry_time || '') + ' · ' + ago;
+        };
+        const jobTxt = x => (x.job_id ? `<a onclick="ceoDashOpenJob(${x.job_id})">${esc(lcJobNo(x.new_job))}</a> ${esc(x.job_name || '')}` : `<b>${esc(lcJobNo(x.new_job))}</b> <small style="color:#b45309;">manual</small>`)
+          + (x.new_company ? ` <small style="color:var(--text2);">· ${esc(x.new_company)}</small>` : '');
+        const rows = r.map(x => row(`<b>${esc(x.machine)}</b> ${jobTxt(x)}`, since(x)));
+        return tile('running', 'prod cd-full', 'Running now', fmt(r.length) + ' machine' + (r.length === 1 ? '' : 's'),
+          list(rows.slice(0, 6), ''), r.length > 6 ? () => list(rows, '') : null);
+      })()}
+    </div>
+    </div>` : ''}
 
     <div class="cd-zone cd-zone-3">
     <div class="cd-sec">Production &amp; MIL <small>· one date filter for both</small></div>
@@ -26441,7 +26475,7 @@ function lcGroupSections(g) {
 }
 // A job number with its company under it.
 function lcJobCell(job, co, print) {
-  return `<b>${esc(job || '')}</b>${co ? (print ? `<div style="font-size:7pt;">${esc(co)}</div>` : `<div class="lc-co">${esc(co)}</div>`) : ''}`;
+  return `<b>${esc(lcJobNo(job))}</b>${String(job || '').match(/^\D*4/) ? ' <span style="font-size:10px;font-weight:700;color:#b45309;">manual</span>' : ''}${co ? (print ? `<div style="font-size:7pt;">${esc(co)}</div>` : `<div class="lc-co">${esc(co)}</div>`) : ''}`;
 }
 function lcCompanyText(e) {
   const p = e.prev_company || '', n = e.new_company || '';
@@ -39485,6 +39519,7 @@ let stationView     = 'pin';  // 'pin' | 'queue' | 'update' | 'papercut' | 'qa' 
 let stationQa = null;          // the entry being typed
 let stationQaRecent = null;    // latest saved entries
 let stationQaMachines = [];    // machine names to pick from while typing
+let stationQaCompanies = [];   // every company on a job card - QA picks a manual job's from it
 let _stationSavedPerms = null;
 let stationJobId    = null;
 let stationPapercutRequests = null; // Paper Cutting screen: pending offcut requests from /api/station/offcut-requests
@@ -39984,6 +40019,13 @@ async function stationOpenQa() {
   if (!stationQa) stationQa = stationQaBlank();
   stationRender();
   stationQaLoadRecent();
+  if (!stationQaCompanies.length) {
+    api('GET', '/api/station/companies').then(list => {
+      stationQaCompanies = Array.isArray(list) ? list : [];
+      const dl = document.getElementById('lc-companies');
+      if (dl) dl.innerHTML = stationQaCompanies.map(c => `<option value="${esc(c)}">`).join('');
+    }).catch(() => {});
+  }
   if (!stationQaMachines.length) {
     api('GET', '/api/operators/all-persons').then(list => {
       const byName = new Map();
@@ -40080,6 +40122,7 @@ function stationQaHtml() {
           <div class="lc-field lc-wide"><label>Remarks <span class="urdu" dir="rtl" lang="ur">ریمارکس</span></label>
             <input type="text" value="${esc(q.remarks || '')}" oninput="stationQaSet('remarks', this.value)"></div>
         </div>
+        <datalist id="lc-companies">${stationQaCompanies.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
       </div>
       <div class="lc-card">
         <h3>Check points <span style="font-weight:500;font-size:12px;color:var(--text2);">- tick each one that is OK</span></h3>
@@ -40094,7 +40137,7 @@ function lcJobFields(q, which, label, ur, coLabel) {
   return `<div class="lc-field"><label>${label} <span class="urdu" dir="rtl" lang="ur">${ur}</span></label>
       <input type="text" value="${esc(q[which + '_job'] || '')}" oninput="stationQaJob('${which}', this.value)"></div>
     <div class="lc-field"><label>${coLabel} <span id="lc-${which}-hint" class="lc-hint">${lcIsSpecialJob(q[which + '_job']) ? 'special job - type the company' : ''}</span></label>
-      <input type="text" id="lc-${which}-company" placeholder="from the job card" value="${esc(q[which + '_company'] || '')}" oninput="stationQaSet('${which}_company', this.value)"></div>`;
+      <input type="text" id="lc-${which}-company" list="lc-companies" autocomplete="off" placeholder="from the job card - or pick" value="${esc(q[which + '_company'] || '')}" oninput="stationQaSet('${which}_company', this.value)"></div>`;
 }
 function stationQaRecentHtml() {
   if (stationQaRecent == null) return '<div class="empty">Loading…</div>';
@@ -40103,7 +40146,7 @@ function stationQaRecentHtml() {
     const miss = lcMissing(e);
     return `<div class="lc-entry ${e.cleared ? 'ok' : 'no'}">
       <b>${esc(fmtDMY(e.entry_date))} ${esc(e.entry_time || '')}</b> &middot; ${esc(e.machine)} &middot; ${esc((e.sections || []).join(', '))}<br>
-      Job ${esc(e.prev_job)}${e.prev_company ? ' (' + esc(e.prev_company) + ')' : ''}${e.waste != null ? ` (waste ${esc(lcWaste(e.waste))})` : ''} &rarr; ${esc(e.new_job)} &middot; Line Cleared: ${e.cleared ? '<b class="lc-y">Y</b>' : `<b class="lc-x">N</b> (not ticked: ${miss.join(', ')})`} &middot; QC: ${e.qc_cleared ? '<b class="lc-y">&#10003;</b>' : '<b class="lc-x">&#10007;</b>'}
+      Job ${esc(lcJobNo(e.prev_job))}${e.prev_company ? ' (' + esc(e.prev_company) + ')' : ''}${e.waste != null ? ` (waste ${esc(lcWaste(e.waste))})` : ''} &rarr; ${esc(lcJobNo(e.new_job))} &middot; Line Cleared: ${e.cleared ? '<b class="lc-y">Y</b>' : `<b class="lc-x">N</b> (not ticked: ${miss.join(', ')})`} &middot; QC: ${e.qc_cleared ? '<b class="lc-y">&#10003;</b>' : '<b class="lc-x">&#10007;</b>'}
       ${e.remarks ? `<br><span style="color:var(--text2);">${esc(e.remarks)}</span>` : ''}</div>`;
   }).join('');
 }
