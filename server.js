@@ -8251,6 +8251,22 @@ app.put('/api/settings/off-days', requirePermission('rpt_days_off'), async (req,
     res.json(dates);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
+// The Line Clearance report at the Station (owner, 2026-11-12) - for a QC / QA PIN whose own Operator column
+// has View on it (their access only ever applies at the Station). PIN in the body.
+app.post('/api/station/line-clearance-report', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const pin = String((req.body && req.body.pin) || '').trim();
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
+    const op = (await sql`SELECT kind FROM operators WHERE pin = ${pin} AND active LIMIT 1`)[0];
+    if (!op || !OPERATOR_KIND_ROLE[op.kind]) return res.status(403).json({ error: 'Not allowed' });
+    await ensureRolePermsFresh();
+    if (!['view', 'yes'].includes(operatorKindPerms(op.kind).rpt_line_clearance)) return res.status(403).json({ error: 'Not allowed - Line Clearance report access is off for this PIN' });
+    const okDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? d : null;
+    res.json(await lineClearanceRows(sql, okDate(req.body.from) || '1900-01-01', okDate(req.body.to) || '2999-12-31'));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 // QA's own recent entries on his screen (PIN in the body, never the URL).
 app.post('/api/station/line-clearance/recent', requireStationUser, async (req, res) => {
   try {
@@ -8262,12 +8278,8 @@ app.post('/api/station/line-clearance/recent', requireStationUser, async (req, r
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Reports -> Line Clearance.
-app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', 'view'), async (req, res) => {
-  try {
-    await dbReady;
-    const sql = getDb();
-    const okDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? d : null;
-    const from = okDate(req.query.from) || '1900-01-01', to = okDate(req.query.to) || '2999-12-31';
+// The Line Clearance report's rows (with each job's name, company and job card waste) - Reports and the Station.
+async function lineClearanceRows(sql, from, to) {
     const rows = await sql`SELECT * FROM line_clearance WHERE deleted_at IS NULL AND entry_date BETWEEN ${from} AND ${to} ORDER BY entry_date, entry_time, id`;
     // The jobs QA typed (E-1068, 1068 ...): their company, and the previous job's own waste on the
     // job card for this machine's section(s) - entries on this machine when the card names it.
@@ -8298,7 +8310,15 @@ app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', '
       }
       r.jc_waste = total;
     }
-    res.json(rows);
+  return rows;
+}
+app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const okDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? d : null;
+    const from = okDate(req.query.from) || '1900-01-01', to = okDate(req.query.to) || '2999-12-31';
+    res.json(await lineClearanceRows(sql, from, to));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 

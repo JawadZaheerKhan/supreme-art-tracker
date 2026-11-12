@@ -26660,7 +26660,8 @@ async function openLineClearanceReport() {
 }
 function lcSetFilter(k, v) {
   lcState[k] = v;
-  if (k === 'from' || k === 'to') openLineClearanceReport(); else renderLineClearanceReport();
+  if (k === 'from' || k === 'to') { if (typeof mode !== 'undefined' && mode === 'station' && stationView === 'lc-report') stationLoadLcReport(); else openLineClearanceReport(); }
+  else renderLineClearanceReport();
 }
 // Typing in the search box keeps the cursor: only the bar and the logs redraw.
 function lcSearch(v) {
@@ -26711,7 +26712,8 @@ function lcLegendHtml(secs) {
 function lcTableHtml(g, withLegend) {
   const secs = lcGroupSections(g);
   const nums = secs.flatMap(x => x.points.map(p => p[0]));
-  const canEdit = seeBtn('rpt_line_clearance_edit'), canDel = seeBtn('rpt_line_clearance_delete');
+  const atStation = typeof mode !== 'undefined' && mode === 'station';
+  const canEdit = !atStation && seeBtn('rpt_line_clearance_edit'), canDel = !atStation && seeBtn('rpt_line_clearance_delete');
   const head = `<tr><th>#</th><th>Date</th><th>Time</th><th>Previous Job</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
     ${nums.map(n => { const sec = lcSectionOf(g.form, n) || {}; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === n) || [])[1] || '')}">${n}</th>`; }).join('')}
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
@@ -26740,9 +26742,13 @@ function lcBodyHtml() {
     : '<div class="empty" style="padding:28px;text-align:center;">No line clearance entries for these filters.</div>');
 }
 function renderLineClearanceReport() {
+  if (typeof mode !== 'undefined' && mode === 'station' && stationView === 'lc-report') { stationRender(); return; }
   const pane = document.getElementById('rt-line-clearance');
   if (!pane) return;
-  pane.innerHTML = `<div style="margin-bottom:12px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+  pane.innerHTML = lcToolbarHtml() + `<div id="lc-rep-body">${lcBodyHtml()}</div>`;
+}
+function lcToolbarHtml() {
+  return `<div style="margin-bottom:12px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div><div class="dash-flbl">From</div><input class="filter" type="date" value="${esc(lcState.from)}" onchange="lcSetFilter('from', this.value)"></div>
       <div><div class="dash-flbl">To</div><input class="filter" type="date" value="${esc(lcState.to)}" onchange="lcSetFilter('to', this.value)"></div>
       <div style="flex:1;min-width:260px;max-width:480px;"><div class="dash-flbl">Search</div>
@@ -26751,8 +26757,7 @@ function renderLineClearanceReport() {
           <input type="search" placeholder="Job no., company..." value="${esc(lcState.search)}" oninput="lcSearch(this.value)">
         </div></div>
       <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-sm" onclick="printLineClearance()">&#128424; Print</button></div>
-    </div>
-    <div id="lc-rep-body">${lcBodyHtml()}</div>`;
+    </div>`;
 }
 // Green dot: open an entry and correct it (machine and sections stay as saved).
 function openLcEdit(id) {
@@ -40071,6 +40076,7 @@ function stationRender() {
   else if (stationView === 'manager-queue') root.innerHTML = stationManagerQueueHtml();
   else if (stationView === 'papercut') root.innerHTML = stationPapercutHtml();
   else if (stationView === 'qa') root.innerHTML = stationQaHtml();
+  else if (stationView === 'lc-report') root.innerHTML = stationLcReportHtml();
   else root.innerHTML = stationQueueHtml();
 }
 
@@ -40318,6 +40324,32 @@ function stationRestorePerms() {
 // QA types everything himself: machine, previous job, new job; ticks the
 // machine's check points (the paper log's, word for word). Saved with Line
 // Cleared Y when every point is ticked, N otherwise.
+// The Line Clearance report at the Station (owner, 2026-11-12): a QC / QA PIN whose own Operator column has View.
+let _stationLcBack = 'qa';
+function stationCanLcReport() { const p = stationOperator && stationOperator.perms; return !!(p && ['view', 'yes'].includes(p.rpt_line_clearance)); }
+function stationLcButton() { return stationCanLcReport() ? `<button class="btn" onclick="stationOpenLcReport()" style="font-weight:700;">&#128203; Line Clearance Log</button>` : ''; }
+function stationOpenLcReport() {
+  _stationLcBack = stationView;
+  if (!lcState.from) { const d = new Date(); lcState.from = localDateISO(new Date(d.getFullYear(), d.getMonth(), 1)); lcState.to = localDateISO(d); }
+  stationView = 'lc-report';
+  stationLoadLcReport();
+}
+async function stationLoadLcReport() {
+  lcState.rows = null;
+  stationRender();
+  try { lcState.rows = await api('POST', '/api/station/line-clearance-report', { pin: stationOperator.pin, from: lcState.from, to: lcState.to }); }
+  catch (e) { lcState.rows = []; notify('Could not load the Line Clearance Log: ' + e.message); }
+  if (stationView === 'lc-report') stationRender();
+}
+function stationLcBackTo() { stationView = _stationLcBack || 'qa'; stationRender(); }
+function stationLcReportHtml() {
+  const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
+  return `<div class="station-head">
+      <div><div class="station-who" style="font-size:20px;">${who}</div><div class="station-where" style="font-size:14px;">&#128203; Line Clearance Log</div></div>
+      <div style="display:flex;gap:8px;"><button class="btn" onclick="stationLcBackTo()">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+    </div>
+    <div style="padding:4px 4px 30px;">${lcToolbarHtml()}<div id="lc-rep-body">${lcState.rows == null ? '<div class="empty">Loading…</div>' : lcBodyHtml()}</div></div>`;
+}
 function stationHasQa() { return !!(stationOperator && stationOperator.kind === 'qa'); }
 function stationQaNowTime() { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
 function stationQaBlank() {
@@ -40332,8 +40364,7 @@ async function stationOpenQa() {
   if (!stationQaCompanies.length) {
     api('GET', '/api/station/companies').then(list => {
       stationQaCompanies = Array.isArray(list) ? list : [];
-      const dl = document.getElementById('lc-companies');
-      if (dl) dl.innerHTML = stationQaCompanies.map(c => `<option value="${esc(c)}">`).join('');
+      if (stationView === 'qa') stationRender();   // the company dropdowns fill (what was typed is in stationQa)
     }).catch(() => {});
   }
   if (!stationQaMachines.length) {
@@ -40362,15 +40393,15 @@ function stationQaJob(which, value) {
   stationQaSet(which + '_job', value);
   clearTimeout(_lcJobTimers[which]);
   const hint = document.getElementById('lc-' + which + '-hint');
-  if (hint) hint.textContent = lcIsSpecialJob(value) ? 'special job - type the company' : '';
+  if (hint) hint.textContent = lcIsSpecialJob(value) ? 'manual job - pick the company' : '';
   if (!String(value).trim() || lcIsSpecialJob(value)) return;
   _lcJobTimers[which] = setTimeout(async () => {
     try {
       const r = await api('GET', '/api/station/job-company?job=' + encodeURIComponent(value));
       if (!stationQa || stationQa[which + '_job'] !== value) return;   // typed on since
       const el = document.getElementById('lc-' + which + '-company');
-      if (r && r.found) { stationQa[which + '_company'] = r.client; if (el) el.value = r.client; if (hint) hint.textContent = ''; }
-      else if (hint) hint.textContent = 'not in the app - type the company';
+      if (r && r.found) { stationQa[which + '_company'] = r.client; if (el) el.innerHTML = lcCompanyOptions(r.client); if (hint) hint.textContent = ''; }
+      else if (hint) hint.textContent = 'not in the app - pick the company';
     } catch (e) { /* offline: QA types it */ }
   }, 450);
 }
@@ -40415,7 +40446,7 @@ function stationQaHtml() {
   return `
     <div class="station-head">
       <div><div class="station-who" style="font-size:20px;">${who}${whoUr}</div><div class="station-where" style="font-size:14px;">&#10003; Line Clearance &middot; QA</div></div>
-      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
+      <div style="display:flex;gap:8px;">${stationLcButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>
     ${others ? `<div style="padding:0 4px 8px;"><button class="btn btn-sm" onclick="stationView='stage-pick'; stationRender();">&lsaquo; Switch station</button></div>` : ''}
     <div class="lc-wrap">
@@ -40447,10 +40478,26 @@ function stationQaHtml() {
 }
 // A job number box + its company box (filled from the job card; typed for a special job).
 function lcJobFields(q, which, label, ur, coLabel) {
+  // Number pad on a tablet (owner, 2026-11-12); company = a dropdown of the job-card companies.
   return `<div class="lc-field"><label>${label} <span class="urdu" dir="rtl" lang="ur">${ur}</span></label>
-      <input type="text" value="${esc(q[which + '_job'] || '')}" oninput="stationQaJob('${which}', this.value)"></div>
-    <div class="lc-field"><label>${coLabel} <span id="lc-${which}-hint" class="lc-hint">${lcIsSpecialJob(q[which + '_job']) ? 'special job - type the company' : ''}</span></label>
-      <input type="text" id="lc-${which}-company" list="lc-companies" autocomplete="off" placeholder="from the job card - or pick" value="${esc(q[which + '_company'] || '')}" oninput="stationQaSet('${which}_company', this.value)"></div>`;
+      <input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${esc(q[which + '_job'] || '')}" oninput="stationQaJob('${which}', this.value)"></div>
+    <div class="lc-field"><label>${coLabel} <span id="lc-${which}-hint" class="lc-hint">${lcIsSpecialJob(q[which + '_job']) ? 'manual job - pick the company' : ''}</span></label>
+      <select id="lc-${which}-company" onchange="stationQaCompany('${which}', this)">${lcCompanyOptions(q[which + '_company'])}</select></div>`;
+}
+function lcCompanyOptions(cur) {
+  const list = stationQaCompanies.slice();
+  if (cur && !list.includes(cur)) list.unshift(cur);
+  return `<option value="">- Pick the company -</option>${list.map(c => `<option value="${esc(c)}" ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('')}<option value="__other">+ Other (type it)…</option>`;
+}
+async function stationQaCompany(which, sel) {
+  if (sel.value === '__other') {
+    const v = await promptDialog({ title: 'Company name', message: 'Type the company - for a job that is not in the list.', placeholder: 'Company', confirmText: 'Use it' });
+    const name = String(v || '').trim();
+    stationQaSet(which + '_company', name || (stationQa && stationQa[which + '_company']) || '');
+    sel.innerHTML = lcCompanyOptions(stationQa[which + '_company']);
+    return;
+  }
+  stationQaSet(which + '_company', sel.value);
 }
 function stationQaRecentHtml() {
   if (stationQaRecent == null) return '<div class="empty">Loading…</div>';
@@ -41188,7 +41235,7 @@ function stationManagerQueueHtml() {
   return `
     <div class="station-head">
       <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}</div><div class="station-where">Manager &middot; All Stages</div></div>
-      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
+      <div style="display:flex;gap:8px;">${stationLcButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;padding:10px 16px 0;">${tabs}</div>
     ${searchBar}
