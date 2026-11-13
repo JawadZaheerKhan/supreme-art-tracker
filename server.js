@@ -91,8 +91,10 @@ app.use((req, res, next) => {
     res.on('finish', () => {
       try {
         // A 304 or a HEAD carries no body. Everything else this app sends
-        // (res.json, sendFile) sets Content-Length, which is the raw size -
-        // the same bytes Vercel meters.
+        // (res.json, sendFile) sets Content-Length, which is the raw size.
+        // Vercel's own Fast Origin Transfer figure is smaller: on 13 Nov 2026
+        // this meter recorded 1.1 GB for a day Vercel charted at 0.2-0.3 GB.
+        // Use these numbers for each route's share, not as Vercel's total.
         const bytes = (res.statusCode === 304 || req.method === 'HEAD') ? 0 : (Number(res.getHeader('content-length')) || 0);
         let key = xferRouteKey(req, res);
         if (!xferPending.has(key) && xferPending.size >= XFER_MAX_KEYS) key = '(other)';
