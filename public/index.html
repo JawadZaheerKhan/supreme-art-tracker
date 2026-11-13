@@ -2316,6 +2316,9 @@
   .lc-qc input { width: 20px; height: 20px; margin: 0; accent-color: #16a34a; }
   .lc-field label.lc-qc.is-on { border-color: #16a34a; background: #f0fdf4; color: #166534; }
   .lc-waiting { border-color: #f59e0b; background: #fffbeb; }
+  .lc-waiting.is-empty { border-color: var(--border2); background: var(--bg); }
+  .lc-waiting.is-empty h3 { margin: 0; }
+  .lc-wait-n.is-zero { background: #9ca3af; }
   .lc-wait-n { display: inline-block; min-width: 22px; padding: 0 7px; border-radius: 11px; background: #dc2626; color: #fff; font-size: 12px; line-height: 20px; text-align: center; }
   .lc-wait-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 6px; }
   .lc-wait { display: flex; justify-content: space-between; gap: 10px; text-align: left; padding: 8px 10px; border: 1.5px solid #fcd34d; border-radius: 8px; background: #fff; cursor: pointer; font-size: 13px; }
@@ -2327,11 +2330,16 @@
   .lc-ops-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   .lc-ops-row:last-child { border-bottom: 0; }
   .lc-ops-row.is-empty .lc-ops-m b { color: var(--text2); }
-  .lc-ops-m { flex: 0 0 170px; }
-  .lc-ops-m small { display: block; color: var(--text2); font-size: 11px; }
+  .lc-ops-m { flex: 0 0 190px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+  .lc-ops-code { display: inline-block; padding: 1px 8px; border-radius: 6px; background: #A32D2D; color: #fff; font-size: 12px; font-weight: 800; letter-spacing: .02em; }
+  .lc-ops-none { color: var(--text2); font-size: 13px; font-style: italic; }
+  .lc-ops-row.is-drop { background: #dcfce7; outline: 2px dashed #16a34a; outline-offset: -2px; border-radius: 8px; }
   .lc-ops-p { flex: 1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .lc-ops-chip { padding: 6px 12px; border-radius: 16px; border: 1.5px solid var(--border2); background: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
-  .lc-ops-chip.is-on { background: #155e75; border-color: #155e75; color: #fff; }
+  .lc-ops-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 6px 5px 12px; border-radius: 16px; border: 1.5px solid #16a34a; background: #16a34a; color: #fff; font-size: 14px; font-weight: 700; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .lc-ops-chip.is-dragging { opacity: .35; }
+  .lc-ops-ghost { position: fixed; z-index: 99999; pointer-events: none; box-shadow: 0 6px 16px rgba(0,0,0,.25); opacity: .95; }
+  .lc-ops-del { width: 24px; height: 24px; border-radius: 50%; border: 0; background: #dc2626; color: #fff; font-size: 12px; line-height: 24px; padding: 0; cursor: pointer; }
+  .lc-ops-del:hover { background: #b91c1c; }
   .lc-ops-add { padding: 5px 8px; border-radius: 16px; border: 1.5px dashed var(--border2); background: #fff; font-size: 13px; color: var(--text2); }
   .lc-sec-tag { display: inline-block; margin-left: 4px; padding: 0 7px; border-radius: 8px; background: #155e75; color: #fff; font-size: 10.5px; font-weight: 800; line-height: 17px; vertical-align: 1px; }
   .lc-pts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
@@ -40450,7 +40458,8 @@ function stationBeep() {
 }
 function stationQaWaitingHtml() {
   const list = stationQaWaiting || [];
-  if (!list.length) return '<div id="lc-waiting"></div>';
+  if (!list.length) return `<div id="lc-waiting" class="lc-card lc-waiting is-empty"><h3>Waiting for line clearance <span class="lc-wait-n is-zero">0</span>
+    <span style="font-weight:500;font-size:12px;color:var(--text2);">- ${stationQaWaiting == null ? 'checking…' : 'no job waiting. A job shows here when an operator moves it on from his machine.'}</span></h3></div>`;
   const hm = at => { const d = String(at).slice(0, 10), t = String(at).slice(11, 16); return (d === localDateISO() ? '' : fmtDMY(d).slice(0, 5) + ' ') + t; };
   return `<div id="lc-waiting" class="lc-card lc-waiting">
     <h3>Waiting for line clearance <span class="lc-wait-n">${list.length}</span> <span style="font-weight:500;font-size:12px;color:var(--text2);">- tap one to fill it in</span></h3>
@@ -40475,16 +40484,67 @@ async function stationOpenQaOps() {
   stationRender();
   try { stationQaOps = await api('POST', '/api/station/machine-ops', { pin: stationOperator.pin }); }
   catch (e) { notify('Could not load the machines: ' + e.message); stationView = 'qa'; stationRender(); return; }
+  // Nothing saved yet: every machine starts with all its people (green); after that, the last saved day.
   stationQaOpsEdit = {};
-  for (const m of stationQaOps.machines) stationQaOpsEdit[m.name] = [...((stationQaOps.assign || {})[m.name] || [])];
+  for (const m of stationQaOps.machines) stationQaOpsEdit[m.name] = stationQaOps.from ? [...((stationQaOps.assign || {})[m.name] || [])] : [...m.persons];
   stationRender();
 }
-function stationQaOpsToggle(machine, person) {
-  const l = stationQaOpsEdit[machine] || (stationQaOpsEdit[machine] = []);
-  const i = l.indexOf(person);
-  if (i >= 0) l.splice(i, 1); else l.push(person);
+function stationQaOpsRemove(machine, person) {
+  stationQaOpsEdit[machine] = (stationQaOpsEdit[machine] || []).filter(x => x !== person);
   stationResetIdle();
   stationRender();
+}
+function stationQaOpsMove(from, to, person) {
+  if (!to || from === to) return;
+  stationQaOpsEdit[from] = (stationQaOpsEdit[from] || []).filter(x => x !== person);
+  const l = stationQaOpsEdit[to] || (stationQaOpsEdit[to] = []);
+  if (!l.includes(person)) l.push(person);
+  stationResetIdle();
+  stationRender();
+}
+// Drag a name onto another machine - pointer events, so a finger on a tablet / phone works as well as a mouse.
+let _opsDrag = null;
+function opsChipDown(ev, machine, person) {
+  if (ev.target.closest('.lc-ops-del') || (ev.button != null && ev.button > 0)) return;
+  _opsDrag = { machine, person, chip: ev.currentTarget, x0: ev.clientX, y0: ev.clientY, ghost: null };
+  document.addEventListener('pointermove', opsDragMove, { passive: false });
+  document.addEventListener('pointerup', opsDragEnd);
+  document.addEventListener('pointercancel', opsDragEnd);
+}
+function opsRowAt(x, y) { const el = document.elementFromPoint(x, y); return el && el.closest('.lc-ops-row'); }
+function opsDragMove(ev) {
+  const d = _opsDrag;
+  if (!d) return;
+  if (!d.ghost) {
+    if (Math.hypot(ev.clientX - d.x0, ev.clientY - d.y0) < 6) return;
+    d.ghost = d.chip.cloneNode(true);
+    d.ghost.classList.add('lc-ops-ghost');
+    document.body.appendChild(d.ghost);
+    d.chip.classList.add('is-dragging');
+  }
+  ev.preventDefault();
+  d.ghost.style.left = (ev.clientX + 6) + 'px';
+  d.ghost.style.top = (ev.clientY - 18) + 'px';
+  d.ghost.style.display = 'none';
+  const row = opsRowAt(ev.clientX, ev.clientY);
+  d.ghost.style.display = '';
+  document.querySelectorAll('.lc-ops-row.is-drop').forEach(r => { if (r !== row) r.classList.remove('is-drop'); });
+  if (row && row.dataset.machine !== d.machine) row.classList.add('is-drop');
+  if (ev.clientY < 70) window.scrollBy(0, -14); else if (ev.clientY > window.innerHeight - 70) window.scrollBy(0, 14);
+}
+function opsDragEnd(ev) {
+  document.removeEventListener('pointermove', opsDragMove);
+  document.removeEventListener('pointerup', opsDragEnd);
+  document.removeEventListener('pointercancel', opsDragEnd);
+  const d = _opsDrag;
+  _opsDrag = null;
+  document.querySelectorAll('.lc-ops-row.is-drop').forEach(r => r.classList.remove('is-drop'));
+  if (!d || !d.ghost) return;
+  d.ghost.remove();
+  d.chip.classList.remove('is-dragging');
+  if (ev.type !== 'pointerup') return;
+  const row = opsRowAt(ev.clientX, ev.clientY);
+  if (row) stationQaOpsMove(d.machine, row.dataset.machine, d.person);
 }
 function stationQaOpsAdd(machine, sel) {
   const p = sel.value; sel.value = '';
@@ -40508,17 +40568,17 @@ function stationQaOpsHtml() {
       <div style="display:flex;gap:8px;"><button class="btn" onclick="stationView='qa'; stationRender();">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>`;
   if (!d || !stationQaOpsEdit) return head + '<div class="empty">Loading…</div>';
-  const note = d.from && d.from !== d.date ? `<div class="lc-ops-note">Starting from ${esc(fmtDMY(d.from))} - change only who moved, then Save.</div>`
-    : d.from ? '' : '<div class="lc-ops-note">Tap the operators working on each machine today, then Save.</div>';
+  const note = `<div class="lc-ops-note">${d.from && d.from !== d.date ? `Starting from ${esc(fmtDMY(d.from))}. ` : d.from ? '' : 'Starting with every machine\'s own operators. '}Drag a name onto another machine to move them, &#128465; to take one off, + someone else to add. Then Save.</div>`;
   const machines = [...d.machines].sort((a, b) => (a.code || '~').localeCompare(b.code || '~', undefined, { numeric: true }) || a.name.localeCompare(b.name));
   const rows = machines.map(m => {
     const on = stationQaOpsEdit[m.name] || [];
-    const own = [...new Set([...m.persons, ...on])];
-    const others = d.people.filter(p => !own.includes(p));
-    return `<div class="lc-ops-row${on.length ? '' : ' is-empty'}">
-      <div class="lc-ops-m"><b>${esc(m.name)}</b>${m.code ? `<small>${esc(m.code)}</small>` : ''}</div>
-      <div class="lc-ops-p">${own.map(p => `<button type="button" class="lc-ops-chip${on.includes(p) ? ' is-on' : ''}" onclick="stationQaOpsToggle(${esc(JSON.stringify(m.name))}, ${esc(JSON.stringify(p))})">${esc(p)}</button>`).join('')}
-        ${others.length ? `<select class="lc-ops-add" onchange="stationQaOpsAdd(${esc(JSON.stringify(m.name))}, this)"><option value="">+ someone else</option>${others.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select>` : ''}</div>
+    const others = d.people.filter(p => !on.includes(p));
+    const M = esc(JSON.stringify(m.name));
+    return `<div class="lc-ops-row${on.length ? '' : ' is-empty'}" data-machine="${esc(m.name)}">
+      <div class="lc-ops-m">${m.code ? `<span class="lc-ops-code">${esc(m.code)}</span>` : ''}<b>${esc(m.name)}</b></div>
+      <div class="lc-ops-p">${on.map(p => `<span class="lc-ops-chip is-on" onpointerdown="opsChipDown(event, ${M}, ${esc(JSON.stringify(p))})" title="Drag onto another machine to move">${esc(p)}<button type="button" class="lc-ops-del" title="Take off this machine" onclick="stationQaOpsRemove(${M}, ${esc(JSON.stringify(p))})">&#128465;</button></span>`).join('')}
+        ${on.length ? '' : '<span class="lc-ops-none">nobody</span>'}
+        ${others.length ? `<select class="lc-ops-add" onchange="stationQaOpsAdd(${M}, this)"><option value="">+ someone else</option>${others.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select>` : ''}</div>
     </div>`;
   }).join('');
   return head + `<div class="lc-wrap">${note}<div class="lc-card lc-ops">${rows}</div>
