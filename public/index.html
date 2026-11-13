@@ -2315,6 +2315,24 @@
   .lc-qc { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border: 1.5px solid var(--border2); border-radius: 7px; background: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
   .lc-qc input { width: 20px; height: 20px; margin: 0; accent-color: #16a34a; }
   .lc-field label.lc-qc.is-on { border-color: #16a34a; background: #f0fdf4; color: #166534; }
+  .lc-waiting { border-color: #f59e0b; background: #fffbeb; }
+  .lc-wait-n { display: inline-block; min-width: 22px; padding: 0 7px; border-radius: 11px; background: #dc2626; color: #fff; font-size: 12px; line-height: 20px; text-align: center; }
+  .lc-wait-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 6px; }
+  .lc-wait { display: flex; justify-content: space-between; gap: 10px; text-align: left; padding: 8px 10px; border: 1.5px solid #fcd34d; border-radius: 8px; background: #fff; cursor: pointer; font-size: 13px; }
+  .lc-wait:hover { border-color: #f59e0b; }
+  .lc-wait small { display: block; color: var(--text2); font-size: 11.5px; }
+  .lc-wait-m { text-align: right; flex: 0 0 auto; }
+  .lc-ops-note { font-size: 13px; color: #92400e; background: #fef3c7; border-radius: 8px; padding: 8px 10px; }
+  .lc-ops { padding: 4px 12px; }
+  .lc-ops-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .lc-ops-row:last-child { border-bottom: 0; }
+  .lc-ops-row.is-empty .lc-ops-m b { color: var(--text2); }
+  .lc-ops-m { flex: 0 0 170px; }
+  .lc-ops-m small { display: block; color: var(--text2); font-size: 11px; }
+  .lc-ops-p { flex: 1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .lc-ops-chip { padding: 6px 12px; border-radius: 16px; border: 1.5px solid var(--border2); background: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .lc-ops-chip.is-on { background: #155e75; border-color: #155e75; color: #fff; }
+  .lc-ops-add { padding: 5px 8px; border-radius: 16px; border: 1.5px dashed var(--border2); background: #fff; font-size: 13px; color: var(--text2); }
   .lc-sec-tag { display: inline-block; margin-left: 4px; padding: 0 7px; border-radius: 8px; background: #155e75; color: #fff; font-size: 10.5px; font-weight: 800; line-height: 17px; vertical-align: 1px; }
   .lc-pts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
   @media (max-width: 700px) { .lc-pts { grid-template-columns: 1fr; } }
@@ -39853,6 +39871,8 @@ let stationQa = null;          // the entry being typed
 let stationQaRecent = null;    // latest saved entries
 let stationQaMachines = [];    // machine names to pick from while typing
 let stationQaCompanies = [];   // every company on a job card - QA picks a manual job's from it
+let stationQaWaiting = null, _stationQaWaitKeys = null, _stationQaTimer = null;   // jobs waiting for line clearance (owner, 2026-11-13)
+let stationQaOps = null, stationQaOpsEdit = null;                                  // today's operators
 let _stationSavedPerms = null;
 let stationJobId    = null;
 let stationPapercutRequests = null; // Paper Cutting screen: pending offcut requests from /api/station/offcut-requests
@@ -39933,6 +39953,8 @@ function stationResetIdle() {
 
 function stationLogout(silent) {
   stationRestorePerms();
+  if (_stationQaTimer) { clearInterval(_stationQaTimer); _stationQaTimer = null; }
+  stationQaWaiting = null; _stationQaWaitKeys = null; stationQaOps = null; stationQaOpsEdit = null;
   stationQa = null; stationQaRecent = null;
   stationJobCardReturn = null;
   document.body.classList.remove('station-jobcard-entry');
@@ -40095,6 +40117,7 @@ function stationRender() {
   else if (stationView === 'papercut') root.innerHTML = stationPapercutHtml();
   else if (stationView === 'qa') root.innerHTML = stationQaHtml();
   else if (stationView === 'lc-report') root.innerHTML = stationLcReportHtml();
+  else if (stationView === 'qa-ops') root.innerHTML = stationQaOpsHtml();
   else root.innerHTML = stationQueueHtml();
 }
 
@@ -40379,6 +40402,8 @@ async function stationOpenQa() {
   if (!stationQa) stationQa = stationQaBlank();
   stationRender();
   stationQaLoadRecent();
+  stationQaLoadWaiting();
+  if (!_stationQaTimer) _stationQaTimer = setInterval(() => { if (stationHasQa() && stationView === 'qa') stationQaLoadWaiting(); }, 30000);
   if (!stationQaCompanies.length) {
     api('GET', '/api/station/companies').then(list => {
       stationQaCompanies = Array.isArray(list) ? list : [];
@@ -40401,6 +40426,103 @@ async function stationQaLoadRecent() {
   catch (e) { stationQaRecent = []; }
   const el = document.getElementById('lc-recent');
   if (el && stationView === 'qa') el.innerHTML = stationQaRecentHtml();
+}
+// ── Waiting for line clearance (owner, 2026-11-13) ──
+async function stationQaLoadWaiting() {
+  if (!stationHasQa()) return;
+  let list;
+  try { list = await api('POST', '/api/station/qa-waiting', { pin: stationOperator.pin }); } catch (e) { return; }
+  list = Array.isArray(list) ? list : [];
+  const keys = new Set(list.map(w => w.machine + '|' + w.job_id));
+  if (_stationQaWaitKeys && [...keys].some(k => !_stationQaWaitKeys.has(k))) stationBeep();
+  _stationQaWaitKeys = keys;
+  stationQaWaiting = list;
+  const el = document.getElementById('lc-waiting');
+  if (el && stationView === 'qa') el.outerHTML = stationQaWaitingHtml();
+}
+function stationBeep() {
+  try {
+    const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+    const ctx = new C(), o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = 880; g.gain.value = 0.15; o.connect(g); g.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + 0.25); setTimeout(() => ctx.close(), 600);
+  } catch (e) { /* no sound - the list still shows it */ }
+}
+function stationQaWaitingHtml() {
+  const list = stationQaWaiting || [];
+  if (!list.length) return '<div id="lc-waiting"></div>';
+  const hm = at => { const d = String(at).slice(0, 10), t = String(at).slice(11, 16); return (d === localDateISO() ? '' : fmtDMY(d).slice(0, 5) + ' ') + t; };
+  return `<div id="lc-waiting" class="lc-card lc-waiting">
+    <h3>Waiting for line clearance <span class="lc-wait-n">${list.length}</span> <span style="font-weight:500;font-size:12px;color:var(--text2);">- tap one to fill it in</span></h3>
+    <div class="lc-wait-list">${list.map((w, i) => `<button type="button" class="lc-wait" onclick="stationQaFromWaiting(${i})">
+      <span class="lc-wait-job"><b>E-${w.job_id}</b> ${esc(w.job_name)}<small>${esc(w.company)}</small></span>
+      <span class="lc-wait-m"><b>${esc(w.machine)}</b>${w.machine_code ? ` <small>${esc(w.machine_code)}</small>` : ''}<small>${esc(w.operator)} · done ${esc(hm(w.at))}</small></span>
+    </button>`).join('')}</div></div>`;
+}
+function stationQaFromWaiting(i) {
+  const w = (stationQaWaiting || [])[i];
+  if (!w) return;
+  if (!stationQa) stationQa = stationQaBlank();
+  stationQa.prev_job = String(w.job_id);
+  stationQa.prev_company = w.company || '';
+  stationQaMachine(w.machine);   // picks the machine + its sections, then redraws
+  setTimeout(() => { const el = document.querySelector('#station-root .lc-card + .lc-card, #station-root .lc-wrap .lc-card:nth-child(2)'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 50);
+}
+// ── Today's operators (owner, 2026-11-13): who works on which machine today ──
+async function stationOpenQaOps() {
+  stationView = 'qa-ops';
+  stationQaOps = null;
+  stationRender();
+  try { stationQaOps = await api('POST', '/api/station/machine-ops', { pin: stationOperator.pin }); }
+  catch (e) { notify('Could not load the machines: ' + e.message); stationView = 'qa'; stationRender(); return; }
+  stationQaOpsEdit = {};
+  for (const m of stationQaOps.machines) stationQaOpsEdit[m.name] = [...((stationQaOps.assign || {})[m.name] || [])];
+  stationRender();
+}
+function stationQaOpsToggle(machine, person) {
+  const l = stationQaOpsEdit[machine] || (stationQaOpsEdit[machine] = []);
+  const i = l.indexOf(person);
+  if (i >= 0) l.splice(i, 1); else l.push(person);
+  stationResetIdle();
+  stationRender();
+}
+function stationQaOpsAdd(machine, sel) {
+  const p = sel.value; sel.value = '';
+  if (!p) return;
+  const l = stationQaOpsEdit[machine] || (stationQaOpsEdit[machine] = []);
+  if (!l.includes(p)) l.push(p);
+  stationRender();
+}
+async function stationQaOpsSave(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await api('POST', '/api/station/machine-ops/save', { pin: stationOperator.pin, assign: stationQaOpsEdit, person_name: (stationPerson && stationPerson.name) || '' });
+    notify("Today's operators saved");
+    stationView = 'qa'; stationRender();
+  } catch (e) { notify('Error: ' + e.message); if (btn) btn.disabled = false; }
+}
+function stationQaOpsHtml() {
+  const d = stationQaOps;
+  const head = `<div class="station-head">
+      <div><div class="station-who" style="font-size:20px;">Today's operators</div><div class="station-where" style="font-size:14px;">${esc(fmtDMY(localDateISO()))} &middot; who works on which machine</div></div>
+      <div style="display:flex;gap:8px;"><button class="btn" onclick="stationView='qa'; stationRender();">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+    </div>`;
+  if (!d || !stationQaOpsEdit) return head + '<div class="empty">Loading…</div>';
+  const note = d.from && d.from !== d.date ? `<div class="lc-ops-note">Starting from ${esc(fmtDMY(d.from))} - change only who moved, then Save.</div>`
+    : d.from ? '' : '<div class="lc-ops-note">Tap the operators working on each machine today, then Save.</div>';
+  const machines = [...d.machines].sort((a, b) => (a.code || '~').localeCompare(b.code || '~', undefined, { numeric: true }) || a.name.localeCompare(b.name));
+  const rows = machines.map(m => {
+    const on = stationQaOpsEdit[m.name] || [];
+    const own = [...new Set([...m.persons, ...on])];
+    const others = d.people.filter(p => !own.includes(p));
+    return `<div class="lc-ops-row${on.length ? '' : ' is-empty'}">
+      <div class="lc-ops-m"><b>${esc(m.name)}</b>${m.code ? `<small>${esc(m.code)}</small>` : ''}</div>
+      <div class="lc-ops-p">${own.map(p => `<button type="button" class="lc-ops-chip${on.includes(p) ? ' is-on' : ''}" onclick="stationQaOpsToggle(${esc(JSON.stringify(m.name))}, ${esc(JSON.stringify(p))})">${esc(p)}</button>`).join('')}
+        ${others.length ? `<select class="lc-ops-add" onchange="stationQaOpsAdd(${esc(JSON.stringify(m.name))}, this)"><option value="">+ someone else</option>${others.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select>` : ''}</div>
+    </div>`;
+  }).join('');
+  return head + `<div class="lc-wrap">${note}<div class="lc-card lc-ops">${rows}</div>
+    <button class="btn lc-save" onclick="stationQaOpsSave(this)">&#10003; Save today's operators</button></div>`;
 }
 function stationQaSet(field, value) { if (stationQa) stationQa[field] = value; stationResetIdle(); }
 // Special jobs (not in the app) always start with 4 (owner, 2026-11-11) - their company is typed.
@@ -40464,10 +40586,11 @@ function stationQaHtml() {
   return `
     <div class="station-head">
       <div><div class="station-who" style="font-size:20px;">${who}${whoUr}</div><div class="station-where" style="font-size:14px;">&#10003; Line Clearance &middot; QA</div></div>
-      <div style="display:flex;gap:8px;">${stationLcButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;"><button class="btn" onclick="stationOpenQaOps()" style="font-weight:700;">&#128119; Today's operators</button>${stationLcButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>
     ${others ? `<div style="padding:0 4px 8px;"><button class="btn btn-sm" onclick="stationView='stage-pick'; stationRender();">&lsaquo; Switch station</button></div>` : ''}
     <div class="lc-wrap">
+      ${stationQaWaitingHtml()}
       <div class="lc-card">
         <h3>Machine &amp; jobs</h3>
         <div class="lc-grid">
@@ -40547,6 +40670,7 @@ async function stationQaSave(btn) {
     notify(row.cleared ? 'Saved - Line Cleared: Y' : `Saved - Line Cleared: N (not ticked: ${miss.join(', ')})`);
     stationQa = { ...stationQaBlank(), entry_date: q.entry_date };
     stationQaRecent = [row, ...(stationQaRecent || [])].slice(0, 30);
+    stationQaWaiting = (stationQaWaiting || []).filter(w => !(String(w.machine).toLowerCase() === String(row.machine).toLowerCase() && String(w.job_id) === String(row.prev_job).replace(/\D/g, '')));
     stationRender();
     const root = document.getElementById('station-root');
     if (root) root.scrollIntoView({ block: 'start' });

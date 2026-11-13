@@ -3743,6 +3743,14 @@ app.post('/api/operators/verify', requireStationUser, async (req, res) => {
     const op = rows[0];
     // QC / QA: what this PIN may do follows its own Operator column (owner, 2026-11-11).
     if (OPERATOR_KIND_ROLE[op.kind]) { await ensureRolePermsFresh(); op.perms = operatorKindPerms(op.kind); }
+    // A machine: only today's operators, as QA set them (owner, 2026-11-13); everyone else under "Someone else".
+    if (!op.is_manager && !op.kind && Array.isArray(op.persons)) {
+      const names = ((await machineOpsFor(sql, businessDateISO())).assign || {})[op.name];
+      if (Array.isArray(names) && names.length) {
+        op.persons = names.map(n => op.persons.find(p => p && String(p.name || '').trim().toLowerCase() === n.toLowerCase()) || { name: n, name_ur: '' });
+        op.today_assigned = true;
+      }
+    }
     if (!op.stage_indices || !op.stage_indices.length) op.stage_indices = [op.stage_index];
     if (!Array.isArray(op.roles) || !op.roles.length) op.roles = rolesOf(op);
     if (!op.is_manager && infoOnlyRoles(op.roles)) return res.status(403).json({ error: 'This entry is for information only - it has no Station sign-in' });
@@ -8188,8 +8196,9 @@ app.post('/api/station/line-clearance', requireStationUser, async (req, res) => 
     if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return res.status(400).json({ error: 'Waste must be a number' });
     const qaName = lcText(b.qa_name, 80) || v.operator.name;
     const row = (await sql`
-      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, machine_code, prev_job, prev_company, new_job, new_company, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
+      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, machine_code, operator_name, prev_job, prev_company, new_job, new_company, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
       VALUES (${date}, ${lcText(b.entry_time, 10)}, ${form}, ${sections}, ${machine}, ${lcText(b.machine_code, 40)},
+              ${(((await machineOpsFor(sql, date)).assign || {})[machine] || []).join(', ')},
               ${prev}, ${lcText(b.prev_company, 120)}, ${next}, ${lcText(b.new_company, 120)}, ${JSON.stringify(points)}, ${cleared}, ${b.qc_cleared === true}, ${waste}, ${lcText(b.remarks, 500)}, ${qaName}, ${v.operator.id})
       RETURNING *`)[0];
     await logAudit(sql, req, { action: 'line_clearance.create', entityType: 'line_clearance', entityId: row.id,
@@ -8267,6 +8276,87 @@ app.post('/api/station/line-clearance-report', requireStationUser, async (req, r
     if (!['view', 'yes'].includes(operatorKindPerms(op.kind).rpt_line_clearance)) return res.status(403).json({ error: 'Not allowed - Line Clearance report access is off for this PIN' });
     const okDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? d : null;
     res.json(await lineClearanceRows(sql, okDate(req.body.from) || '1900-01-01', okDate(req.body.to) || '2999-12-31'));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// ── QA at the Station: waiting jobs + today's operators (owner, 2026-11-13) ──
+// The machines (not QC / QA / manager entries) with their ID and people.
+async function stationMachineList(sql) {
+  return sql`SELECT name, machine_code, persons FROM operators
+              WHERE active AND COALESCE(kind, '') = '' AND NOT is_manager AND COALESCE(pin, '') <> '' ORDER BY name`;
+}
+// Who works on which machine on a date: that day's choice, else the last day saved before it.
+async function machineOpsFor(sql, date) {
+  const r = await sql`SELECT key, value FROM schema_meta WHERE key LIKE 'machine_ops:%' AND key <= ${'machine_ops:' + date} ORDER BY key DESC LIMIT 1`;
+  if (!r[0]) return { from: null, assign: {} };
+  let a = {};
+  try { a = JSON.parse(r[0].value) || {}; } catch (e) { a = {}; }
+  return { from: r[0].key.slice('machine_ops:'.length), assign: a };
+}
+const yesterdayISO = () => businessDateISO(new Date(Date.now() - 86400000));
+app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyQaPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const yday = yesterdayISO();
+    const machines = await stationMachineList(sql);
+    const byM = new Map(machines.map(m => [String(m.name).trim().toLowerCase(), m]));
+    const jobs = await sql`SELECT id, name, client, log FROM jobs WHERE deleted_at IS NULL AND updated_at > NOW() - INTERVAL '3 days'`;
+    const lcs = await sql`SELECT machine, prev_job FROM line_clearance WHERE deleted_at IS NULL AND entry_date >= ${yday}`;
+    const cleared = new Set(lcs.map(l => String(l.machine || '').trim().toLowerCase() + '|' + lcJobId(l.prev_job)));
+    const latest = new Map();
+    for (const j of jobs) for (const e of (Array.isArray(j.log) ? j.log : [])) {
+      if (!/^Moved from /.test(String((e && e.notes) || ''))) continue;   // the job finished on that machine
+      const m = /^(.+?)\s*·\s*([^()]+?)\s*\((.+?)\)$/.exec(String((e && e.by) || ''));
+      const t = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/.exec(String((e && e.time) || ''));
+      if (!m || !t) continue;
+      const mach = byM.get(m[2].trim().toLowerCase());
+      const date = `${t[3]}-${t[2]}-${t[1]}`;
+      if (!mach || date < yday) continue;
+      const key = String(mach.name).trim().toLowerCase() + '|' + j.id;
+      if (cleared.has(key)) continue;
+      const at = `${date}T${t[4]}:${t[5]}`;
+      const prev = latest.get(key);
+      if (!prev || prev.at < at) latest.set(key, { job_id: j.id, job_name: j.name || '', company: j.client || '', machine: mach.name, machine_code: mach.machine_code || '', operator: m[1].trim(), stage: m[3].trim(), at });
+    }
+    res.json([...latest.values()].sort((a, b) => b.at.localeCompare(a.at)));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/station/machine-ops', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyQaPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const today = businessDateISO();
+    const machines = await stationMachineList(sql);
+    const { from, assign } = await machineOpsFor(sql, today);
+    const people = [...new Set(machines.flatMap(m => (Array.isArray(m.persons) ? m.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean)))].sort((a, b) => a.localeCompare(b));
+    res.json({ date: today, from, assign, people,
+      machines: machines.map(m => ({ name: m.name, code: m.machine_code || '', persons: (Array.isArray(m.persons) ? m.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean) })) });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/station/machine-ops/save', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyQaPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const names = new Set((await stationMachineList(sql)).map(m => m.name));
+    const given = (req.body.assign && typeof req.body.assign === 'object') ? req.body.assign : {};
+    const assign = {};
+    for (const [m, list] of Object.entries(given)) {
+      if (!names.has(m) || !Array.isArray(list)) continue;
+      const ps = [...new Set(list.map(x => String(x || '').trim().slice(0, 60)).filter(Boolean))];
+      if (ps.length) assign[m] = ps;
+    }
+    const today = businessDateISO();
+    await sql`INSERT INTO schema_meta (key, value) VALUES (${'machine_ops:' + today}, ${JSON.stringify(assign)})
+              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    await logAudit(sql, req, { action: 'station.machine_ops', entityType: 'settings', entityId: null,
+      summary: `Today's operators set by ${lcText(req.body.person_name, 60) || v.operator.name}: ${Object.entries(assign).map(([m, p]) => m + ' = ' + p.join(' / ')).join('; ') || 'none'}` });
+    res.json({ date: today, assign });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // QA's own recent entries on his screen (PIN in the body, never the URL).
