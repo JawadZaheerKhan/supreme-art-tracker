@@ -7911,10 +7911,20 @@ async function loadPrintingMachines() {
   }
 }
 
-// Station-only loader: skips Delivered + soft-deleted jobs so the floor
-// terminal doesn't drag the full history down the wire on every PIN.
+// Station loader, called on every PIN. The terminal already holds the whole
+// list from page load, so this asks only for what changed since (~10 KB).
+// It used to replace `jobs` with the ?active=1 list (1.3 MB) every time. That
+// left the synced list without its delivered jobs, so the next changed-only
+// refresh found job numbers it didn't have and re-downloaded everything
+// (7.5 MB) - once per PIN, about a fifth of a day's Vercel Fast Origin
+// Transfer in Nov 2026. ?active=1 is now only the fallback for a terminal
+// whose page-load list never arrived; never assign `jobs` a partial list
+// while jobsSyncAt is set.
 async function loadJobsForStation() {
-  try { jobs = await api('GET', '/api/jobs?active=1'); }
+  try {
+    if (jobsSyncAt) await fetchJobsSynced(false);
+    else jobs = await api('GET', '/api/jobs?active=1');
+  }
   catch(e) { notify('Error loading jobs: ' + e.message); }
 }
 
