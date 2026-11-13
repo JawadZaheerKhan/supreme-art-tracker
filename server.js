@@ -14220,20 +14220,22 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     if (!person) return res.status(400).json({ error: 'Pick which operator is doing this update.' });
     // Today's operators on this machine (owner, 2026-11-13): one of them doing the entry credits all of them -
     // "OP1 & OP2" on the entry and in the log. Someone not on today's list keeps the credit alone.
-    let creditName = person.name;
+    // Everyone on the machine today gets the credit, whoever does the entry - picked from today's list or from
+    // Someone else (owner, 2026-11-13). Someone from another machine keeps his (custom) mark on his own name.
+    let signer = person.name, crewRest = [];
     if (!viaJobCard) {
       const crew = ((await machineOpsFor(sql, businessDateISO())).assign || {})[machine.name] || [];
       const me = String(person.name || '').trim().toLowerCase();
-      if (crew.some(n => String(n).trim().toLowerCase() === me)) {
-        personIsCustom = false;   // on this machine today, even if it is not his usual one
-        if (crew.length > 1) creditName = [person.name, ...crew.filter(n => String(n).trim().toLowerCase() !== me)].join(' & ');
-      }
+      if (crew.some(n => String(n).trim().toLowerCase() === me)) personIsCustom = false;   // on this machine today
+      crewRest = crew.filter(n => String(n).trim().toLowerCase() !== me);
     }
+    signer += viaJobCard ? ' (job card)' : personIsCustom ? ' (custom)' : '';
+    const creditName = [signer, ...crewRest].join(' & ');
     // Synthesize an "operator" shape so the existing log/coatings_done code
     // keeps working without rewiring everything to a separate person object.
     const operator = {
       id: machine.id,
-      name: creditName + (viaJobCard ? ' (job card)' : personIsCustom ? ' (custom)' : ''),
+      name: creditName,
       name_ur: person.name_ur || '',
       stage_index: machine.stage_index,
       stage_indices: machine.stage_indices,
