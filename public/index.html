@@ -26713,7 +26713,9 @@ function lcTableHtml(g, withLegend) {
   const secs = lcGroupSections(g);
   const nums = secs.flatMap(x => x.points.map(p => p[0]));
   const atStation = typeof mode !== 'undefined' && mode === 'station';
-  const canEdit = !atStation && seeBtn('rpt_line_clearance_edit'), canDel = !atStation && seeBtn('rpt_line_clearance_delete');
+  const pinCan = k => !!(stationOperator && stationOperator.perms && stationOperator.perms[k] === 'yes');
+  const canEdit = atStation ? pinCan('rpt_line_clearance_edit') : seeBtn('rpt_line_clearance_edit');
+  const canDel = atStation ? pinCan('rpt_line_clearance_delete') : seeBtn('rpt_line_clearance_delete');
   const head = `<tr><th>#</th><th>Date</th><th>Time</th><th>Previous Job</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
     ${nums.map(n => { const sec = lcSectionOf(g.form, n) || {}; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === n) || [])[1] || '')}">${n}</th>`; }).join('')}
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
@@ -26759,6 +26761,9 @@ function lcToolbarHtml() {
       <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-sm" onclick="printLineClearance()">&#128424; Print</button></div>
     </div>`;
 }
+// At the Station's Line Clearance Log (owner, 2026-11-13): saves go through the PIN-checked routes.
+function lcAtStation() { return typeof mode !== 'undefined' && mode === 'station' && stationView === 'lc-report' && !!stationOperator; }
+function lcStationWho() { return { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '' }; }
 // Green dot: open an entry and correct it (machine and sections stay as saved).
 function openLcEdit(id) {
   const e = (lcState.rows || []).find(r => r.id === id);
@@ -26792,10 +26797,11 @@ async function saveLcEdit(id) {
   if (!body.prev_job || !body.new_job) { notify('Enter the previous job and the new job'); return; }
   showSaving(true);
   try {
-    await api('PUT', '/api/line-clearance/' + id, body);
+    if (lcAtStation()) await api('POST', `/api/station/line-clearance/${id}/edit`, { ...body, ...lcStationWho() });
+    else await api('PUT', '/api/line-clearance/' + id, body);
     closeModal();
     notify('Line clearance corrected');
-    await openLineClearanceReport();
+    if (lcAtStation()) await stationLoadLcReport(); else await openLineClearanceReport();
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -26807,9 +26813,10 @@ async function deleteLcEntry(id) {
   if (!ok) return;
   showSaving(true);
   try {
-    await api('DELETE', '/api/line-clearance/' + id);
+    if (lcAtStation()) await api('POST', `/api/station/line-clearance/${id}/delete`, lcStationWho());
+    else await api('DELETE', '/api/line-clearance/' + id);
     notify('Line clearance deleted');
-    await openLineClearanceReport();
+    if (lcAtStation()) await stationLoadLcReport(); else await openLineClearanceReport();
   } catch (err) { notify('Error: ' + err.message); }
   showSaving(false);
 }

@@ -8322,45 +8322,83 @@ app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', '
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// Correct an entry from the report (green dot). Machine and sections stay; Line Cleared is worked out again.
+// Correct an entry (green dot). Machine and sections stay; Line Cleared is worked out again.
+async function lcUpdate(sql, req, id, b, by) {
+  const cur = (await sql`SELECT * FROM line_clearance WHERE id = ${id} AND deleted_at IS NULL`)[0];
+  if (!cur) return { status: 404, error: 'Entry not found' };
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(b.entry_date || '')) ? b.entry_date : null;
+  if (!date) return { status: 400, error: 'Enter the date' };
+  const prev = lcText(b.prev_job, 40), next = lcText(b.new_job, 40);
+  if (!prev || !next) return { status: 400, error: 'Enter the previous job and the new job' };
+  const waste = b.waste === '' || b.waste == null ? null : Number(b.waste);
+  if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return { status: 400, error: 'Waste must be a number' };
+  const nums = (LC_FORMS[cur.form] || []).filter(x => (cur.sections || []).includes(x[0])).flatMap(x => x[1]);
+  const given = (b.points && typeof b.points === 'object') ? b.points : {};
+  const points = {};
+  for (const n of nums) points[n] = given[n] === true;
+  const cleared = nums.every(n => points[n]);
+  const row = (await sql`
+    UPDATE line_clearance SET entry_date = ${date}, entry_time = ${lcText(b.entry_time, 10)}, prev_job = ${prev}, prev_company = ${lcText(b.prev_company, 120)},
+      new_job = ${next}, new_company = ${lcText(b.new_company, 120)}, waste = ${waste}, points = ${JSON.stringify(points)}, cleared = ${cleared},
+      qc_cleared = ${b.qc_cleared === true}, remarks = ${lcText(b.remarks, 500)}, edited_at = NOW(), edited_by = ${by}
+    WHERE id = ${id} RETURNING *`)[0];
+  await logAudit(sql, req, { action: 'line_clearance.update', entityType: 'line_clearance', entityId: id,
+    summary: `Line clearance ${cur.machine} corrected by ${by}: ${prev} → ${next} (${cleared ? 'cleared' : 'NOT cleared'})` });
+  return { row };
+}
+async function lcDelete(sql, req, id, by) {
+  const row = (await sql`UPDATE line_clearance SET deleted_at = NOW(), deleted_by = ${by} WHERE id = ${id} AND deleted_at IS NULL RETURNING *`)[0];
+  if (!row) return { status: 404, error: 'Entry not found' };
+  await logAudit(sql, req, { action: 'line_clearance.delete', entityType: 'line_clearance', entityId: id,
+    summary: `Line clearance deleted by ${by}: ${row.machine} ${row.prev_job} → ${row.new_job} (${String(row.entry_date).slice(0, 10)})` });
+  return { row };
+}
 app.put('/api/line-clearance/:id', requirePermission('rpt_line_clearance_edit'), async (req, res) => {
   try {
     await dbReady;
-    const sql = getDb();
-    const id = parseInt(req.params.id, 10);
-    const cur = (await sql`SELECT * FROM line_clearance WHERE id = ${id} AND deleted_at IS NULL`)[0];
-    if (!cur) return res.status(404).json({ error: 'Entry not found' });
-    const b = req.body || {};
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(b.entry_date || '')) ? b.entry_date : null;
-    if (!date) return res.status(400).json({ error: 'Enter the date' });
-    const prev = lcText(b.prev_job, 40), next = lcText(b.new_job, 40);
-    if (!prev || !next) return res.status(400).json({ error: 'Enter the previous job and the new job' });
-    const waste = b.waste === '' || b.waste == null ? null : Number(b.waste);
-    if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return res.status(400).json({ error: 'Waste must be a number' });
-    const nums = (LC_FORMS[cur.form] || []).filter(x => (cur.sections || []).includes(x[0])).flatMap(x => x[1]);
-    const given = (b.points && typeof b.points === 'object') ? b.points : {};
-    const points = {};
-    for (const n of nums) points[n] = given[n] === true;
-    const cleared = nums.every(n => points[n]);
-    const row = (await sql`
-      UPDATE line_clearance SET entry_date = ${date}, entry_time = ${lcText(b.entry_time, 10)}, prev_job = ${prev}, prev_company = ${lcText(b.prev_company, 120)},
-        new_job = ${next}, new_company = ${lcText(b.new_company, 120)}, waste = ${waste}, points = ${JSON.stringify(points)}, cleared = ${cleared},
-        qc_cleared = ${b.qc_cleared === true}, remarks = ${lcText(b.remarks, 500)}, edited_at = NOW(), edited_by = ${req.user.email}
-      WHERE id = ${id} RETURNING *`)[0];
-    await logAudit(sql, req, { action: 'line_clearance.update', entityType: 'line_clearance', entityId: id,
-      summary: `Line clearance ${cur.machine} corrected: ${prev} → ${next} (${cleared ? 'cleared' : 'NOT cleared'})` });
-    res.json(row);
+    const r = await lcUpdate(getDb(), req, parseInt(req.params.id, 10), req.body || {}, req.user.email);
+    if (r.error) return res.status(r.status).json({ error: r.error });
+    res.json(r.row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.delete('/api/line-clearance/:id', requirePermission('rpt_line_clearance_delete'), async (req, res) => {
   try {
     await dbReady;
+    const r = await lcDelete(getDb(), req, parseInt(req.params.id, 10), req.user.email);
+    if (r.error) return res.status(r.status).json({ error: r.error });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// At the Station (owner, 2026-11-13): a QC / QA PIN whose own Operator column has Edit on the green dot /
+// delete row. PIN in the body; the entry records who did it (the PIN's person, else its name).
+async function lcStationActor(sql, body, permKey) {
+  const pin = String((body && body.pin) || '').trim();
+  if (!validPin(pin)) return { status: 400, error: 'Enter a 3-digit PIN' };
+  const op = (await sql`SELECT name, kind FROM operators WHERE pin = ${pin} AND active LIMIT 1`)[0];
+  if (!op || !OPERATOR_KIND_ROLE[op.kind]) return { status: 403, error: 'Not allowed' };
+  await ensureRolePermsFresh();
+  if (operatorKindPerms(op.kind)[permKey] !== 'yes') return { status: 403, error: 'Not allowed for this PIN' };
+  return { by: `${lcText(body.person_name, 60) || op.name} (Station)` };
+}
+app.post('/api/station/line-clearance/:id/edit', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
     const sql = getDb();
-    const id = parseInt(req.params.id, 10);
-    const row = (await sql`UPDATE line_clearance SET deleted_at = NOW(), deleted_by = ${req.user.email} WHERE id = ${id} AND deleted_at IS NULL RETURNING *`)[0];
-    if (!row) return res.status(404).json({ error: 'Entry not found' });
-    await logAudit(sql, req, { action: 'line_clearance.delete', entityType: 'line_clearance', entityId: id,
-      summary: `Line clearance deleted: ${row.machine} ${row.prev_job} → ${row.new_job} (${String(row.entry_date).slice(0, 10)})` });
+    const a = await lcStationActor(sql, req.body, 'rpt_line_clearance_edit');
+    if (a.error) return res.status(a.status).json({ error: a.error });
+    const r = await lcUpdate(sql, req, parseInt(req.params.id, 10), req.body || {}, a.by);
+    if (r.error) return res.status(r.status).json({ error: r.error });
+    res.json(r.row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/station/line-clearance/:id/delete', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const a = await lcStationActor(sql, req.body, 'rpt_line_clearance_delete');
+    if (a.error) return res.status(a.status).json({ error: a.error });
+    const r = await lcDelete(sql, req, parseInt(req.params.id, 10), a.by);
+    if (r.error) return res.status(r.status).json({ error: r.error });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
