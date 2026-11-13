@@ -2373,6 +2373,8 @@
   .lc-dot { width: 13px; height: 13px; border-radius: 50%; background: #16a34a; border: 0; padding: 0; margin-right: 6px; vertical-align: -1px; cursor: pointer; box-shadow: 0 0 0 2px #dcfce7; }
   .lc-dot:hover { background: #15803d; }
   .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .lc-mchip-code { color: #A32D2D; font-weight: 800; font-size: 10.5px; }
+  .lc-mchip.is-on .lc-mchip-code { color: #fde68a; }
   .lc-mchip { padding: 2px 9px; border-radius: 12px; border: 1px solid var(--border2); background: #fff; font-weight: 700; font-size: 11.5px; line-height: 18px; cursor: pointer; }
   .lc-searchbar { display: flex; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); overflow: hidden; }
   .lc-searchbar select { border: 0; border-radius: 0; background: #A32D2D; font-weight: 700; font-size: 13px; padding: 7px 8px; max-width: 45%; color: #fff; cursor: pointer; }
@@ -5641,6 +5643,14 @@ function fmtDMYT12(d) {
   const mm = String(dt.getMonth() + 1).padStart(2, '0');
   return `${dd}/${mm}/${dt.getFullYear()} ${fmtTime12(dt)}`;
 }
+// A stored "HH:MM" (line clearance times, ...) on the 12-hour clock: "14:05" -> "02:05 PM" (owner, 2026-11-13:
+// 12-hour across the app). Blank stays blank; anything else is shown as it is.
+function hm12(t) {
+  const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return String(t || '');
+  const h24 = +m[1];
+  return `${String(h24 % 12 || 12).padStart(2, '0')}:${m[2]} ${h24 < 12 ? 'AM' : 'PM'}`;
+}
 // "04:39 PM". Midnight reads 12:00 AM and noon 12:00 PM, not 00:00 / 12:00.
 function fmtTime12(d) {
   const dt = (d instanceof Date) ? d : new Date(d);
@@ -5737,7 +5747,7 @@ function openSpeedLog() {
   try { rows = JSON.parse(localStorage.getItem(SPEED_LOG_KEY) || '[]'); } catch (e) {}
   const s = ms => ms >= 60000 ? (ms / 60000).toFixed(1) + ' min' : (ms / 1000).toFixed(2) + ' s';
   const body = rows.slice().reverse().map(r => `<tr style="border-bottom:1px solid var(--border);">
-      <td style="padding:4px 8px;white-space:nowrap;">${esc(fmtDMYT(new Date(r.t)))}</td>
+      <td style="padding:4px 8px;white-space:nowrap;">${esc(fmtDMYT12(new Date(r.t)))}</td>
       <td style="padding:4px 8px;">${esc(r.step)}${r.detail ? ` <span style="color:var(--text2);font-size:11px;">${esc(r.detail)}</span>` : ''}</td>
       <td style="padding:4px 8px;text-align:right;font-weight:700;${r.ms >= 5000 ? 'color:#b91c1c;' : ''}">${s(r.ms)}</td>
       <td style="padding:4px 8px;text-align:right;">${r.mem == null ? '-' : r.mem + ' MB'}</td>
@@ -7030,7 +7040,7 @@ function ceoRunSince(x) {
   const at = new Date(String(x.entry_date).slice(0, 10) + 'T' + (x.entry_time || '00:00') + ':00');
   const ago = jrDur(workMins(at.getTime(), Date.now(), false));   // work time only (owner, 2026-11-11)
   const today = String(x.entry_date).slice(0, 10) === localDateISO();
-  return (today ? '' : esc(fmtDMY(String(x.entry_date).slice(0, 10))) + ' ') + esc(x.entry_time || '') + ' · ' + ago;
+  return (today ? '' : esc(fmtDMY(String(x.entry_date).slice(0, 10))) + ' ') + esc(hm12(x.entry_time)) + ' · ' + ago;
 }
 function ceoRunFiltered() {
   const q = String(ceoDash.runQ || '').trim().toLowerCase();
@@ -8506,7 +8516,7 @@ function renderCartonLogList(kind) {
           const corr = t.kind === 'correction';
           const q = cartonTabQty(t, kind);
           return `<tr class="${rev ? 'carton-reversed' : ''}${corr ? ' carton-correction' : ''}">
-            <td style="white-space:nowrap;">${esc(fmtDMYT(t.created_at))}${lateEntryTagHtml(t)}</td>
+            <td style="white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}${lateEntryTagHtml(t)}</td>
             <td>${esc(cartonTypeText(ty))}${ty && ty.deleted_at ? ' <span class="carton-tag" title="This carton type was deleted - its entries stay">DELETED TYPE</span>' : ''}</td>
             <td class="num" style="color:${corr ? '#9a3412' : color};font-weight:700;">${q < 0 ? '&minus;' : ''}${cartonNum(Math.abs(q))}</td>
             ${isIn
@@ -8698,7 +8708,7 @@ function printCartonSummary() {
         title: 'CARTON SHIPPERS STOCK SUMMARY REPORT',
         scope: `${cartonSummaryScope()} · ${rows.length} type${rows.length === 1 ? '' : 's'} · units: cartons`,
         dateText: `Date: ${fmtDMY(cartonSumF.from)} to ${fmtDMY(cartonSumF.to)}`,
-        note: `${asOfPast ? `Stock shown as on ${fmtDMY(cartonSumF.to)} · ` : ''}Generated: ${fmtDMYT(new Date())}`,
+        note: `${asOfPast ? `Stock shown as on ${fmtDMY(cartonSumF.to)} · ` : ''}Generated: ${fmtDMYT12(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:8pt;line-height:1.15;border:1px solid #000;border-collapse:collapse;">
         <thead style="display:table-header-group;"><tr>
@@ -9246,7 +9256,7 @@ function cartonLogExportRow(t, kind) {
   const ty = cartonTypeById(t.type_id);
   const corr = t.kind === 'correction';
   const notes = [corr ? '' : t.notes, t.reversed_by ? 'REVERSED' : ''].filter(Boolean).join(' · ');
-  const head = [fmtDMYT(t.created_at), ty ? ty.name : '', ty ? ty.size || '' : '', ty ? ty.ply || '' : '', cartonTabQty(t, kind)];
+  const head = [fmtDMYT12(t.created_at), ty ? ty.name : '', ty ? ty.size || '' : '', ty ? ty.ply || '' : '', cartonTabQty(t, kind)];
   return kind === 'in'
     ? [...head, corr ? `Reversal of entry #${t.reverses_tx_id}` : t.supplier || '', t.challan_no || '', notes, txByName(t)]
     : [...head, corr ? '' : t.issued_to || '', cartonForText(t), t.challan_no || '', notes, txByName(t)];
@@ -9281,7 +9291,7 @@ function printCartonLog(kind) {
         title: cartonLogTitle(kind),
         scope: `${cartonLogScopeText(kind)} · ${rows.length.toLocaleString()} entr${rows.length === 1 ? 'y' : 'ies'} · ${total.toLocaleString()} cartons`,
         dateText: cartonLogDateText(kind),
-        note: `Generated: ${fmtDMYT(new Date())}`,
+        note: `Generated: ${fmtDMYT12(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:8.5pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#f7f1ea;">${header.map((h, i) => `<th ${i === 4 ? tdR : td}>${esc(h)}</th>`).join('')}</tr>
@@ -9300,7 +9310,7 @@ function printCartonLog(kind) {
 // so there are two very different explanations for a gap and they should not
 // look the same to whoever is doing an audit.
 function describeJobTrace(id, rows) {
-  const at = (r) => fmtDMYT(r.created_at);
+  const at = (r) => fmtDMYT12(r.created_at);
   const who = (r) => r.user_email || 'unknown';
   const find = (a) => (rows || []).find(r => r.action === a);
   const created   = find('job.create');
@@ -10159,7 +10169,7 @@ function renderJobRowCompact(j, opts) {
               ? `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Add another job to this link set (${esc(linkSetLabel(j))})">&#128279; + Link</button>
                  <button class="btn btn-sm ceo-hide" onclick="unlinkJob(${j.id})" title="Take E-${j.id} out of the link set (${esc(linkSetLabel(j))}) — the others stay linked">&#128279; Unlink</button>`
               : `<button class="btn btn-sm ceo-hide" onclick="openLinkJobPicker(${j.id})" title="Link this job with another job card printed together on the same run">&#128279; Link Job</button>`) : ''}
-            ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
+            ${canPrintJobCard() ? `<button class="btn btn-sm ${(j.print_count || 0) > 0 ? 'is-printed' : ''}" onclick="printJobCard(${j.id})" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT12(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
             ${!done?`<button class="btn btn-sm btn-danger ceo-hide" onclick="toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
             ${seeBtn('job_btn_delete')?`<button class="btn btn-sm btn-danger btn-dark-maroon" onclick="deleteJob(${j.id})" title="Admin only">Delete</button>`:''}
             ${(done && canWastageAdjust() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
@@ -10579,7 +10589,7 @@ function renderJobCard(j, opts) {
         ${(!_finalizedJobIds.has(j.id) && seeBtn('job_btn_link') && j.linked_job_id) ? `<button class="ceo-hide" onclick="closeJobMore(this); openLinkJobPicker(${j.id})">Add to Link Set</button>` : ''}
         ${seeBtn('job_btn_create_mil') && !clientPreview && !j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); openCreateGroupModal(${j.id})">&#128230; Create Mil Job</button><button class="ceo-hide" onclick="closeJobMore(this); openAddToGroupModal(${j.id})">&#128230; Add to Job Group</button>` : ''}
         ${seeBtn('job_btn_edit') && !clientPreview && j.stock_group_name ? `<button class="ceo-hide" onclick="closeJobMore(this); removeJobFromGroup(${j.id},${jsStr(j.stock_group_name)})">&#128230; Remove from Job Group</button>` : ''}
-        ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
+        ${canPrintJobCard() ? `<button onclick="closeJobMore(this); printJobCard(${j.id})" class="${(j.print_count || 0) > 0 ? 'is-printed' : ''}" title="${(j.print_count || 0) > 0 ? `Printed ${j.print_count} time${j.print_count===1?'':'s'}${j.last_printed_at?' · last '+fmtDMYT12(j.last_printed_at):''}` : 'Print job card'}">Print</button>` : ''}
         ${!done?`<button class="ceo-hide" onclick="closeJobMore(this); toggleBlock(${j.id})">${blocked?'Unblock':'Block'}</button>`:''}
         ${seeBtn('job_btn_delete')?`<button class="danger" onclick="closeJobMore(this); deleteJob(${j.id})">Delete</button>`:''}
       </div>
@@ -16219,7 +16229,7 @@ function renderStockReport(from, to) {
     + tile('Net change',      (net>=0?'+':'−') + Math.abs(net).toLocaleString(), net>=0?'#166534':'#A32D2D');
 
   const rows = txs.map(t => {
-    const date = fmtDMYT(t.created_at);
+    const date = fmtDMYT12(t.created_at);
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const sign = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
@@ -16272,7 +16282,7 @@ function printStockReport() {
   const net = totalIn - totalOut;
 
   const tableRows = rows.map(t => {
-    const date = fmtDMYT(t.created_at);
+    const date = fmtDMYT12(t.created_at);
     const sign = t.change > 0 ? '+' : '';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
     const job  = t.job_id ? `E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
@@ -16307,7 +16317,7 @@ function printStockReport() {
           <div style="font-size:11pt;">Inventory Stock Report</div>
         </div>
         <div style="margin-left:auto;font-size:9pt;text-align:right;">
-          Generated: ${fmtDMYT(new Date())}
+          Generated: ${fmtDMYT12(new Date())}
         </div>
       </div>
       <table style="width:100%;font-size:10pt;margin-bottom:10px;border-collapse:collapse;">
@@ -16964,7 +16974,7 @@ async function exportInventoryReport() {
   applyReportExcelHeading(ws, header, {
     title: 'CURRENT BALANCE SUMMARY',
     scope: `${modeLabel} · Paper: ${invReportState.paperType || 'All'} · ${irOffcutModeLabel()}${irAsOfText() ? ' · ' + irAsOfText() : ''}`,
-    dateText: `Generated: ${fmtDMYT(new Date())}`,
+    dateText: `Generated: ${fmtDMYT12(new Date())}`,
   });
   applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
@@ -17200,7 +17210,7 @@ function printInventoryReport(challanNo) {
         tag: offcutOnly ? 'OFFCUT' : '',
         challanNo: challanNo || null,
         scope: `${modeLabel} · Paper: ${paperType || 'All'}${offcutOnly && !invReportState.offcutInStock ? '' : ' · ' + irOffcutModeLabel()}${irAsOfText() ? ' · ' + irAsOfText() : ''}`,
-        dateText: `Generated: ${fmtDMYT(new Date())}`,
+        dateText: `Generated: ${fmtDMYT12(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#f7f1ea;">
@@ -18296,7 +18306,7 @@ function renderImportsTable() {
       <td style="padding:8px 10px;text-align:right;white-space:nowrap;font-weight:600;">${qtyCell}</td>
       <td style="padding:8px 10px;text-align:right;white-space:nowrap;">${weight}</td>
       <td style="padding:8px 10px;">${esc(i.supplier || '—')}</td>
-      <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtDMYT(i.created_at))}</td>
+      <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtDMYT12(i.created_at))}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtImpDate(i.booked_date))}</td>
       <td style="padding:8px 10px;white-space:nowrap;">${esc(fmtImpDate(i.expected_arrival))}</td>
       <td style="padding:8px 10px;">${esc(i.notes || '')}</td>
@@ -18362,10 +18372,10 @@ async function exportImports() {
       +(parseFloat(i.packets || 0).toFixed(2)),
       i.weight_kg === null || i.weight_kg === undefined ? '' : +(parseFloat(i.weight_kg).toFixed(2)),
       i.supplier || '',
-      i.created_at ? fmtDMYT(i.created_at) : '',
+      i.created_at ? fmtDMYT12(i.created_at) : '',
       i.booked_date || '',
       i.expected_arrival || '',
-      i.received_at ? fmtDMYT(i.received_at) : '',
+      i.received_at ? fmtDMYT12(i.received_at) : '',
       i.notes || '',
       importMatchesInventory(i) ? '' : 'Yes',
     ]);
@@ -18374,7 +18384,7 @@ async function exportImports() {
   applyReportExcelHeading(ws, header, {
     title: 'IMPORTS REPORT',
     scope: `${filterLabel} · ${list.length} shipment${list.length === 1 ? '' : 's'}`,
-    dateText: `Generated: ${fmtDMYT(new Date())}`,
+    dateText: `Generated: ${fmtDMYT12(new Date())}`,
   });
   applyReportExcelCols(ws, header, aoa);
   const wb = XLSX.utils.book_new();
@@ -18414,7 +18424,7 @@ function printImports() {
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'IMPORTS REPORT',
         scope: `${filterLabel.charAt(0).toUpperCase()+filterLabel.slice(1)} · ${list.length} import${list.length===1?'':'s'}`,
-        dateText: `Generated: ${fmtDMYT(new Date())}`,
+        dateText: `Generated: ${fmtDMYT12(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#f7f1ea;">
@@ -18550,9 +18560,9 @@ function jobNumbersTableHtml() {
       <td ${td}><span style="background:${st.bg};color:${st.color};font-weight:700;padding:2px 9px;border-radius:10px;font-size:12px;">${st.label}</span></td>
       <td ${td}>${esc(r.name) || '\u2014'}</td>
       <td ${td}>${esc(r.client) || '\u2014'}</td>
-      <td ${td}>${r.created_at ? fmtDMYT(r.created_at) : '\u2014'}</td>
+      <td ${td}>${r.created_at ? fmtDMYT12(r.created_at) : '\u2014'}</td>
       <td ${td}>${esc(r.created_by || '') || '\u2014'}</td>
-      <td ${td}>${r.ended_at ? fmtDMYT(r.ended_at) : '\u2014'}</td>
+      <td ${td}>${r.ended_at ? fmtDMYT12(r.ended_at) : '\u2014'}</td>
       <td ${td}>${esc(r.ended_by || '') || '\u2014'}</td>
       <td ${td} style="padding:6px 8px;color:var(--text2);">${esc(r.note || '')}</td>
       <td ${td}>${r.reusable && seeBtn('job_btn_new_job') && seeBtn('rpt_job_number_reuse')
@@ -18598,8 +18608,8 @@ function jobNumbersScope() {
 }
 function jobNumbersRow(r) {
   return ['E-' + r.id, JOB_NUMBER_STATUS[r.status].label, r.name || '', r.client || '',
-          r.created_at ? fmtDMYT(r.created_at) : '', r.created_by || '',
-          r.ended_at ? fmtDMYT(r.ended_at) : '', r.ended_by || '', r.note || ''];
+          r.created_at ? fmtDMYT12(r.created_at) : '', r.created_by || '',
+          r.ended_at ? fmtDMYT12(r.ended_at) : '', r.ended_by || '', r.note || ''];
 }
 async function exportJobNumbers() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
@@ -18611,7 +18621,7 @@ async function exportJobNumbers() {
   applyReportExcelHeading(ws, JOB_NUMBER_HEADER, {
     title: 'JOB NUMBER REGISTER',
     scope: jobNumbersScope(),
-    dateText: `Generated: ${fmtDMYT(new Date())}`,
+    dateText: `Generated: ${fmtDMYT12(new Date())}`,
   });
   applyReportExcelCols(ws, JOB_NUMBER_HEADER, aoa);
   const wb = XLSX.utils.book_new();
@@ -18636,7 +18646,7 @@ function printJobNumbers() {
       <div style="margin-bottom:8px;">${reportPrintHeading({
         title: 'JOB NUMBER REGISTER',
         scope: jobNumbersScope(),
-        dateText: `Generated: ${fmtDMYT(new Date())}`,
+        dateText: `Generated: ${fmtDMYT12(new Date())}`,
         note: 'Job numbers are issued in sequence and are never reused. A number with no job card behind it is accounted for below.',
       })}</div>
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
@@ -20368,7 +20378,7 @@ function printJrMil() {
         title: 'MIL PRODUCTS REPORT',
         scope: [milRptState.client || 'All companies', `${rows.length} MIL product${rows.length === 1 ? '' : 's'}`, milRptState.q ? 'Search: ' + milRptState.q : ''].filter(Boolean).join(' · '),
         dateText: `Ready & Shipped as on: ${fmtDMY(asOf)}`,
-        note: `Generated: ${fmtDMYT(new Date())} · red rows: Ready + In Process below the MIL Qty`,
+        note: `Generated: ${fmtDMYT12(new Date())} · red rows: Ready + In Process below the MIL Qty`,
       })}</div>
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#f7f1ea;">
@@ -20476,7 +20486,7 @@ function printJobsReport() {
         title: 'JOBS REPORT',
         scope: jobsReportScope(new Set(rows.map(r => r.id)).size, rows.length),
         dateText: jobsReportDateText(),
-        note: `Generated: ${fmtDMYT(new Date())}`,
+        note: `Generated: ${fmtDMYT12(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#f7f1ea;">
@@ -21557,7 +21567,7 @@ function printPartyLedger() {
   area.innerHTML = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
-      <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'LEDGER REPORT', scope, dateText: partyLedgerPeriodText(from, to), note: `Generated: ${fmtDMYT(new Date())}` })}</div>
+      <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'LEDGER REPORT', scope, dateText: partyLedgerPeriodText(from, to), note: `Generated: ${fmtDMYT12(new Date())}` })}</div>
       ${table}
     </div>`;
   reportPrintPrepare(area, 'portrait');
@@ -21911,7 +21921,7 @@ function printAgingReport() {
   area.innerHTML = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
-      <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'AGING REPORT', scope: agingScopeText(), dateText: `As of ${fmtDMY(s.asOf)} · due ${AGING_DUE_DAYS} days after invoice date`, note: `Generated: ${fmtDMYT(new Date())}` })}</div>
+      <div style="margin-bottom:8px;">${reportPrintHeading({ title: 'AGING REPORT', scope: agingScopeText(), dateText: `As of ${fmtDMY(s.asOf)} · due ${AGING_DUE_DAYS} days after invoice date`, note: `Generated: ${fmtDMYT12(new Date())}` })}</div>
       ${table}
     </div>`;
   reportPrintPrepare(area, X.company ? 'landscape' : 'portrait');
@@ -24031,7 +24041,7 @@ function printSaleReport() {
         title: 'SALE REPORT',
         scope: saleReportScope(rows.length),
         dateText: saleReportDateText(),
-        note: `Generated: ${fmtDMYT(new Date())}`,
+        note: `Generated: ${fmtDMYT12(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:7pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#f7f1ea;">${cols.map(c => `<th ${c.right ? tdR : tdL}>${esc((c.key === 'taxPct' && rows.length && rows.every(r => r.taxPct === rows[0].taxPct)) ? `Sale Tax (${rows[0].taxPct}%)` : c.label)}</th>`).join('')}</tr>
@@ -24957,7 +24967,7 @@ function dpHoursCell(row, sec) {
 function dpHoursDetail(key) {
   const d = _dpHoursJobs[key];
   if (!d) return;
-  const hm = s => String(s || '').slice(11, 16);
+  const hm = s => hm12(String(s || '').slice(11, 16));
   const rows = d.jobs.map(j => `<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;"><b>${esc(lcJobNo(j.job))}</b> ${esc(j.name || '')}</td>
     <td style="padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;">${j.no_qa ? '<span style="color:#b45309;font-weight:700;">no QA entry - no hours</span>'
       : `<span style="color:#1d4ed8;font-weight:700;">${esc(hm(j.start))}</span> - ${j.running ? '<span style="color:var(--text2);">still on the machine</span>' : `<span style="color:#15803d;font-weight:700;">${esc(hm(j.end))}</span>`}`}</td>
@@ -26058,7 +26068,7 @@ function renderTrashJobs() {
       <td ${tdL}>${esc(r.jobcode || '')}</td>
       <td ${tdL}>${esc(r.name || '')}</td>
       <td ${tdL}>${esc(r.client || '')}</td>
-      <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
+      <td ${tdN}>${fmtDMYT12(r.deleted_at)}</td>
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
       <td ${tdN} style="font-weight:600;color:var(--text2);" title="Archived jobs are never deleted automatically - a job card number has to stay accounted for">Kept</td>
       <td ${tdN}>
@@ -26116,7 +26126,7 @@ function renderTrashImports() {
       <td ${tdL}>${esc(r.brand || '—')}</td>
       <td ${tdR} style="font-weight:600;">${(+r.packets).toLocaleString()} ${unit}</td>
       <td ${tdL}>${esc(r.supplier || '—')}</td>
-      <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
+      <td ${tdN}>${fmtDMYT12(r.deleted_at)}</td>
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
       <td ${tdN} style="color:var(--text2);">kept</td>
       <td ${tdN}>
@@ -26176,7 +26186,7 @@ function renderTrashTransactions() {
       <td ${tdR}>${esc(r.item_gsm || '—')}</td>
       <td ${tdL}>${esc(r.item_brand || '—')}</td>
       <td ${tdR} style="font-weight:600;color:${r.change > 0 ? '#166534' : '#A32D2D'};">${r.change > 0 ? '+' : '−'}${fmtPkts(sheets / ps, {keepZero:true})} ${unit}</td>
-      <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
+      <td ${tdN}>${fmtDMYT12(r.deleted_at)}</td>
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
       <td ${tdN} style="color:var(--text2);">kept</td>
       <td ${tdN}>
@@ -26230,7 +26240,7 @@ function renderTrashPapers() {
       <td ${tdR}>${esc(r.gsm || '—')}</td>
       <td ${tdL}>${esc(r.brand || '—')}</td>
       <td ${tdR} style="font-weight:600;">${fmtPkts(bal, {keepZero:true})} ${unit}</td>
-      <td ${tdN}>${fmtDMYT(r.deleted_at)}</td>
+      <td ${tdN}>${fmtDMYT12(r.deleted_at)}</td>
       <td ${tdL}>${esc(r.deleted_by || '—')}</td>
       <td ${tdN}>
         <button class="btn btn-sm ceo-hide" style="background:#e5e7eb;color:#374151;border-color:#d1d5db;font-weight:600;" onclick="restoreTrash('paper', ${r.id})">&#8635; Restore</button>
@@ -26723,7 +26733,8 @@ function lcPointMark(e, n) {
 function lcGroups(rows) {
   const map = new Map();
   for (const r of rows) { const k = r.machine + '\u0000' + r.form; if (!map.has(k)) map.set(k, { machine: r.machine, form: r.form, list: [] }); map.get(k).list.push(r); }
-  return [...map.values()].sort((x, y) => x.machine.localeCompare(y.machine) || x.form.localeCompare(y.form));
+  const order = lcMachineOrder(lcCodeOf());
+  return [...map.values()].sort((x, y) => order(x.machine, y.machine) || x.form.localeCompare(y.form));
 }
 // The sections a machine's entries used, in the paper form's order, and their point numbers.
 function lcGroupSections(g) {
@@ -26758,7 +26769,7 @@ function lcTableHtml(g, withLegend) {
   const head = `<tr><th>#</th><th>Date</th><th>Time</th><th>Previous Job</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
     ${nums.map(n => { const sec = lcSectionOf(g.form, n) || {}; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === n) || [])[1] || '')}">${n}</th>`; }).join('')}
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
-  const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td>${esc(e.entry_time || '')}</td>
+  const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td>${esc(hm12(e.entry_time))}</td>
     <td>${lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${lcWasteHtml(e)}</td><td>${lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
     ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
@@ -26767,14 +26778,18 @@ function lcTableHtml(g, withLegend) {
     ${withLegend ? lcLegendHtml(secs) : ''}
     <div class="report-scroll-wrap lc-wrap-tbl"><table class="ss-table lc-rep"><thead>${head}</thead><tbody>${body}</tbody></table></div></div>`;
 }
+// Each machine's code (SAPL/PR/005) from its entries, and the order the tabs go in: by code, no code last.
+function lcCodeOf() { const m = new Map(); for (const r of lcState.rows || []) if (r.machine_code) m.set(r.machine, r.machine_code); return m; }
+function lcMachineOrder(codes) { return (x, y) => { const a = codes.get(x) || '', b = codes.get(y) || ''; return (!a - !b) || a.localeCompare(b, undefined, { numeric: true }) || x.localeCompare(y); }; }
 function lcBodyHtml() {
   const searched = lcSearched();
   const counts = new Map();
   for (const r of searched) counts.set(r.machine, (counts.get(r.machine) || 0) + 1);
-  const machines = [...counts.keys()].sort((x, y) => x.localeCompare(y));
+  const codes = lcCodeOf();
+  const machines = [...counts.keys()].sort(lcMachineOrder(codes));
   if (lcState.machine && !counts.has(lcState.machine) && !lcState.search) lcState.machine = '';
-  const chip = (m, label, n) => `<button class="lc-mchip ${lcState.machine === m ? 'is-on' : ''}" onclick="lcSetFilter('machine', ${esc(JSON.stringify(m))})">${esc(label)} <span class="lc-mchip-n">${n}</span></button>`;
-  const bar = `<div class="lc-mbar">${chip('', 'All machines', searched.length)}${machines.map(m => chip(m, m, counts.get(m))).join('')}</div>`;
+  const chip = (m, label, n, code) => `<button class="lc-mchip ${lcState.machine === m ? 'is-on' : ''}" onclick="lcSetFilter('machine', ${esc(JSON.stringify(m))})">${code ? `<span class="lc-mchip-code">${esc(code)}</span> ` : ''}${esc(label)} <span class="lc-mchip-n">${n}</span></button>`;
+  const bar = `<div class="lc-mbar">${chip('', 'All machines', searched.length)}${machines.map(m => chip(m, m, counts.get(m), codes.get(m))).join('')}</div>`;
   const rows = lcFilteredRows();
   const groups = lcGroups(rows);
   const notCleared = rows.filter(r => !r.cleared).length;
@@ -26801,7 +26816,7 @@ function lcToolbarHtml() {
       <div><div class="dash-flbl">To</div><input class="filter" type="date" value="${esc(lcState.to)}" onchange="lcSetFilter('to', this.value)"></div>
       <div style="flex:1;min-width:260px;max-width:480px;"><div class="dash-flbl">Search</div>
         <div class="lc-searchbar">
-          <select onchange="lcSetFilter('machine', this.value)" title="Machine"><option value="">All machines</option>${[...new Set((lcState.rows || []).map(r => r.machine))].sort((x, y) => x.localeCompare(y)).map(m => `<option value="${esc(m)}" ${lcState.machine === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>
+          <select onchange="lcSetFilter('machine', this.value)" title="Machine"><option value="">All machines</option>${[...new Set((lcState.rows || []).map(r => r.machine))].sort(lcMachineOrder(lcCodeOf())).map(m => `<option value="${esc(m)}" ${lcState.machine === m ? 'selected' : ''}>${lcCodeOf().get(m) ? esc(lcCodeOf().get(m)) + ' · ' : ''}${esc(m)}</option>`).join('')}</select>
           <input type="search" placeholder="Job no., company..." value="${esc(lcState.search)}" oninput="lcSearch(this.value)">
         </div></div>
       <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-sm" onclick="printLineClearance()">&#128424; Print</button></div>
@@ -26855,7 +26870,7 @@ async function deleteLcEntry(id) {
   const e = (lcState.rows || []).find(r => r.id === id);
   if (!e) return;
   const ok = await confirmDialog({ title: 'Delete this line clearance?', danger: true, confirmText: 'Delete',
-    message: `${e.machine} · ${fmtDMY(e.entry_date)} ${e.entry_time || ''} · job ${e.prev_job} → ${e.new_job}. It leaves the report and the QA screen.` });
+    message: `${e.machine} · ${fmtDMY(e.entry_date)} ${hm12(e.entry_time)} · job ${e.prev_job} → ${e.new_job}. It leaves the report and the QA screen.` });
   if (!ok) return;
   showSaving(true);
   try {
@@ -26883,14 +26898,14 @@ function printLineClearance() {
       <th style="${td}">Waste <span style="font-weight:normal;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th style="${td}">New Job No.</th>
       ${nums.map(n => `<th style="${td}background:${(lcSectionOf(g.form, n) || {}).color};width:20px;">${n}</th>`).join('')}
       <th style="${td}">QC</th><th style="${td}">QA</th><th style="${td}">Remarks</th></tr>`;
-    const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(e.entry_time || '')}</td>
+    const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(hm12(e.entry_time))}</td>
       <td style="${td}">${lcJobCell(e.prev_job, e.prev_company, true, e.prev_job_name)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${lcJobCell(e.new_job, e.new_company, true, e.new_job_name)}</td>
       ${nums.map(n => { const [c] = lcPointMark(e, n); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;background:#dcfce7;' : c === 'lc-no' ? 'color:#b91c1c;background:#fee2e2;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
       <td style="${td}text-align:center;font-weight:bold;color:${e.qc_cleared ? '#166534' : '#b91c1c'};background:${e.qc_cleared ? '#dcfce7' : '#fee2e2'};">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');
     const dates = g.list.map(e => String(e.entry_date).slice(0, 10)).sort();
     return `<div style="${REPORT_PRINT_WRAP}${gi < groups.length - 1 ? 'page-break-after:always;break-after:page;' : ''}">
       <div style="margin-bottom:6px;">${reportPrintHeading({ title: 'LINE CLEARANCE LOG', formCode: `Doc No: ${f.doc} · Rev:00 · Effective Date: 01-10-2026`, scope: f.title,
-        dateText: `${fmtDMY(lcState.from)} - ${fmtDMY(lcState.to)}`, note: `Generated: ${fmtDMYT(new Date())}` })}</div>
+        dateText: `${fmtDMY(lcState.from)} - ${fmtDMY(lcState.to)}`, note: `Generated: ${fmtDMYT12(new Date())}` })}</div>
       <table style="width:100%;font-size:8.5pt;border-collapse:collapse;margin-bottom:6px;"><tr>
         <td style="${td}"><b>Machine Name:</b> ${esc(g.machine)}</td><td style="${td}"><b>Machine ID:</b> ${esc((g.list.find(e => e.machine_code) || {}).machine_code || '')}</td>
         <td style="${td}"><b>Section:</b> ${esc(secs.map(x => x.name).join(', '))}</td>
@@ -28039,7 +28054,7 @@ function renderStockMovement(direction, from, to) {
   const rows = txs.map(t => {
     const isGroup = Array.isArray(t.group_ids) && t.group_ids.length > 1;
     // Date over time - same text, half the width.
-    const date = fmtDMYT(t.created_at).replace(' ', '<br>');
+    const date = fmtDMYT12(t.created_at).replace(' ', '<br>');
     const cls  = t.change > 0 ? 'ledger-pos' : 'ledger-neg';
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
     const job  = txJobCellHtml(t);
@@ -28318,7 +28333,7 @@ function printStockTotal(direction) {
         title: direction === 'in' ? 'STOCK IN REPORT' : 'STOCK OUT REPORT',
         scope: `Totals · ${state.paperType || 'All paper types'} · ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg`,
         dateText: `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`,
-        note: `${periodLabel} · Generated: ${fmtDMYT(new Date())}`,
+        note: `${periodLabel} · Generated: ${fmtDMYT12(new Date())}`,
       })}</div>
       ${itemRows.length ? `
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
@@ -29218,7 +29233,7 @@ function renderManualConsumption() {
             <td style="padding:6px 8px;">${esc(r.brand || '—')}</td>
             <td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.txCount}</td>
             <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};">${fmtPkts(r.totalPkts, {keepZero:true})} ${r.unit}</td>
-            <td style="padding:6px 8px;white-space:nowrap;">${r.latestAt ? esc(fmtDMYT(r.latestAt)) : '—'}</td>
+            <td style="padding:6px 8px;white-space:nowrap;">${r.latestAt ? esc(fmtDMYT12(r.latestAt)) : '—'}</td>
             <td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteManualConsumptionRows([${(r.txIds||[]).join(',')}])">Delete</button></td>
           </tr>`;
           }).join('')}
@@ -29343,7 +29358,7 @@ async function exportManualConsumption() {
   const aoa = reportExcelAoa(header);
   for (const r of rows) {
     aoa.push([r.jobCardNo, r.paperType + (r.isOffcut ? ' (offcut)' : ''), r.size, r.gsm, r.brand, r.txCount,
-      +r.totalPkts.toFixed(2), r.totalSheets, r.latestAt ? fmtDMYT(r.latestAt) : '', r.enteredBy]);
+      +r.totalPkts.toFixed(2), r.totalSheets, r.latestAt ? fmtDMYT12(r.latestAt) : '', r.enteredBy]);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   applyReportExcelHeading(ws, header, {
@@ -29374,7 +29389,7 @@ function printManualConsumption() {
       <td ${tdL}>${esc(r.brand || '—')}</td>
       <td ${tdR}>${r.txCount}</td>
       <td style="border:1px solid #000;padding:4px;text-align:right;font-weight:bold;color:${color};">${fmtPkts(r.totalPkts,{keepZero:true})} ${r.unit}</td>
-      <td ${tdL}>${r.latestAt ? esc(fmtDMYT(r.latestAt)) : '—'}</td>
+      <td ${tdL}>${r.latestAt ? esc(fmtDMYT12(r.latestAt)) : '—'}</td>
     </tr>`).join('');
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
@@ -29383,7 +29398,7 @@ function printManualConsumption() {
         title: 'MANUAL JOB CARD CONSUMPTION REPORT',
         scope: `${periodLabel} · Total: ${total.toLocaleString()} sheets · ${(+totalKg.toFixed(2)).toLocaleString()} kg`,
         dateText: `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`,
-        note: `Generated: ${fmtDMYT(new Date())}`,
+        note: `Generated: ${fmtDMYT12(new Date())}`,
       })}</div>
       ${rows.length ? `
       <table style="width:100%;font-size:9pt;border:1px solid #000;border-collapse:collapse;">
@@ -29558,7 +29573,7 @@ function renderOffcutConsumption() {
         const rowClick = t.item_id ? ` onclick="openInvHistoryAt(${t.item_id}, ${t.id})" title="Open this issuance in the item's History"` : '';
         return `<tr data-oc-row="${t.id}" class="row-hover-red${t.item_id ? ' cv-summary-row' : ''}" style="border-bottom:1px solid var(--border);"${rowClick}>
           ${canDelete ? `<td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${offcutConsumptionState.selected.has(t.id)?'checked':''} onclick="event.stopPropagation()" onchange="toggleOffcutConsumptionRow(${t.id}, this.checked)"></td>` : ''}
-          <td style="padding:6px 8px;white-space:nowrap;">${esc(fmtDMYT(t.created_at))}</td>
+          <td style="padding:6px 8px;white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}</td>
           <td style="padding:6px 8px;font-weight:700;white-space:nowrap;">${esc(offcutRowJobText(t))}</td>
           <td style="padding:6px 8px;white-space:nowrap;${t.job_id ? '' : 'color:#9a3412;font-weight:600;'}">${esc(offcutRowReason(t))}</td>
           <td style="padding:6px 8px;">${esc(t.paper_type || '—')}</td>
@@ -29656,7 +29671,7 @@ async function exportOffcutConsumption() {
   const rows=offcutConsumptionRows(); if(!rows.length){notify('Nothing to export.');return;}
   const header=['When','E-Job No.','Reason','Paper Type','Size','GSM','Brand','Consumed Sheets','Consumed Packets/Reams','Issued By'];
   const aoa=reportExcelAoa(header);
-  rows.forEach(t=>aoa.push([fmtDMYT(t.created_at),offcutRowJobText(t),offcutRowReason(t),t.paper_type||'',t.item_size||'',t.item_gsm||'',t.item_brand||'',Math.abs(t.change),+(Math.abs(t.change)/packetSize(t.paper_type||'')).toFixed(2),txByName(t)]));
+  rows.forEach(t=>aoa.push([fmtDMYT12(t.created_at),offcutRowJobText(t),offcutRowReason(t),t.paper_type||'',t.item_size||'',t.item_gsm||'',t.item_brand||'',Math.abs(t.change),+(Math.abs(t.change)/packetSize(t.paper_type||'')).toFixed(2),txByName(t)]));
   const ws=XLSX.utils.aoa_to_sheet(aoa);
   applyReportExcelHeading(ws, header, {
     title: 'OFFCUT CONSUMPTION REPORT',
@@ -29679,7 +29694,7 @@ function offcutConsumptionDateText() {
 }
 function printOffcutConsumption() {
   const rows=offcutConsumptionRows(); const td='style="border:1px solid #000;padding:4px;"';
-  const body=rows.map(t=>`<tr><td ${td}>${esc(fmtDMYT(t.created_at))}</td><td ${td}>${esc(offcutRowJobText(t))}</td><td ${td}>${esc(offcutRowReason(t))}</td><td ${td}>${esc(t.paper_type||'')}</td><td ${td}>${esc(t.item_size||'')}</td><td ${td}>${esc(t.item_gsm||'')}</td><td ${td}>${esc(t.item_brand||'')}</td><td ${td}>${Math.abs(t.change).toLocaleString()} sheets</td></tr>`).join('');
+  const body=rows.map(t=>`<tr><td ${td}>${esc(fmtDMYT12(t.created_at))}</td><td ${td}>${esc(offcutRowJobText(t))}</td><td ${td}>${esc(offcutRowReason(t))}</td><td ${td}>${esc(t.paper_type||'')}</td><td ${td}>${esc(t.item_size||'')}</td><td ${td}>${esc(t.item_gsm||'')}</td><td ${td}>${esc(t.item_brand||'')}</td><td ${td}>${Math.abs(t.change).toLocaleString()} sheets</td></tr>`).join('');
   const area=document.getElementById('print-area');area.innerHTML=`
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
@@ -29687,7 +29702,7 @@ function printOffcutConsumption() {
       title: 'OFFCUT CONSUMPTION REPORT',
       scope: offcutConsumptionScope(),
       dateText: offcutConsumptionDateText(),
-      note: `Generated: ${fmtDMYT(new Date())}`,
+      note: `Generated: ${fmtDMYT12(new Date())}`,
     })}</div>
     ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:9pt;"><tr style="background:#f7f1ea;"><th ${td}>When</th><th ${td}>E-Job No.</th><th ${td}>Reason</th><th ${td}>Paper Type</th><th ${td}>Size</th><th ${td}>GSM</th><th ${td}>Brand</th><th ${td}>Consumed</th></tr>${body}</table>`:'<div style="text-align:center;padding:30px;border:1px dashed #000;">No offcut issuance in this period.</div>'}</div>`;reportPrintPrepare(area, 'portrait');window.print();setTimeout(()=>area.innerHTML='',500);
 }
@@ -29763,7 +29778,7 @@ function printStockMovement(direction) {
   const color = direction === 'in' ? '#166534' : '#A32D2D';
 
   const tableRows = rows.map(t => {
-    const date = fmtDMYT(t.created_at);
+    const date = fmtDMYT12(t.created_at);
     const item = [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).map(esc).join(' · ');
     const job  = t.job_id ? `E-${t.job_id}${t.job_code?' · '+esc(t.job_code):''}` : '—';
     const ps   = packetSize(t.paper_type || '');
@@ -29796,7 +29811,7 @@ function printStockMovement(direction) {
         title: direction === 'in' ? 'STOCK IN REPORT' : 'STOCK OUT REPORT',
         scope: stockMovementScope(direction),
         dateText: `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`,
-        note: `${dirLabel} · ${periodLabel} · Generated: ${fmtDMYT(new Date())}`,
+        note: `${dirLabel} · ${periodLabel} · Generated: ${fmtDMYT12(new Date())}`,
       })}</div>
       <table style="width:100%;font-size:10pt;border:1px solid #000;border-collapse:collapse;margin-bottom:10px;">
         <tr style="background:#f7f1ea;">
@@ -29866,7 +29881,7 @@ async function exportStockMovement(direction) {
     const bal  = isGroup ? null : txBalanceAfter(t);
     const wPer = packWeightKg(t.paper_type, t.item_size, t.item_gsm);
     const row = [
-      fmtDMYT(t.created_at),
+      fmtDMYT12(t.created_at),
       item,
       r2(Math.abs(pkts)),
       Math.abs(t.change),
@@ -31952,7 +31967,7 @@ function jcStageLog(job) {
   }
   return out;
 }
-const jcHm = ms => { const d = new Date(ms); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+const jcHm = ms => { const d = new Date(ms); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + ' ' + fmtTime12(d); };
 // Start in blue - completion in green (owner, 2026-11-11: short and simple).
 // The start opens its QA entry in the Line Clearance report (owner, 2026-11-13), for anyone who can view it.
 const jcSpan = (startMs, endMs, lc) => [startMs != null ? (lc && rptAllowed('rpt_line_clearance')
@@ -40442,7 +40457,7 @@ async function stationOpenQa() {
       // Machines only - QC / QA (and old Manager PINs) are people, not machines (owner, 2026-11-11).
       for (const x of list || []) if (x.machine && !x.manager && !x.kind && lcSectionsForRoles(x.roles)) byName.set(x.machine, { roles: x.roles || [], code: x.machine_code || '' });
       stationQaMachines = [...byName.entries()].map(([name, v]) => ({ name, roles: v.roles, code: v.code }))
-        .sort((a, b) => (a.code || '~').localeCompare(b.code || '~', undefined, { numeric: true }) || a.name.localeCompare(b.name));
+        .sort((a, b) => (!a.code - !b.code) || (a.code || '').localeCompare(b.code || '', undefined, { numeric: true }) || a.name.localeCompare(b.name));
       if (stationView === 'qa') stationRender();
     }).catch(() => {});
   }
@@ -40478,7 +40493,7 @@ function stationQaWaitingHtml() {
   const list = stationQaWaiting || [];
   if (!list.length) return `<div id="lc-waiting" class="lc-card lc-waiting is-empty"><h3>Waiting for line clearance <span class="lc-wait-n is-zero">0</span>
     <span style="font-weight:500;font-size:12px;color:var(--text2);">- ${stationQaWaiting == null ? 'checking…' : 'no job waiting. A job shows here when an operator moves it on from his machine.'}</span></h3></div>`;
-  const hm = at => { const d = String(at).slice(0, 10), t = String(at).slice(11, 16); return (d === localDateISO() ? '' : fmtDMY(d).slice(0, 5) + ' ') + t; };
+  const hm = at => { const d = String(at).slice(0, 10), t = hm12(String(at).slice(11, 16)); return (d === localDateISO() ? '' : fmtDMY(d).slice(0, 5) + ' ') + t; };
   return `<div id="lc-waiting" class="lc-card lc-waiting">
     <h3>Waiting for line clearance <span class="lc-wait-n">${list.length}</span> <span style="font-weight:500;font-size:12px;color:var(--text2);">- tap one to fill it in</span></h3>
     <div class="lc-wait-list">${list.map((w, i) => `<button type="button" class="lc-wait" onclick="stationQaFromWaiting(${i})">
@@ -40587,7 +40602,7 @@ function stationQaOpsHtml() {
     </div>`;
   if (!d || !stationQaOpsEdit) return head + '<div class="empty">Loading…</div>';
   const note = `<div class="lc-ops-note">${d.from && d.from !== d.date ? `Starting from ${esc(fmtDMY(d.from))}. ` : d.from ? '' : 'Starting with every machine\'s own operators. '}Drag a name onto another machine to move them, &#128465; to take one off, + someone else to add. Then Save.</div>`;
-  const machines = [...d.machines].sort((a, b) => (a.code || '~').localeCompare(b.code || '~', undefined, { numeric: true }) || a.name.localeCompare(b.name));
+  const machines = [...d.machines].sort((a, b) => (!a.code - !b.code) || (a.code || '').localeCompare(b.code || '', undefined, { numeric: true }) || a.name.localeCompare(b.name));
   const rows = machines.map(m => {
     const on = stationQaOpsEdit[m.name] || [];
     const others = d.people.filter(p => !on.includes(p));
@@ -40673,7 +40688,8 @@ function stationQaHtml() {
         <h3>Machine &amp; jobs</h3>
         <div class="lc-grid">
           <div class="lc-field lc-wide"><label>Machine <span class="urdu" dir="rtl" lang="ur">مشین</span>${q.sections.map(n => ` <span class="lc-sec-tag">${esc(n)}</span>`).join('')}</label>
-            <select onchange="stationQaMachine(this.value)"><option value="">- Pick the machine -</option>${machineOpts.map(m => `<option value="${esc(m.name)}" ${q.machine === m.name ? 'selected' : ''}>${m.code ? esc(m.code) + ' · ' : ''}${esc(m.name)}</option>`).join('')}</select></div>
+            <select onchange="stationQaMachine(this.value)"><option value="">- Pick the machine -</option>${machineOpts.map(m => { const does = (lcSectionsForRoles(m.roles) || { sections: [] }).sections.join(' & ');
+              return `<option value="${esc(m.name)}" ${q.machine === m.name ? 'selected' : ''}>${m.code ? esc(m.code) + ' · ' : ''}${esc(m.name)}${does ? ' - ' + esc(does) : ''}</option>`; }).join('')}</select></div>
           <div class="lc-field"><label>Date <span class="urdu" dir="rtl" lang="ur">تاریخ</span></label><input type="date" value="${esc(q.entry_date)}" onchange="stationQaSet('entry_date', this.value)"></div>
           <div class="lc-field"><label>Time <span class="urdu" dir="rtl" lang="ur">وقت</span></label><input type="time" value="${esc(q.entry_time)}" onchange="stationQaSet('entry_time', this.value)"></div>
           <div class="lc-field"><label>QC <span class="urdu" dir="rtl" lang="ur">کیو سی</span></label>
@@ -40724,7 +40740,7 @@ function stationQaRecentHtml() {
   return stationQaRecent.map(e => {
     const miss = lcMissing(e);
     return `<div class="lc-entry ${e.cleared ? 'ok' : 'no'}">
-      <b>${esc(fmtDMY(e.entry_date))} ${esc(e.entry_time || '')}</b> &middot; ${esc(e.machine)} &middot; ${esc((e.sections || []).join(', '))}<br>
+      <b>${esc(fmtDMY(e.entry_date))} ${esc(hm12(e.entry_time))}</b> &middot; ${esc(e.machine)} &middot; ${esc((e.sections || []).join(', '))}<br>
       Job ${esc(lcJobNo(e.prev_job))}${e.prev_company ? ' (' + esc(e.prev_company) + ')' : ''}${e.waste != null ? ` (waste ${esc(lcWaste(e.waste))})` : ''} &rarr; ${esc(lcJobNo(e.new_job))} &middot; Line Cleared: ${e.cleared ? '<b class="lc-y">Y</b>' : `<b class="lc-x">N</b> (not ticked: ${miss.join(', ')})`} &middot; QC: ${e.qc_cleared ? '<b class="lc-y">&#10003;</b>' : '<b class="lc-x">&#10007;</b>'}
       ${e.remarks ? `<br><span style="color:var(--text2);">${esc(e.remarks)}</span>` : ''}</div>`;
   }).join('');
@@ -41836,7 +41852,7 @@ function stationUpdateHtml() {
         const srcStage = STAGES[n.stage_index] || 'Earlier stage';
         return `
         <div class="sn-card">
-          <div class="sn-from">${n.kind === 'voice' ? '&#127908;' : '&#128172;'} From ${esc(srcStage)} &middot; ${esc(n.operator_name || '')} &middot; ${esc(fmtDMYT(n.created_at))}</div>
+          <div class="sn-from">${n.kind === 'voice' ? '&#127908;' : '&#128172;'} From ${esc(srcStage)} &middot; ${esc(n.operator_name || '')} &middot; ${esc(fmtDMYT12(n.created_at))}</div>
           ${n.body ? `<div class="sn-body">${esc(n.body)}</div>` : ''}
           ${n.kind === 'voice' && n.audio
             ? `<audio controls preload="metadata" src="${n.audio}" onplay="stationNoteHeard(${n.id})"></audio>`
@@ -42793,7 +42809,7 @@ function renderUsersTab() {
     <div class="stat"><div class="stat-label">Operators</div><div class="stat-value">${stats.operators}</div></div>
   `;
   document.getElementById('users-list').innerHTML = usersList.map(u => {
-    const last = u.last_login_at ? fmtDMYT(u.last_login_at) : 'never';
+    const last = u.last_login_at ? fmtDMYT12(u.last_login_at) : 'never';
     const isMe = currentUser && u.id === currentUser.id;
     const sessCount = u.active_sessions || 0;
     const devicesLabel = sessCount ? `${sessCount} device${sessCount===1?'':'s'} signed in` : 'No devices signed in';
@@ -43395,8 +43411,8 @@ async function renderUserSessionsContent(userId) {
       ? `<table class="ledger-table"><tr><th>Device</th><th>Signed in</th><th>Last active</th><th></th></tr>${active.map(s => `
           <tr>
             <td>${esc(s.device)}${s.is_current?' <span class="inv-badge" style="background:#dbeafe;color:#1e40af;">This device</span>':''}</td>
-            <td>${fmtDMYT(s.created_at)}</td>
-            <td>${fmtDMYT(s.last_seen_at)}</td>
+            <td>${fmtDMYT12(s.created_at)}</td>
+            <td>${fmtDMYT12(s.last_seen_at)}</td>
             <td><button class="btn btn-sm btn-danger" onclick="revokeUserSession(${userId}, ${s.id})">Log out</button></td>
           </tr>`).join('')}</table>`
       : '<div class="empty">No devices currently signed in.</div>';
