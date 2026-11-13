@@ -2323,6 +2323,20 @@
   .lc-wait-n.is-zero { background: #9ca3af; }
   .lc-wait-n { display: inline-block; min-width: 22px; padding: 0 7px; border-radius: 11px; background: #dc2626; color: #fff; font-size: 12px; line-height: 20px; text-align: center; }
   .lc-wait-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 6px; }
+  .station-pending-btn { background: #facc15 !important; border-color: #eab308 !important; color: #422006 !important; font-weight: 800; }
+  .station-pending-btn:hover { background: #fde047 !important; }
+  .station-pending-n { display: inline-block; min-width: 22px; padding: 0 6px; margin-left: 4px; border-radius: 11px; background: #dc2626; color: #fff; font-size: 12px; line-height: 20px; text-align: center; }
+  .station-pending-n.is-zero { background: #a16207; }
+  .lc-mpick { position: relative; }
+  .lc-mpick-btn { width: 100%; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; text-align: left; min-height: 44px; padding: 8px 34px 8px 12px; border: 1px solid var(--border2); border-radius: 8px; background: #fff; font-size: 15px; cursor: pointer; position: relative; color: var(--text); }
+  .lc-mp-caret { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--text2); }
+  .lc-mp-none { color: var(--text2); }
+  .lc-mp-code { color: var(--text2); font-size: 13px; }
+  .lc-mp-name { color: #b91c1c; font-weight: 800; }
+  .lc-mp-does { color: var(--text2); font-size: 13px; }
+  .lc-mpick-list { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 50; max-height: 60vh; overflow-y: auto; background: #fff; border: 1px solid var(--border2); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.18); -webkit-overflow-scrolling: touch; }
+  .lc-mpick-opt { display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; border-bottom: 1px solid var(--border); background: #fff; font-size: 15px; cursor: pointer; color: var(--text); }
+  .lc-mpick-opt:hover, .lc-mpick-opt.is-on { background: #fef2f2; }
   .lc-wait { display: flex; justify-content: space-between; gap: 10px; text-align: left; padding: 8px 10px; border: 1.5px solid #fcd34d; border-radius: 8px; background: #fff; cursor: pointer; font-size: 13px; }
   .lc-wait:hover { border-color: #f59e0b; }
   .lc-wait small { display: block; color: var(--text2); font-size: 11.5px; }
@@ -40159,6 +40173,7 @@ function stationRender() {
   else if (stationView === 'qa') root.innerHTML = stationQaHtml();
   else if (stationView === 'lc-report') root.innerHTML = stationLcReportHtml();
   else if (stationView === 'qa-ops') root.innerHTML = stationQaOpsHtml();
+  else if (stationView === 'qa-pending') root.innerHTML = stationQaPendingHtml();
   else root.innerHTML = stationQueueHtml();
 }
 
@@ -40444,7 +40459,7 @@ async function stationOpenQa() {
   stationRender();
   stationQaLoadRecent();
   stationQaLoadWaiting();
-  if (!_stationQaTimer) _stationQaTimer = setInterval(() => { if (stationHasQa() && stationView === 'qa') stationQaLoadWaiting(); }, 30000);
+  if (!_stationQaTimer) _stationQaTimer = setInterval(() => { if (stationHasQa() && ['qa', 'qa-pending', 'qa-ops', 'lc-report'].includes(stationView)) stationQaLoadWaiting(); }, 30000);
   if (!stationQaCompanies.length) {
     api('GET', '/api/station/companies').then(list => {
       stationQaCompanies = Array.isArray(list) ? list : [];
@@ -40479,7 +40494,27 @@ async function stationQaLoadWaiting() {
   _stationQaWaitKeys = keys;
   stationQaWaiting = list;
   const el = document.getElementById('lc-waiting');
-  if (el && stationView === 'qa') el.outerHTML = stationQaWaitingHtml();
+  if (el && stationView === 'qa-pending') el.outerHTML = stationQaWaitingHtml();
+  document.querySelectorAll('.station-pending-btn').forEach(b => { b.outerHTML = stationPendingButton(); });
+}
+// The yellow Pending tab in the QA header, with how many jobs wait (owner, 2026-11-13).
+function stationPendingButton() {
+  if (!stationHasQa()) return '';
+  const n = (stationQaWaiting || []).length;
+  return `<button class="btn station-pending-btn" onclick="stationOpenPending()">&#9203; Pending <span class="station-pending-n${n ? '' : ' is-zero'}">${stationQaWaiting == null ? '…' : n}</span></button>`;
+}
+function stationOpenPending() {
+  stationView = 'qa-pending';
+  stationRender();
+  stationQaLoadWaiting();
+}
+function stationQaPendingHtml() {
+  const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
+  return `<div class="station-head">
+      <div><div class="station-who" style="font-size:20px;">${who}</div><div class="station-where" style="font-size:14px;">&#9203; Pending - waiting for line clearance</div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;"><button class="btn" onclick="stationView='qa'; stationRender();">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+    </div>
+    <div class="lc-wrap">${stationQaWaitingHtml()}</div>`;
 }
 function stationBeep() {
   try {
@@ -40504,11 +40539,12 @@ function stationQaWaitingHtml() {
 function stationQaFromWaiting(i) {
   const w = (stationQaWaiting || [])[i];
   if (!w) return;
+  stationView = 'qa';
   if (!stationQa) stationQa = stationQaBlank();
   stationQa.prev_job = String(w.job_id);
   stationQa.prev_company = w.company || '';
   stationQaMachine(w.machine);   // picks the machine + its sections, then redraws
-  setTimeout(() => { const el = document.querySelector('#station-root .lc-card + .lc-card, #station-root .lc-wrap .lc-card:nth-child(2)'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 50);
+  setTimeout(() => { const el = document.querySelector('#station-root .lc-wrap .lc-card'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 50);
 }
 // ── Today's operators (owner, 2026-11-13): who works on which machine today ──
 async function stationOpenQaOps() {
@@ -40639,6 +40675,21 @@ function stationQaJob(which, value) {
   }, 450);
 }
 // Picking the machine ticks its sections (from its roles); they can still be changed.
+// The machine picker (owner, 2026-11-13): code · machine name in red · what it does. A list of its own,
+// since a dropdown cannot colour part of a line (and tablets ignore option colours).
+let stationMpickOpen = false;
+function stationMpickLabel(m) {
+  const does = (lcSectionsForRoles(m.roles) || { sections: [] }).sections.join(' & ');
+  return `${m.code ? `<span class="lc-mp-code">${esc(m.code)}</span> · ` : ''}<b class="lc-mp-name">${esc(m.name)}</b>${does ? ` <span class="lc-mp-does">- ${esc(does)}</span>` : ''}`;
+}
+function stationMpickHtml(list, cur) {
+  const sel = list.find(m => m.name === cur);
+  return `<div class="lc-mpick">
+    <button type="button" class="lc-mpick-btn" onclick="event.stopPropagation(); stationMpickOpen = !stationMpickOpen; stationRender();">${sel ? stationMpickLabel(sel) : '<span class="lc-mp-none">- Pick the machine -</span>'}<span class="lc-mp-caret">&#9662;</span></button>
+    ${stationMpickOpen ? `<div class="lc-mpick-list" onclick="event.stopPropagation()">${list.map(m => `<button type="button" class="lc-mpick-opt${m.name === cur ? ' is-on' : ''}" onclick="stationMpickOpen = false; stationQaMachine(${esc(JSON.stringify(m.name))})">${stationMpickLabel(m)}</button>`).join('')}</div>` : ''}
+  </div>`;
+}
+document.addEventListener('click', () => { if (stationMpickOpen && typeof stationView !== 'undefined' && stationView === 'qa') { stationMpickOpen = false; stationRender(); } });
 function stationQaMachine(name) {
   const q = stationQa;
   q.machine = name;
@@ -40679,17 +40730,15 @@ function stationQaHtml() {
   return `
     <div class="station-head">
       <div><div class="station-who" style="font-size:20px;">${who}${whoUr}</div><div class="station-where" style="font-size:14px;">&#10003; Line Clearance &middot; QA</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;"><button class="btn" onclick="stationOpenQaOps()" style="font-weight:700;">&#128119; Today's operators</button>${stationLcButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">${stationPendingButton()}<button class="btn" onclick="stationOpenQaOps()" style="font-weight:700;">&#128119; Today's operators</button>${stationLcButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>
     ${others ? `<div style="padding:0 4px 8px;"><button class="btn btn-sm" onclick="stationView='stage-pick'; stationRender();">&lsaquo; Switch station</button></div>` : ''}
     <div class="lc-wrap">
-      ${stationQaWaitingHtml()}
       <div class="lc-card">
         <h3>Machine &amp; jobs</h3>
         <div class="lc-grid">
           <div class="lc-field lc-wide"><label>Machine <span class="urdu" dir="rtl" lang="ur">مشین</span>${q.sections.map(n => ` <span class="lc-sec-tag">${esc(n)}</span>`).join('')}</label>
-            <select onchange="stationQaMachine(this.value)"><option value="">- Pick the machine -</option>${machineOpts.map(m => { const does = (lcSectionsForRoles(m.roles) || { sections: [] }).sections.join(' & ');
-              return `<option value="${esc(m.name)}" ${q.machine === m.name ? 'selected' : ''}>${m.code ? esc(m.code) + ' · ' : ''}${esc(m.name)}${does ? ' - ' + esc(does) : ''}</option>`; }).join('')}</select></div>
+            ${stationMpickHtml(machineOpts, q.machine)}</div>
           <div class="lc-field"><label>Date <span class="urdu" dir="rtl" lang="ur">تاریخ</span></label><input type="date" value="${esc(q.entry_date)}" onchange="stationQaSet('entry_date', this.value)"></div>
           <div class="lc-field"><label>Time <span class="urdu" dir="rtl" lang="ur">وقت</span></label><input type="time" value="${esc(q.entry_time)}" onchange="stationQaSet('entry_time', this.value)"></div>
           <div class="lc-field"><label>QC <span class="urdu" dir="rtl" lang="ur">کیو سی</span></label>
@@ -40765,7 +40814,9 @@ async function stationQaSave(btn) {
     stationQa = { ...stationQaBlank(), entry_date: q.entry_date };
     stationQaRecent = [row, ...(stationQaRecent || [])].slice(0, 30);
     stationQaWaiting = (stationQaWaiting || []).filter(w => !(String(w.machine).toLowerCase() === String(row.machine).toLowerCase() && String(w.job_id) === String(row.prev_job).replace(/\D/g, '')));
+    if (_stationQaWaitKeys) _stationQaWaitKeys = new Set(stationQaWaiting.map(w => w.machine + '|' + w.job_id));
     stationRender();
+    stationQaLoadWaiting();
     const root = document.getElementById('station-root');
     if (root) root.scrollIntoView({ block: 'start' });
   } catch (e) {

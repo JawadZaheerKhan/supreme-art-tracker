@@ -8303,8 +8303,15 @@ app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
     const machines = await stationMachineList(sql);
     const byM = new Map(machines.map(m => [String(m.name).trim().toLowerCase(), m]));
     const jobs = await sql`SELECT id, name, client, log FROM jobs WHERE deleted_at IS NULL AND updated_at > NOW() - INTERVAL '3 days'`;
-    const lcs = await sql`SELECT machine, prev_job FROM line_clearance WHERE deleted_at IS NULL AND entry_date >= ${yday}`;
-    const cleared = new Set(lcs.map(l => String(l.machine || '').trim().toLowerCase() + '|' + lcJobId(l.prev_job)));
+    const lcs = await sql`SELECT machine, machine_code, prev_job FROM line_clearance WHERE deleted_at IS NULL AND entry_date >= ${yday}`;
+    // A QA entry with this job as its Previous Job takes it off (owner, 2026-11-13) - the machine matched by
+    // its name or by its code, so a renamed / re-typed machine still counts.
+    const byCode = new Map(machines.filter(m => m.machine_code).map(m => [String(m.machine_code).trim().toLowerCase(), m]));
+    const cleared = new Set();
+    for (const l of lcs) {
+      const m = byM.get(String(l.machine || '').trim().toLowerCase()) || byCode.get(String(l.machine_code || '').trim().toLowerCase());
+      cleared.add(String(m ? m.name : l.machine || '').trim().toLowerCase() + '|' + lcJobId(l.prev_job));
+    }
     const latest = new Map();
     for (const j of jobs) for (const e of (Array.isArray(j.log) ? j.log : [])) {
       if (!/^Moved from /.test(String((e && e.notes) || ''))) continue;   // the job finished on that machine
