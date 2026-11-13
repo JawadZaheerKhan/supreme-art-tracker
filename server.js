@@ -3233,11 +3233,11 @@ app.get('/api/jobs/:id/qa-starts', requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id) || String(id).startsWith('4')) return res.json([]);
     const rows = await sql`
-      SELECT machine, sections, entry_date, entry_time, new_job FROM line_clearance
+      SELECT id, machine, sections, entry_date, entry_time, new_job FROM line_clearance
        WHERE deleted_at IS NULL AND regexp_replace(new_job, '\D', '', 'g') = ${String(id)}
        ORDER BY entry_date, entry_time, created_at`;
     const at = r => String(r.entry_date instanceof Date ? r.entry_date.toISOString() : r.entry_date).slice(0, 10) + 'T' + (r.entry_time || '00:00');
-    res.json(rows.filter(r => lcJobId(r.new_job) === id).map(r => ({ machine: r.machine, sections: r.sections || [], start: at(r) })));
+    res.json(rows.filter(r => lcJobId(r.new_job) === id).map(r => ({ id: r.id, machine: r.machine, sections: r.sections || [], start: at(r) })));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.get('/api/reports/paper-batches', requireAuth, async (req, res) => {
