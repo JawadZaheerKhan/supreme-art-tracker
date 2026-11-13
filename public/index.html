@@ -2387,6 +2387,11 @@
   .lc-dot { width: 13px; height: 13px; border-radius: 50%; background: #16a34a; border: 0; padding: 0; margin-right: 6px; vertical-align: -1px; cursor: pointer; box-shadow: 0 0 0 2px #dcfce7; }
   .lc-dot:hover { background: #15803d; }
   .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .lc-sortby { display: inline-flex; border: 1px solid var(--border2); border-radius: 8px; overflow: hidden; }
+  .lc-sortby button { padding: 6px 12px; border: 0; background: #fff; font-weight: 700; font-size: 13px; cursor: pointer; color: var(--text); }
+  .lc-sortby button + button { border-left: 1px solid var(--border2); }
+  .lc-sortby button.is-on { background: #A32D2D; color: #fff; }
+  .lc-rep .lc-sub { font-size: 11px; color: var(--text2); }
   .lc-mchip-code { color: #A32D2D; font-weight: 800; font-size: 10.5px; }
   .lc-mchip.is-on .lc-mchip-code { color: #fde68a; }
   .lc-mchip { padding: 2px 9px; border-radius: 12px; border: 1px solid var(--border2); background: #fff; font-weight: 700; font-size: 11.5px; line-height: 18px; cursor: pointer; }
@@ -26703,7 +26708,7 @@ let _costLastRows = null, _costLastTotals = null;
 // ── Line Clearance report (owner, 2026-11-11) ───────────────
 // A bar of machines (with a search box) - one log per machine. Picking a machine shows its check
 // points on top. Waste: the previous job's job card waste (green) and what QA counted (red).
-const lcState = { from: '', to: '', machine: '', search: '', rows: null };
+const lcState = { from: '', to: '', machine: '', search: '', rows: null, sort: 'job' };   // sort: 'job' | 'entry', latest first
 function openLineClearancePage() {
   openReportsGroup('line-clearance-group');
   setReportsTab('line-clearance');
@@ -26743,10 +26748,19 @@ function lcPointMark(e, n) {
   if (!lcPointNums(e.form, e.sections).includes(n)) return ['lc-na', '&ndash;'];
   return (e.points || {})[n] ? ['lc-ok', '&#10003;'] : ['lc-no', '&#10007;'];
 }
+// Latest first, by the Job Time QA typed (date + time) or by when the entry was saved (owner, 2026-11-13).
+const lcJobAt = e => String(e.entry_date || '').slice(0, 10) + 'T' + (e.entry_time || '00:00');
+const lcEntryAt = e => { const t = new Date(e.created_at).getTime(); return isFinite(t) ? t : 0; };
+function lcSortCmp(a, b) {
+  return lcState.sort === 'entry' ? (lcEntryAt(b) - lcEntryAt(a)) || (b.id - a.id)
+    : lcJobAt(b).localeCompare(lcJobAt(a)) || (lcEntryAt(b) - lcEntryAt(a)) || (b.id - a.id);
+}
+function lcEntryTimeHtml(e) { const t = lcEntryAt(e); return t ? `${esc(fmtDMY(new Date(t)))}<div class="lc-sub">${esc(fmtTime12(new Date(t)))}</div>` : ''; }
 // One log per machine (and per paper form, if a machine ever has both).
 function lcGroups(rows) {
   const map = new Map();
   for (const r of rows) { const k = r.machine + '\u0000' + r.form; if (!map.has(k)) map.set(k, { machine: r.machine, form: r.form, list: [] }); map.get(k).list.push(r); }
+  for (const g of map.values()) g.list.sort(lcSortCmp);
   const order = lcMachineOrder(lcCodeOf());
   return [...map.values()].sort((x, y) => order(x.machine, y.machine) || x.form.localeCompare(y.form));
 }
@@ -26780,15 +26794,15 @@ function lcTableHtml(g, withLegend) {
   const pinCan = k => !!(stationOperator && stationOperator.perms && stationOperator.perms[k] === 'yes');
   const canEdit = atStation ? pinCan('rpt_line_clearance_edit') : seeBtn('rpt_line_clearance_edit');
   const canDel = atStation ? pinCan('rpt_line_clearance_delete') : seeBtn('rpt_line_clearance_delete');
-  const head = `<tr><th>#</th><th>Date</th><th>Time</th><th>Previous Job</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
+  const head = `<tr><th>#</th><th>Date</th><th>Job Time</th><th title="When QA saved this entry">Entry Time</th><th>Previous Job</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
     ${nums.map(n => { const sec = lcSectionOf(g.form, n) || {}; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === n) || [])[1] || '')}">${n}</th>`; }).join('')}
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
-  const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td>${esc(hm12(e.entry_time))}</td>
+  const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td style="white-space:nowrap;">${esc(hm12(e.entry_time))}</td><td style="white-space:nowrap;">${lcEntryTimeHtml(e)}</td>
     <td>${lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${lcWasteHtml(e)}</td><td>${lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
     ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
   return `<div class="lc-log">
-    <div class="lc-machine">${esc(g.machine)}${(g.list.find(e => e.machine_code) || {}).machine_code ? ` <b style="font-size:12px;color:var(--text2);">${esc(g.list.find(e => e.machine_code).machine_code)}</b>` : ''} <span>${esc(secs.map(x => x.name).join(' · '))} &middot; ${g.list.length} entr${g.list.length === 1 ? 'y' : 'ies'}</span></div>
+    ${lcState.machine ? '' : `<div class="lc-machine">${esc(g.machine)}${(g.list.find(e => e.machine_code) || {}).machine_code ? ` <b style="font-size:12px;color:var(--text2);">${esc(g.list.find(e => e.machine_code).machine_code)}</b>` : ''} <span>${esc(secs.map(x => x.name).join(' · '))} &middot; ${g.list.length} entr${g.list.length === 1 ? 'y' : 'ies'}</span></div>`}
     ${withLegend ? lcLegendHtml(secs) : ''}
     <div class="report-scroll-wrap lc-wrap-tbl"><table class="ss-table lc-rep"><thead>${head}</thead><tbody>${body}</tbody></table></div></div>`;
 }
@@ -26833,6 +26847,8 @@ function lcToolbarHtml() {
           <select onchange="lcSetFilter('machine', this.value)" title="Machine"><option value="">All machines</option>${[...new Set((lcState.rows || []).map(r => r.machine))].sort(lcMachineOrder(lcCodeOf())).map(m => `<option value="${esc(m)}" ${lcState.machine === m ? 'selected' : ''}>${lcCodeOf().get(m) ? esc(lcCodeOf().get(m)) + ' · ' : ''}${esc(m)}</option>`).join('')}</select>
           <input type="search" placeholder="Job no., company..." value="${esc(lcState.search)}" oninput="lcSearch(this.value)">
         </div></div>
+      <div><div class="dash-flbl">Sort by <span style="font-weight:500;text-transform:none;">(latest first)</span></div>
+        <div class="lc-sortby">${[['job', 'Job time'], ['entry', 'Entry time']].map(([k, l]) => `<button type="button" class="${(lcState.sort || 'job') === k ? 'is-on' : ''}" onclick="lcSetFilter('sort', '${k}')">${l}</button>`).join('')}</div></div>
       <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-sm" onclick="printLineClearance()">&#128424; Print</button></div>
     </div>`;
 }
@@ -26908,11 +26924,11 @@ function printLineClearance() {
     const legend = secs.map(x => x.points.map((pt, j) => `<tr>
       ${j === 0 ? `<td rowspan="${x.points.length}" style="${td}background:${x.color};font-weight:bold;width:90px;">${esc(x.name)}<div style="font-weight:normal;" dir="rtl">${x.ur}</div></td>` : ''}
       <td style="${td}background:${x.color};text-align:center;font-weight:bold;width:22px;">${pt[0]}</td><td style="${td}">${esc(pt[1])}</td><td style="${td}text-align:right;" dir="rtl">${pt[2]}</td></tr>`).join('')).join('');
-    const head = `<tr style="background:#f7f1ea;"><th style="${td}">#</th><th style="${td}">Date</th><th style="${td}">Time</th><th style="${td}">Previous Job No.</th>
+    const head = `<tr style="background:#f7f1ea;"><th style="${td}">#</th><th style="${td}">Date</th><th style="${td}">Job Time</th><th style="${td}">Entry Time</th><th style="${td}">Previous Job No.</th>
       <th style="${td}">Waste <span style="font-weight:normal;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th style="${td}">New Job No.</th>
       ${nums.map(n => `<th style="${td}background:${(lcSectionOf(g.form, n) || {}).color};width:20px;">${n}</th>`).join('')}
       <th style="${td}">QC</th><th style="${td}">QA</th><th style="${td}">Remarks</th></tr>`;
-    const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(hm12(e.entry_time))}</td>
+    const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(hm12(e.entry_time))}</td><td style="${td}">${lcEntryAt(e) ? esc(fmtDMYT12(new Date(lcEntryAt(e)))) : ''}</td>
       <td style="${td}">${lcJobCell(e.prev_job, e.prev_company, true, e.prev_job_name)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${lcJobCell(e.new_job, e.new_company, true, e.new_job_name)}</td>
       ${nums.map(n => { const [c] = lcPointMark(e, n); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;background:#dcfce7;' : c === 'lc-no' ? 'color:#b91c1c;background:#fee2e2;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
       <td style="${td}text-align:center;font-weight:bold;color:${e.qc_cleared ? '#166534' : '#b91c1c'};background:${e.qc_cleared ? '#dcfce7' : '#fee2e2'};">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');

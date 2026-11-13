@@ -8299,7 +8299,7 @@ app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
     const sql = getDb();
     const v = await verifyQaPin(sql, req.body.pin);
     if (v.error) return res.status(v.status).json({ error: v.error });
-    const yday = yesterdayISO();
+    const yday = yesterdayISO(), today = businessDateISO();
     const machines = await stationMachineList(sql);
     const byM = new Map(machines.map(m => [String(m.name).trim().toLowerCase(), m]));
     const jobs = await sql`SELECT id, name, client, log FROM jobs WHERE deleted_at IS NULL AND updated_at > NOW() - INTERVAL '3 days'`;
@@ -8320,7 +8320,7 @@ app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
       if (!m || !t) continue;
       const mach = byM.get(m[2].trim().toLowerCase());
       const date = `${t[3]}-${t[2]}-${t[1]}`;
-      if (!mach || date < yday) continue;
+      if (!mach || date < today) continue;   // starts fresh every day (owner, 2026-11-13): today's jobs only
       const key = String(mach.name).trim().toLowerCase() + '|' + j.id;
       if (cleared.has(key)) continue;
       const at = `${date}T${t[4]}:${t[5]}`;
