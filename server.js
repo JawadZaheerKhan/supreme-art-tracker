@@ -3930,7 +3930,7 @@ async function aggregateDailyProduction(sql, { date, sectionRole, stageLabel, sh
       if (!credits.has(mc)) credits.set(mc, { sheets: 0, waste: 0, operators: new Set(), firstMs: Infinity });
       const c = credits.get(mc);
       c[key] += qty;
-      if (op) c.operators.add(op);
+      for (const o of opSplit(op)) c.operators.add(o);
       if (ms && ms < c.firstMs) c.firstMs = ms;
     };
     // Printing only: raw per-entry breakdown (machine -> [rawQty, ...]) so
@@ -4238,6 +4238,8 @@ async function attachMachineHours(sql, date, rows) {
     r.hours_jobs = [...(e ? e.jobs : []), ...worked.filter(x => !withQa.has(x)).map(x => ({ job_id: x, job: 'E-' + x, no_qa: true }))];
   }
 }
+// An entry's operators (owner, 2026-11-13): "Imran & Ali" - the machine's crew that day - is each of them, full credit.
+const opSplit = v => String(v || '').split(/\s+&\s+/).map(x => x.trim()).filter(Boolean);
 function jobsDisplayPair(jobsMap) {
   if (!jobsMap || !jobsMap.size) return { jobs: '', jobs_count: 0 };
   const ordered = [...jobsMap.entries()]
@@ -4473,8 +4475,7 @@ app.get('/api/reports/daily-production/coatings/:date', managerPinOr(requirePerm
           row[field] += v;
           noteFirstMs(row, job.id, logFirstMsByMc.get(mc) || 0);
           if (sideCounter) sideCounter.set(mc, (sideCounter.get(mc) || 0) + 1);
-          const op = String(e.operator || '').trim();
-          if (op) row.operators.add(op);
+          for (const o of opSplit(e.operator)) row.operators.add(o);
         }
       };
       if (qtyEntries) creditEntries(qtyEntries, 'sheets', sheetPassesByMc);
@@ -4510,8 +4511,7 @@ app.get('/api/reports/daily-production/coatings/:date', managerPinOr(requirePerm
           row.sheets += sheetsN;
           sheetsCredited.add(mc);
         }
-        const opName = String(entry.operator_name || '').trim();
-        if (opName) row.operators.add(opName);
+        for (const o of opSplit(entry.operator_name)) row.operators.add(o);
         if (kind) row.finishCounts.set(kind, (row.finishCounts.get(kind) || 0) + 1);
         if (!wasteEntries) {
           const w = parseInt(String(entry.waste_sheets || '').replace(/[^0-9-]/g, ''), 10);
@@ -4786,7 +4786,7 @@ async function aggregateProductionRange(sql, { from, to }) {
       const bump = (mc, op, date, field, qty) => {
         if (!date || date < from || date > to || !qty) return;
         if (mc) { const r = ensureMD(date, mc); r[field] += qty; r.jobs.add(job.id); }
-        if (op) { const r = ensureOD(date, op); r[field] += qty; r.jobs.add(job.id); }
+        for (const o of opSplit(op)) { const r = ensureOD(date, o); r[field] += qty; r.jobs.add(job.id); }
       };
       // Legacy attribution: latest byline per date, computed only if we
       // actually need it below (a field lacks entries[]).
@@ -4900,7 +4900,7 @@ async function aggregateProductionRange(sql, { from, to }) {
         // sheetsMult always mirrors sheets here — keeps the two fields
         // from drifting apart (sheetsMult must stay >= sheets overall).
         if (mc) { const r = ensureMD(e.date, mc); r[field] += v; if (field === 'sheets') r.sheetsMult += v; r.jobs.add(job.id); }
-        if (op) { const r = ensureOD(e.date, op); r[field] += v; if (field === 'sheets') r.sheetsMult += v; r.jobs.add(job.id); }
+        for (const o of opSplit(op)) { const r = ensureOD(e.date, o); r[field] += v; if (field === 'sheets') r.sheetsMult += v; r.jobs.add(job.id); }
       }
     };
     const csPart = part.coating_sheets_qty;
@@ -4946,10 +4946,10 @@ async function aggregateProductionRange(sql, { from, to }) {
           if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; r.sheetsMult += sheetsFallbackN; sheetsCreditedKeys.add(k); }
         }
       }
-      if (c.operator_name) {
-        const r = ensureOD(cDate, c.operator_name); r.waste += w; r.jobs.add(job.id);
+      for (const opN of opSplit(c.operator_name)) {
+        const r = ensureOD(cDate, opN); r.waste += w; r.jobs.add(job.id);
         if (!coatSheetEntries && sheetsFallbackN > 0) {
-          const k = cDate + '|op|' + c.operator_name;
+          const k = cDate + '|op|' + opN;
           if (!sheetsCreditedKeys.has(k)) { r.sheets += sheetsFallbackN; r.sheetsMult += sheetsFallbackN; sheetsCreditedKeys.add(k); }
         }
       }
@@ -14218,11 +14218,22 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       }
     }
     if (!person) return res.status(400).json({ error: 'Pick which operator is doing this update.' });
+    // Today's operators on this machine (owner, 2026-11-13): one of them doing the entry credits all of them -
+    // "OP1 & OP2" on the entry and in the log. Someone not on today's list keeps the credit alone.
+    let creditName = person.name;
+    if (!viaJobCard) {
+      const crew = ((await machineOpsFor(sql, businessDateISO())).assign || {})[machine.name] || [];
+      const me = String(person.name || '').trim().toLowerCase();
+      if (crew.some(n => String(n).trim().toLowerCase() === me)) {
+        personIsCustom = false;   // on this machine today, even if it is not his usual one
+        if (crew.length > 1) creditName = [person.name, ...crew.filter(n => String(n).trim().toLowerCase() !== me)].join(' & ');
+      }
+    }
     // Synthesize an "operator" shape so the existing log/coatings_done code
     // keeps working without rewiring everything to a separate person object.
     const operator = {
       id: machine.id,
-      name: person.name + (viaJobCard ? ' (job card)' : personIsCustom ? ' (custom)' : ''),
+      name: creditName + (viaJobCard ? ' (job card)' : personIsCustom ? ' (custom)' : ''),
       name_ur: person.name_ur || '',
       stage_index: machine.stage_index,
       stage_indices: machine.stage_indices,
