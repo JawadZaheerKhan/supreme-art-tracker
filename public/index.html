@@ -9480,7 +9480,7 @@ function jobPassesFilters(j) {
     if (!searchMatch(`${j.name || ''} ${j.client || ''}`, t) && id !== idNeedle && !id.includes(idNeedle)) return false;
   }
   if (filterStage && (j.stage_index||0) !== STAGES.indexOf(filterStage)) return false;
-  if (filterClient && j.client !== filterClient) return false;
+  if (filterClient && companyNameOf(j.client).toLowerCase() !== filterClient.toLowerCase()) return false;   // by Company Settings name
   if (filterPO) {
     if (!searchMatch(j.ref, filterPO)) return false;
   }
@@ -9750,7 +9750,11 @@ function renderTabs() {
   const sf = document.getElementById('stage-filter');
   sf.innerHTML = `<option value="">All stages</option>` + STAGES.map(s=>`<option value="${s}" ${filterStage===s?'selected':''}>${s}</option>`).join('');
   const cf = document.getElementById('client-filter');
-  const clients = [...new Set(jobs.map(j=>j.client).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  // Only the Company Settings names (owner, 2026-11-14); the jobs' own names only if Company Settings did not load.
+  const clients = companyTols.length
+    ? [...new Set(companyTols.map(c => String(c.company || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+    : [...new Set(jobs.map(j=>j.client).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  if (filterClient && !clients.includes(filterClient)) filterClient = clients.find(c => c.toLowerCase() === companyNameOf(filterClient).toLowerCase()) || '';
   const clientsKey = clients.join('\x00') + '\x01' + filterClient;
   if (cf.dataset.ck !== clientsKey) {
     cf.innerHTML = `<option value="">All companies</option>` + clients.map(c=>`<option value="${esc(c)}" ${filterClient===c?'selected':''}>${esc(c)}</option>`).join('');
