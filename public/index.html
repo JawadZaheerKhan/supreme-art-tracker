@@ -2391,11 +2391,11 @@
   .lc-dot { width: 13px; height: 13px; border-radius: 50%; background: #16a34a; border: 0; padding: 0; margin-right: 6px; vertical-align: -1px; cursor: pointer; box-shadow: 0 0 0 2px #dcfce7; }
   .lc-dot:hover { background: #15803d; }
   .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-  .lc-rep td.lc-ed { cursor: pointer; }
-  .lc-rep td.lc-ed:hover { outline: 2px dashed #A32D2D; outline-offset: -3px; }
-  .lc-rep td.is-editing { background: #fff7ed !important; }
-  .lc-ed-in { width: 100%; min-width: 80px; padding: 8px; font-size: 15px; font-weight: 700; border: 2px solid #A32D2D; border-radius: 6px; }
-  .lc-ed-empty { color: var(--text2); font-size: 12px; font-style: italic; }
+  .lc-cell-in { width: 7.5ch; padding: 1px 2px; border: 0; border-bottom: 1px dashed transparent; background: transparent; font: inherit; font-weight: 700; color: inherit; border-radius: 0; }
+  .lc-cell-in:hover { border-bottom-color: var(--border2); }
+  .lc-cell-in:focus { outline: none; border-bottom: 2px solid #A32D2D; background: #fff7ed; }
+  .lc-cell-in::placeholder { color: var(--text2); font-weight: 500; font-style: italic; }
+  .lc-cell-waste { width: 5ch; text-align: right; color: #b91c1c; }
   .lc-sortby { display: inline-flex; border: 1px solid var(--border2); border-radius: 8px; overflow: hidden; }
   .lc-sortby button { padding: 6px 12px; border: 0; background: #fff; font-weight: 700; font-size: 13px; cursor: pointer; color: var(--text); }
   .lc-sortby button + button { border-left: 1px solid var(--border2); }
@@ -26808,7 +26808,7 @@ function lcTableHtml(g, withLegend) {
     ${nums.map(n => { const sec = lcSectionOf(g.form, n) || {}; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === n) || [])[1] || '')}">${n}</th>`; }).join('')}
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
   const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td style="white-space:nowrap;">${esc(hm12(e.entry_time))}</td><td style="white-space:nowrap;">${lcEntryTimeHtml(e)}</td>
-    <td${canEdit ? ` class="lc-ed" title="Tap to change the previous job" onclick="lcInlineEdit(${e.id}, 'prev_job', this)"` : ''}>${lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;"${canEdit ? ` class="lc-ed" title="Tap to change the waste QA counted" onclick="lcInlineEdit(${e.id}, 'waste', this)"` : ''}>${lcWasteHtml(e) || (canEdit ? '<span class="lc-ed-empty">+ waste</span>' : '')}</td><td${canEdit ? ` class="lc-ed" title="Tap to change the new job" onclick="lcInlineEdit(${e.id}, 'new_job', this)"` : ''}>${lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
+    <td>${canEdit ? lcJobCellIn(e, 'prev') : lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${canEdit ? lcWasteIn(e) : lcWasteHtml(e)}</td><td>${canEdit ? lcJobCellIn(e, 'new') : lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
     ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
   return `<div class="lc-log">
@@ -26889,29 +26889,30 @@ function openLcEdit(id) {
     </div>
   </div>`);
 }
-// Edit in the table (owner, 2026-11-14): the cell turns into a box; Enter or tapping away saves, Esc leaves it.
-function lcInlineEdit(id, key, td) {
-  if (td.querySelector('input')) return;
+// Typed straight into the table (owner, 2026-11-14): no box opens - tap, the keypad comes up, Enter or tapping
+// away saves. An empty New Job shows "+ new job"; filling it in starts that job now (the server sets the time).
+function lcJobCellIn(e, side) {
+  const key = side + '_job', v = e[key] == null ? '' : String(e[key]);
+  const name = e[side + '_job_name'], co = e[side + '_company'];
+  return `<input class="lc-cell-in" inputmode="numeric" enterkeyhint="done" autocomplete="off" value="${esc(v ? lcJobNo(v) : '')}" data-was="${esc(v ? lcJobNo(v) : '')}"
+      placeholder="${side === 'new' ? '+ new job' : '+ job no.'}" title="Type the job number - Enter or tap away saves"
+      onkeydown="if (event.key === 'Enter') { event.preventDefault(); this.blur(); }" onchange="lcCellSave(${e.id}, '${key}', this)">${name ? ` <span style="font-weight:600;">${esc(name)}</span>` : ''}${co ? `<div class="lc-co">${esc(co)}</div>` : ''}`;
+}
+function lcWasteIn(e) {
+  const jc = e.jc_waste != null ? `<span style="color:#166534;font-weight:700;" title="Job card waste of the previous job">${esc(lcWaste(e.jc_waste))}</span> <span style="color:var(--text2);">/</span> ` : '';
+  const v = e.waste == null || e.waste === '' ? '' : String(+(+e.waste).toFixed(2));
+  return `<span style="white-space:nowrap;">${jc}<input class="lc-cell-in lc-cell-waste" inputmode="decimal" enterkeyhint="done" autocomplete="off" value="${esc(v)}" data-was="${esc(v)}" placeholder="waste"
+      title="Waste QA counted - Enter or tap away saves" onkeydown="if (event.key === 'Enter') { event.preventDefault(); this.blur(); }" onchange="lcCellSave(${e.id}, 'waste', this)"></span>`;
+}
+async function lcCellSave(id, key, el) {
   const e = (lcState.rows || []).find(r => r.id === id);
   if (!e) return;
-  const isNum = key === 'waste';
-  const cur = e[key] == null ? '' : String(e[key]);
-  td.classList.add('is-editing');
-  td.innerHTML = `<input class="lc-ed-in" type="${isNum ? 'number' : 'text'}" ${isNum ? 'inputmode="decimal" min="0" step="any"' : 'inputmode="numeric"'} value="${esc(cur)}" placeholder="${isNum ? 'waste' : 'job no.'}">`;
-  const inp = td.querySelector('input');
-  inp.addEventListener('click', ev => ev.stopPropagation());
-  let done = false;
-  const finish = async ok => {
-    if (done) return; done = true;
-    const v = inp.value.trim();
-    if (!ok || v === cur.trim()) { renderLineClearanceReport(); return; }
-    if (!isNum && !v) { notify('Enter the job number'); renderLineClearanceReport(); return; }
-    if (isNum && v !== '' && !(+v >= 0)) { notify('Waste must be a number'); renderLineClearanceReport(); return; }
-    await lcSaveRow(e, { [key]: v });
-  };
-  inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); finish(true); } else if (ev.key === 'Escape') finish(false); });
-  inp.addEventListener('blur', () => finish(true));
-  inp.focus(); inp.select();
+  const v = el.value.trim();
+  if (v === el.dataset.was) return;
+  if (key === 'prev_job' && !v) { notify('Enter the previous job'); el.value = el.dataset.was; return; }
+  if (key === 'waste' && v !== '' && !(+v >= 0)) { notify('Waste must be a number'); el.value = el.dataset.was; return; }
+  el.disabled = true;
+  await lcSaveRow(e, { [key]: v });
 }
 async function lcSaveRow(e, change) {
   const body = { entry_date: String(e.entry_date || '').slice(0, 10), entry_time: e.entry_time || '', prev_job: e.prev_job || '', prev_company: e.prev_company || '',
@@ -26931,7 +26932,7 @@ async function saveLcEdit(id) {
   document.querySelectorAll('.lce-pt').forEach(cb => { points[cb.value] = cb.checked; });
   const body = { entry_date: v('entry_date'), entry_time: v('entry_time'), prev_job: v('prev_job').trim(), prev_company: v('prev_company').trim(),
     waste: v('waste'), new_job: v('new_job').trim(), new_company: v('new_company').trim(), points, qc_cleared: !!document.getElementById('lce-qc')?.checked, remarks: v('remarks').trim() };
-  if (!body.prev_job || !body.new_job) { notify('Enter the previous job and the new job'); return; }
+  if (!body.prev_job) { notify('Enter the previous job'); return; }
   showSaving(true);
   try {
     if (lcAtStation()) await api('POST', `/api/station/line-clearance/${id}/edit`, { ...body, ...lcStationWho() });
@@ -40888,7 +40889,7 @@ async function stationQaSave(btn) {
   if (!q) return;
   if (!q.entry_date) { notify('Enter the date'); return; }
   if (!String(q.machine).trim()) { notify('Enter the machine name'); return; }
-  if (!String(q.prev_job).trim() || !String(q.new_job).trim()) { notify('Enter the previous job and the new job'); return; }
+  if (!String(q.prev_job).trim()) { notify('Enter the previous job'); return; }   // New Job can be filled in later (owner, 2026-11-14)
   if (!q.form || !q.sections.length) { notify('Pick the section'); return; }
   if (String(q.waste).trim() !== '' && !(+q.waste >= 0)) { notify('Waste must be a number'); return; }
   const nums = lcPointNums(q.form, q.sections);

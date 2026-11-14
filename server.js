@@ -8185,7 +8185,8 @@ app.post('/api/station/line-clearance', requireStationUser, async (req, res) => 
     const machine = lcText(b.machine, 80);
     if (!machine) return res.status(400).json({ error: 'Enter the machine name' });
     const prev = lcText(b.prev_job, 40), next = lcText(b.new_job, 40);
-    if (!prev || !next) return res.status(400).json({ error: 'Enter the previous job and the new job' });
+    // New Job can wait (owner, 2026-11-14): filled in later from the report, which starts it then.
+    if (!prev) return res.status(400).json({ error: 'Enter the previous job' });
     // Only the chosen sections' points; cleared = every one of them ticked.
     const nums = LC_FORMS[form].filter(x => sections.includes(x[0])).flatMap(x => x[1]);
     const given = (b.points && typeof b.points === 'object') ? b.points : {};
@@ -8428,7 +8429,15 @@ async function lcUpdate(sql, req, id, b, by) {
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(b.entry_date || '')) ? b.entry_date : null;
   if (!date) return { status: 400, error: 'Enter the date' };
   const prev = lcText(b.prev_job, 40), next = lcText(b.new_job, 40);
-  if (!prev || !next) return { status: 400, error: 'Enter the previous job and the new job' };
+  if (!prev) return { status: 400, error: 'Enter the previous job' };
+  // New Job left empty and filled in now (owner, 2026-11-14): the new job starts now - its Job Time is this
+  // moment, unless the date / time were changed in the same save. A number already there is just corrected.
+  let dateOut = date, timeOut = lcText(b.entry_time, 10);
+  const curDate = String(cur.entry_date instanceof Date ? cur.entry_date.toISOString() : cur.entry_date || '').slice(0, 10);
+  if (!String(cur.new_job || '').trim() && next && date === curDate && timeOut === (cur.entry_time || '')) {
+    dateOut = businessDateISO();
+    timeOut = businessStamp().slice(-5);
+  }
   const waste = b.waste === '' || b.waste == null ? null : Number(b.waste);
   if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return { status: 400, error: 'Waste must be a number' };
   const nums = (LC_FORMS[cur.form] || []).filter(x => (cur.sections || []).includes(x[0])).flatMap(x => x[1]);
@@ -8442,7 +8451,7 @@ async function lcUpdate(sql, req, id, b, by) {
   if (lcJobId(prev) !== lcJobId(cur.prev_job) && prevCo === (cur.prev_company || '')) prevCo = (await coOf(prev)) || prevCo;
   if (lcJobId(next) !== lcJobId(cur.new_job) && nextCo === (cur.new_company || '')) nextCo = (await coOf(next)) || nextCo;
   const row = (await sql`
-    UPDATE line_clearance SET entry_date = ${date}, entry_time = ${lcText(b.entry_time, 10)}, prev_job = ${prev}, prev_company = ${prevCo},
+    UPDATE line_clearance SET entry_date = ${dateOut}, entry_time = ${timeOut}, prev_job = ${prev}, prev_company = ${prevCo},
       new_job = ${next}, new_company = ${nextCo}, waste = ${waste}, points = ${JSON.stringify(points)}, cleared = ${cleared},
       qc_cleared = ${b.qc_cleared === true}, remarks = ${lcText(b.remarks, 500)}, edited_at = NOW(), edited_by = ${by}
     WHERE id = ${id} RETURNING *`)[0];
