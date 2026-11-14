@@ -15700,9 +15700,55 @@ async function reverseJobHistory(jobId, auditId) {
   showSaving(false);
 }
 
+// A job's History, plain (owner, 2026-11-14): the job is already open, so its number / name / company are
+// left out of each line; the tag is a word ("Edited", "Paper issued"), and an edit reads
+// "2nd paper changed from 0 to 3 packets" - no "->" or "|".
+function jhActionLabel(action) {
+  const k = String(action || '');
+  const map = { 'job.create': 'Created', 'job.update': 'Edited', 'job.station': 'Station', 'job.issue_stock': 'Paper issued',
+    'job.process_to_ctp': 'Sent to CTP', 'job.process_from_ctp': 'CTP done', 'job.delete': 'Archived', 'job.restore': 'Restored' };
+  if (map[k]) return map[k];
+  const t = k.replace(/^job\./, '').replace(/[._]+/g, ' ').trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : 'Change';
+}
+function jhWho(a) {
+  if (a.actor_name) return a.actor_name;
+  const em = String(a.user_email || '').trim();
+  if (!em) return 'system';
+  const u = (typeof usersList !== 'undefined' && Array.isArray(usersList)) ? usersList.find(x => String(x.email || '').toLowerCase() === em.toLowerCase()) : null;
+  return (u && u.name) || em;
+}
+function jhPlainSummary(a, j) {
+  let s = String(a.summary || '');
+  const reEsc = x => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (j) {
+    const name = String(j.name || '').trim();
+    const lead = '\\s*(?:for|of|to|on|in)?\\s*';
+    if (name) s = s.replace(new RegExp(`${lead}(?:Job\\s+)?E-${j.id}\\s*[:\\-–]\\s*${reEsc(name)}`, 'gi'), '');
+    s = s.replace(new RegExp(`${lead}(?:Job\\s+)?(?:E-|#)${j.id}\\b`, 'gi'), '');
+    if (j.client) s = s.replace(new RegExp(`\\s*\\(${reEsc(String(j.client).trim())}\\)`, 'gi'), '');
+  }
+  s = s.replace(/^\s*[—:\-·,]\s*/, '').replace(/\s*[—:·,]\s*$/, '').trim();
+  const clean = v => { const t = String(v || '').split('|').map(x => x.trim()).filter(x => x && x !== '(blank)').join(', '); return t || 'nothing'; };
+  const changeLine = c => {
+    const m = /^(.+?):\s*(.*?)\s*->\s*(.*)$/.exec(c.trim());
+    return m ? `<b>${esc(m[1])}</b> changed from <b>${esc(clean(m[2]))}</b> to <b>${esc(clean(m[3]))}</b>` : esc(c.trim());
+  };
+  const cut = s.indexOf(' — ');
+  const head = cut >= 0 ? s.slice(0, cut).trim() : s, rest = cut >= 0 ? s.slice(cut + 3).trim() : '';
+  const cap = t => t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+  if (rest && rest.includes('->')) {
+    const lines = rest.split(/;\s*/).filter(Boolean).map(changeLine);
+    const top = head && !/^edited$/i.test(head) ? `<b>${esc(cap(head))}</b>` : '';
+    return top + (lines.length === 1 && !top ? lines[0] : `<div style="margin-top:${top ? 2 : 0}px;">${lines.map(l => `<div>${l}</div>`).join('')}</div>`);
+  }
+  const text = rest ? `${cap(head)} — ${rest}` : cap(head);
+  return `<b>${esc((text || s || '').replace(/\s*->\s*/g, ' → '))}</b>`;
+}
 function renderAuditFeed(rows, opts) {
   if (!rows || !rows.length) return '<div class="empty">No activity yet.</div>';
   const jobId = opts && opts.jobId;
+  const jhJob = jobId ? (typeof jobs !== 'undefined' ? jobs : []).find(j => j.id === jobId) : null;
   // Stock In / Out Challan No. or Notes edits open the edited row.
   const invItemId = (opts && opts.invItemId) || null;
   const isTxEdit = a => a && a.action === 'inventory.tx.edit' && a.metadata && Array.isArray(a.metadata.tx_ids) && a.metadata.tx_ids.length;
@@ -15741,8 +15787,8 @@ function renderAuditFeed(rows, opts) {
         return `
       <div class="audit-row${link || txLink ? ' cv-summary-row' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in its report" style="cursor:pointer;"` : txLink ? ` onclick="openTxEditInReport(${a.id}, ${invItemId || 'null'})" title="Open the edited entry in the Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} report" style="cursor:pointer;"` : ''}>
         <div class="audit-time">${timeOf(a.created_at)}</div>
-        <div><span class="audit-tag-badge">${esc(String(a.action || '').toUpperCase())}</span></div>
-        <div class="audit-desc"><b>${esc(a.summary || '')}</b> <span class="audit-by">· by ${esc(a.user_email || 'system')}</span>${issueExtra(a)}${revExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
+        <div><span class="audit-tag-badge">${jobId ? esc(jhActionLabel(a.action)) : esc(String(a.action || '').toUpperCase())}</span></div>
+        <div class="audit-desc">${jobId ? jhPlainSummary(a, jhJob) : `<b>${esc(a.summary || '')}</b>`} <span class="audit-by">· by ${esc(jobId ? jhWho(a) : (a.user_email || 'system'))}</span>${issueExtra(a)}${revExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
       </div>`;
       }).join('')}
     </div>`).join('')}</div>`;
