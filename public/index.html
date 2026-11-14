@@ -2798,6 +2798,10 @@
      one click from the job card itself (owner, 2026-10-06). */
   body:has(#modal-root .overlay) #jobs-return-bar,
   body:has(#modal-root .overlay) #products-return-bar { position: fixed; top: 10px; left: 16px; z-index: 250; }
+  /* A jump from the Dashboard (owner, 2026-11-14): Back stays pinned on top of everything - the page, the job
+     card, its History - until it is used. */
+  #jobs-return-bar.jr-float { position: fixed !important; top: 10px; left: 16px; z-index: 450 !important; max-width: calc(100vw - 32px); }
+  #jobs-return-bar.jr-float > div { margin-bottom: 0 !important; box-shadow: 0 4px 16px rgba(0,0,0,0.25); }
   body:has(#modal-root .overlay) #jobs-return-bar > div,
   body:has(#modal-root .overlay) #products-return-bar > div { margin-bottom: 0 !important; box-shadow: 0 4px 16px rgba(0,0,0,0.25); }
   /* Branded dialogs (confirm / alert / prompt) — sit above the regular
@@ -7125,7 +7129,20 @@ function ceoDashRunSearch(v) {
   const el = document.getElementById('cd-run-list'); if (el) el.innerHTML = ceoRunListHtml();
   const n = document.getElementById('cd-run-n'); if (n) n.textContent = ceoRunCountText();
 }
-function ceoDashOpenJob(id) { ceoDash.open = ''; renderCeoDash(); openEdit(id); }
+function ceoDashOpenJob(id) {
+  const pop = ceoDash.open, y = window.scrollY;
+  ceoDash.open = '';
+  jobsReturn = {
+    where: 'jobs', backLabel: 'Dashboard', label: 'E-' + id, tone: 'brand', float: true,
+    reopen: () => { setMode('dashboard'); ceoDash.open = pop; renderCeoDash(); requestAnimationFrame(() => window.scrollTo(0, y)); },
+  };
+  view = 'all'; jobsMilFocus = null; jobsJobFocus = id;
+  setMode('jobs');
+  renderTabs();
+  renderJobs();
+  renderJobsReturnBar();
+  window.scrollTo(0, 0);
+}
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && ceoDash.open && mode === 'dashboard') ceoDashCloseMore(); });
 function ceoDashRangeBar(prefix, range, dfrom, dto, onRange, onCustom, reload) {
   const opts = CEO_DASH_RANGES.map(([v, l]) => `<option value="${v}" ${range === v ? 'selected' : ''}>${l}</option>`).join('');
@@ -7264,8 +7281,7 @@ function renderCeoDash() {
         const usedAll = add(iu.used, iu.manual);
         const hasOther = iu.other.pkts || iu.other.reams;
         const value = !iu.loaded ? '…' : `<span class="cd-pair"><span><b style="color:#1d4ed8;">${u(iu.issued)}</b> <small>issued</small></span><span><b style="color:#15803d;">${u(usedAll)}</b> <small>used</small></span><span><b style="color:#7c3aed;">${u(iu.delivered)}</b> <small>delivered</small></span></span>`;
-        const sub = !iu.loaded ? 'loading…' : `used: E jobs ${u(iu.used)} (${fmt(iu.usedJobs.length)} printed) + manual jobs ${u(iu.manual)}`
-          + (hasOther ? ` · sold / damaged ${u(iu.other)}` : '') + ' · where it went: Where the issued paper went';
+        const sub = !iu.loaded ? 'loading…' : '';   // the breakdown is in See more (owner, 2026-11-14)
         const manualList = iu.manualRows.map(r => row(`Manual job ${esc(extractManualJobCardNo(r.t.notes) || '—')}${r.off ? ' <small style="color:#0369a1;font-weight:700;">OFFCUT</small>' : ''}`,
           `${esc([r.t.paper_type, r.t.item_size, r.t.item_gsm ? r.t.item_gsm + 'gsm' : ''].filter(Boolean).join(' '))} · ${fmt(r.v)} ${r.un} · ${esc(fmtDMYT12(r.t.created_at))}`));
         const otherList = iu.otherRows.map(r => row(`${esc(String(r.t.reason || '').replace(/^./, c => c.toUpperCase()))}${r.off ? ' <small style="color:#0369a1;font-weight:700;">OFFCUT</small>' : ''}`,
@@ -7398,7 +7414,7 @@ function renderCeoDash() {
         const D = add(add(add(Z(), E.diff), E.deleted), rest);
         const dTxt = sgn(D);
         const value = `<span class="cd-pair"><span><b style="color:#1d4ed8;">${u(iu.issued)}</b> <small>issued</small></span><span>${dTxt ? `<b style="color:#b45309;">${dTxt}</b> <small>difference</small>` : '<b style="color:#15803d;">&#10003; 0</b> <small>difference - all accounted for</small>'}</span></span>`;
-        const sub = `E jobs ${u(E.all)} · manual jobs ${u(manual)}${(!z(toOff.pkts) || !z(toOff.reams)) ? ` · to offcut ${u(toOff)}` : ''} · not printed yet ${u(E.notPrinted)}`;
+        const sub = '';   // the breakdown is in See more (owner, 2026-11-14)
         const nn = v => Math.abs(v) < 0.005 ? '<span style="color:var(--text3);">—</span>' : fmt(v);
         const sv = v => Math.abs(v) < 0.005 ? '<span style="color:var(--text3);">—</span>' : `<b style="color:${v > 0 ? '#b45309' : '#b91c1c'};">${v > 0 ? '+' : ''}${fmt(v)}</b>`;
         const th = 'padding:6px 8px;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--text2);border-bottom:2px solid var(--border);';
@@ -9751,7 +9767,9 @@ function jobInView(j, view) {
 // One MIL group shown alone on the Jobs tab - its tile, opened from the MIL
 // Products report (cleared by a Jobs tab click, Back, or leaving the tab).
 let jobsMilFocus = null;
+let jobsJobFocus = null;   // one job alone, opened from the Dashboard (owner, 2026-11-14)
 function getFiltered() {
+  if (jobsJobFocus) return jobs.filter(j => j && j.id === jobsJobFocus);
   if (jobsMilFocus) return jobs.filter(j => j && j.stock_group_name === jobsMilFocus && !j.deleted_at);
   return jobs.filter(j => jobPassesFilters(j) && jobInView(j, view));
 }
@@ -11613,7 +11631,7 @@ function render() {
   if (_ms > 300) speedLog('Jobs list redraw', _ms, { detail: (typeof view !== 'undefined' ? view : '') + ' tab' });
 }
 function setView(v) {
-  jobsMilFocus = null;   // a tab click shows that tab again, not the one MIL group
+  jobsMilFocus = null; jobsJobFocus = null;   // a tab click shows that tab again, not the one MIL group
   // Batch-print selection is a New Jobs / CTP feature — drop any ticks
   // when the user leaves both tabs so an accidental Print Selected can't
   // send stale ids that are no longer on screen.
@@ -11713,7 +11731,7 @@ function openOverIssuedList() {
 // Go to one job's tile: All tab, search set to its number, then scroll and flash.
 function goToOverIssuedJob(id) {
   closeModal();
-  jobsMilFocus = null;
+  jobsMilFocus = null; jobsJobFocus = null;
   filterShadeCard = '';
   filterText = String(id);
   const box = document.getElementById('search-input');
@@ -11757,7 +11775,7 @@ let jobsReturn = null;
 function jobsClearReturn() {
   if (!jobsReturn) return;
   jobsReturn = null;
-  jobsMilFocus = null;
+  jobsMilFocus = null; jobsJobFocus = null;
   renderJobsReturnBar();
 }
 // The bar sits on the tab the jump was made on: jobsReturn.where = 'jobs'
@@ -11769,6 +11787,7 @@ function renderJobsReturnBar() {
     if (b && id !== where + '-return-bar') { b.style.display = 'none'; b.innerHTML = ''; }
   }
   const bar = where ? document.getElementById(where + '-return-bar') : null;
+  for (const id of ['jobs-return-bar', 'products-return-bar']) { const b = document.getElementById(id); if (b) b.classList.toggle('jr-float', !!(jobsReturn && jobsReturn.float) && b === bar); }
   if (!bar) return;
   bar.style.display = 'block';
   bar.innerHTML = `
@@ -11780,7 +11799,7 @@ function renderJobsReturnBar() {
 function jobsReturnBack() {
   const back = jobsReturn;
   jobsReturn = null;
-  jobsMilFocus = null;
+  jobsMilFocus = null; jobsJobFocus = null;
   renderJobsReturnBar();
   if (typeof closeModal === 'function') closeModal();
   if (back && back.reopen) back.reopen();
