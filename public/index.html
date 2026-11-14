@@ -6586,6 +6586,12 @@ function ceoDashSaleCo(k) { ceoDash.saleCo = k; renderCeoDash(); }
 // "without a rate" from a tile: open Sales See more on the deliveries with no rate.
 function ceoDashNoRate(ev) { if (ev) ev.stopPropagation(); ceoDash.open = 'sale-ex'; ceoDash.saleCo = '__norate'; renderCeoDash(); }
 // A Rate typed on the Dashboard: saved on that delivery as the Sale Report saves it, then the figures redrawn.
+// One rate for every delivery of a job that has none (owner, 2026-11-14).
+async function ceoDashSaveRates(jobId, idxCsv, value) {
+  if (String(value).trim() === '') return;
+  for (const i of String(idxCsv).split(',').map(Number).filter(Number.isFinite)) await saveDeliveryEntryField(jobId, i, 'rate', value);
+  if (mode === 'dashboard') renderCeoDash();
+}
 async function ceoDashSaveRate(jobId, index, value) {
   if (String(value).trim() === '') return;
   await saveDeliveryEntryField(jobId, index, 'rate', value);
@@ -6907,17 +6913,30 @@ function ceoDashFigures() {
   // 4. stock right now
   const pend = f.views.pending;
   f.pendingQueue = pend;
-  const papers = new Map();
+  // Low / Out of Stock (owner, 2026-11-14): by what was used - the paper the store gave to E jobs and manual
+  // jobs in the Stock date filter's period - against the stock now (used 50, have 20 -> 30 more for the next
+  // period); a paper the Pending Stock jobs need more of than is in stock counts too.
+  const papers = new Map(), haveOf = new Map();
+  const pKey = (t, sz, g) => [String(t || '').trim().toLowerCase(), String(sz || '').trim().toLowerCase(), String(g || '').trim()].join('|');
+  for (const i of (inventoryAll || [])) { if (!i || i.is_offcut || i.deleted_at) continue; const k = pKey(i.paper_type, i.size, i.gsm); haveOf.set(k, (haveOf.get(k) || 0) + (+i.current_balance || 0)); }
+  const paperOf = (t, sz, g) => {
+    const k = pKey(t, sz, g);
+    if (!papers.has(k)) papers.set(k, { label: [t, sz, g ? g + 'gsm' : ''].filter(Boolean).join(' '), used: 0, need: 0, have: haveOf.get(k) || 0, ps: packetSize(t), unit: isReamPaper(t) ? 'reams' : 'pkts', jobs: 0 });
+    return papers.get(k);
+  };
+  for (const t of (ceoDash.txs || [])) {
+    if (!(t.change < 0) || !(t.reason === 'job-consumed' || t.reason === 'manual-job-card')) continue;
+    paperOf(t.paper_type, t.item_size, t.item_gsm).used += Math.abs(t.change);
+  }
   for (const j of pend) {
     const it = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
     const need = n(j.sheets);
     if (!it || !need) continue;
-    const key = [it.paper_type, it.size, it.gsm].join('|');
-    const e = papers.get(key) || { label: [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : ''].filter(Boolean).join(' '), need: 0, have: paperGroupMembers(it).reduce((a, x) => a + (x.current_balance || 0), 0), ps: packetSize(it.paper_type), jobs: 0 };
+    const e = paperOf(it.paper_type, it.size, it.gsm);
     e.need += need; e.jobs++;
-    papers.set(key, e);
   }
-  f.shortPapers = [...papers.values()].filter(e => e.have < e.need).sort((x, y) => (x.have > 0) - (y.have > 0) || (y.need - y.have) - (x.need - x.have));
+  f.shortPapers = [...papers.values()].map(e => Object.assign(e, { want: Math.max(e.used, e.need) })).filter(e => e.have < e.want)
+    .sort((x, y) => (x.have > 0) - (y.have > 0) || (y.want - y.have) / y.ps - (x.want - x.have) / x.ps);
   f.imports = (ceoDash.imports || []).filter(i => i.status === 'pending' || i.status === 'partial');
   // MIL - the MIL Products report's own figures, as on the END of the
   // Production date filter (the two share one block and one filter; never
@@ -6934,7 +6953,7 @@ function ceoDashFigures() {
     .sort((x, y) => y.short - x.short);
   // Offcut paper on hand, biggest first.
   f.offcuts = (inventoryAll || []).filter(i => i && i.is_offcut && (+i.current_balance || 0) > 0)
-    .map(i => ({ label: [i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : '', i.brand].filter(Boolean).join(' '), sheets: +i.current_balance || 0 }))
+    .map(i => ({ label: [i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : '', i.brand].filter(Boolean).join(' '), sheets: +i.current_balance || 0, ps: packetSize(i.paper_type), unit: isReamPaper(i.paper_type) ? 'reams' : 'pkts' }))
     .sort((x, y) => y.sheets - x.sheets);
   f.offcutSheets = f.offcuts.reduce((a, e) => a + e.sheets, 0);
   // Imports due in the next 7 days, plus any already past their date.
@@ -7029,7 +7048,8 @@ function jobLeftPrintingMs(j) {
 function ceoDashProduction(data) {
   if (!data) return null;
   if (data.error) return { error: data.error };
-  const rows = Array.isArray(data.byMachineDaily) ? data.byMachineDaily : [];
+  // QC checks, it is not a machine of the stage (owner, 2026-11-14): left out of every stage.
+  const rows = (Array.isArray(data.byMachineDaily) ? data.byMachineDaily : []).filter(r => !/^\s*qc\b/i.test(String(r.machine || '')));
   const add = (e, r) => { e.sheets += +r.sheets || 0; e.mult += +r.sheets_mult || 0; e.waste += +r.waste || 0; e.jobs += +r.jobs || 0; return e; };
   const blank = () => ({ sheets: 0, mult: 0, waste: 0, jobs: 0 });
   const out = {};
@@ -7343,15 +7363,49 @@ function renderCeoDash() {
             .map(([un, v]) => `${sg(v)} ${un}`).join(' ') || sg(0);
           return [job(x.j), u(card), u(got), u(dlv), diff];
         });
+        // See more by company (owner, 2026-11-14): what each company's jobs were issued in the period, used
+        // (the jobs printed in it) and delivered - tap a company for its jobs. Manual jobs and sold / damaged on
+        // their own lines; the total is the tile's figures.
+        const Zc = () => ({ pkts: 0, reams: 0 });
+        const cos = new Map();
+        const coOf = name => { const nm = companyNameOf(name) || '—', k = nm.toLowerCase(); if (!cos.has(k)) cos.set(k, { name: nm, issued: Zc(), used: Zc(), delivered: Zc(), jobs: [] }); return cos.get(k); };
+        for (const t of (ceoDash.txs || [])) {
+          if (!(t.change < 0) || !t.job_id || t.reason === 'manual-job-card') continue;
+          const jj = (jobs || []).find(x => x.id === t.job_id);
+          coOf(jj ? jj.client : '(job deleted)').issued[isReamPaper(t.paper_type) ? 'reams' : 'pkts'] += Math.abs(t.change) / packetSize(t.paper_type || '');
+        }
+        for (const x of iu.usedJobs) { const e = coOf(x.j.client); for (const q of x.parts) { const k = q.ream ? 'reams' : 'pkts'; e.used[k] += q.pk; e.delivered[k] += q.delivered; } e.jobs.push(x); }
+        const sumRows = (rows, pick) => rows.reduce((a, r) => { a[r.un] += r.v; return a; }, Zc());
+        const manualIss = sumRows(iu.manualRows.filter(r => !r.off)), soldIss = sumRows(iu.otherRows.filter(r => !r.off));
+        const offIss = iu.toOffcut;
+        const grid = 'display:grid;grid-template-columns:minmax(0,1.5fr) repeat(3,minmax(0,1fr));gap:8px;align-items:center;';
+        const cell = x => `<span style="text-align:right;white-space:nowrap;">${u(x)}</span>`;
+        const dash = '<span style="text-align:right;color:var(--text3);">—</span>';
+        const tdS = 'padding:5px 6px;border-bottom:1px solid var(--border);';
+        const jobsTable = list2 => `<table style="width:100%;border-collapse:collapse;font-size:12.5px;margin:4px 0 6px;">
+            <thead><tr style="color:var(--text2);font-size:10.5px;text-transform:uppercase;"><th style="${tdS}text-align:left;">Job</th><th style="${tdS}text-align:right;">Card</th><th style="${tdS}text-align:right;">Issued to it</th><th style="${tdS}text-align:right;">Delivered</th><th style="${tdS}text-align:right;">Difference</th></tr></thead>
+            <tbody>${list2.map(x => {
+              const card = partsSum(x, () => true), got = { pkts: x.issued.pkts + x.off.pkts, reams: x.issued.reams + x.off.reams };
+              const dl = partsSum({ parts: x.parts.map(q => ({ ...q, pk: q.delivered })) }, () => true);
+              const d = [['pkts', got.pkts - card.pkts], ['reams', got.reams - card.reams]].filter(([, v]) => Math.abs(v) >= 0.005)
+                .map(([un, v]) => `<b style="color:${v > 0 ? '#b45309' : '#b91c1c'};">${v > 0 ? '+' : ''}${fmt(v)} ${un}</b>`).join(' ') || '<span style="color:var(--text3);">—</span>';
+              return `<tr><td style="${tdS}">${job(x.j)}</td><td style="${tdS}text-align:right;white-space:nowrap;">${u(card)}</td><td style="${tdS}text-align:right;white-space:nowrap;">${u(got)}</td><td style="${tdS}text-align:right;white-space:nowrap;">${u(dl)}</td><td style="${tdS}text-align:right;white-space:nowrap;">${d}</td></tr>`;
+            }).join('')}</tbody></table>`;
+        const coRow = e => `<details style="border-bottom:1px solid var(--border);"><summary style="${grid}padding:7px 4px;cursor:pointer;font-size:13px;"><span style="font-weight:700;">&#9656; ${esc(e.name)} <small style="color:var(--text2);font-weight:500;">${fmt(e.jobs.length)} printed</small></span>${cell(e.issued)}${cell(e.used)}${cell(e.delivered)}</summary>
+            ${e.jobs.length ? jobsTable(e.jobs) : '<div class="cd-sub" style="padding:4px 6px 8px;">No job of this company printed in the period - its paper is still waiting to print.</div>'}</details>`;
+        const plainRow = (label, iss, used) => `<div style="${grid}padding:7px 4px;border-bottom:1px solid var(--border);font-size:13px;"><span style="font-weight:700;">${label}</span>${cell(iss)}${used ? cell(used) : dash}${dash}</div>`;
+        const coList = [...cos.values()].sort((a2, b2) => (b2.used.pkts + b2.used.reams * 5 + b2.issued.pkts + b2.issued.reams * 5) - (a2.used.pkts + a2.used.reams * 5 + a2.issued.pkts + a2.issued.reams * 5));
+        const zeroX = x => Math.abs(x.pkts) < 0.005 && Math.abs(x.reams) < 0.005;
         return tile('issued-used', 'stock cd-wide', 'Packets issued vs used vs delivered', value, sub, iu.loaded ? () =>
-          summary
-          + `<div class="cd-sub" style="margin-top:8px;"><b>Issued</b> = paper out of the store. <b>Used</b> = the job cards of the jobs printed in this period + manual jobs (fresh paper or offcut). <b>Delivered</b> = the used packets of the jobs that shipped. Where every packet went: <b>Where the issued paper went</b>.</div>`
-          + fold(`Manual jobs · ${fmt(mj.size)}`, tbl(['Manual job', 'Packets', 'Reams', 'Date'], mjRows, 'No manual job in this period'))
-          + (otherList.length ? fold(`Sold / damaged · ${fmt(iu.otherRows.length)}`, list(otherList, '')) : '')
-          + fold(`By company · ${fmt(byCo.size)}`, tbl(['Company (jobs)', 'Used', 'Delivered'], coTbl, 'No job printed in this period'))
-          + fold(`Jobs printed · ${fmt(iu.usedJobs.length)}`, tbl(['Job', 'Card', 'Issued to it', 'Delivered', 'Difference'], jobTbl, 'No job printed in this period')
-              + '<div class="cd-sub" style="margin-top:4px;">Difference: issued to it more (orange) or less (red) than its card.</div>')
-          + (iu.waived.length ? fold(`Processed without paper · ${fmt(iu.waived.length)} (not counted)`, list(iu.waived.map(x => row(job(x.j), `card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'}`)), '')) : '') : null);
+          `<div class="cd-sub" style="margin-bottom:6px;"><b>Issued</b> = paper out of the store in the period · <b>Used</b> = the job cards of the jobs printed in it · <b>Delivered</b> = what of that shipped. Tap a company for its jobs.</div>`
+          + `<div style="${grid}padding:4px;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--text2);border-bottom:2px solid var(--border);"><span>Company</span><span style="text-align:right;">Issued</span><span style="text-align:right;">Used</span><span style="text-align:right;">Delivered</span></div>`
+          + (coList.length ? coList.map(coRow).join('') : '<div class="cd-sub" style="padding:6px;">No E job paper in this period</div>')
+          + (!zeroX(manualIss) || !zeroX(iu.manual) ? plainRow('Manual jobs', manualIss, iu.manual) : '')
+          + (!zeroX(offIss) ? plainRow('Moved to offcut', offIss, null) : '')
+          + (!zeroX(soldIss) ? plainRow('Sold / damaged', soldIss, null) : '')
+          + `<div style="${grid}padding:8px 4px;font-size:13px;font-weight:800;border-top:2px solid var(--border);"><span>Total</span>${cell(iu.issued)}${cell(usedAll)}${cell(iu.delivered)}</div>`
+          + (iu.waived.length ? `<div class="cd-sub" style="margin-top:8px;">Processed without paper (not counted): ${iu.waived.map(x => job(x.j)).join(', ')}</div>` : '')
+          : null);
       })()}
       ${(() => {
         // Where the issued paper went (owner, 2026-11-14): the paper issued in the period, followed to today.
@@ -7484,10 +7538,30 @@ function renderCeoDash() {
     </div>
     <div class="cd-subsec">Today</div>
     <div class="cd-grid">
-      ${tile('short', f.shortPapers.some(e => e.have <= 0) ? 'out' : 'low', 'Low / Out of Stock', fmt(f.shortPapers.length), 'papers short', () => list(f.shortPapers.map(e => row(esc(e.label), `${e.have <= 0 ? 'Out' : 'Low'} · short ${fmt((e.need - e.have) / e.ps)}`)), 'Enough paper for every pending job'))}
-      ${tile('imports', 'import', 'Pending imports', fmt(f.imports.length), '', () => list(f.imports.map(i => row(esc([i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : ''].filter(Boolean).join(' ')), `${fmt(i.packets)}${i.expected_arrival ? ' · ' + dmy(i.expected_arrival) : ''}`)), 'None pending'))}
-      ${tile('imports-soon', 'import', 'Imports due this week', fmt(f.importsSoon.length), f.importsOverdue ? `${fmt(f.importsOverdue)} past their date` : 'next 7 days', () => list(f.importsSoon.map(x => row(esc([x.i.paper_type, x.i.size, x.i.gsm ? x.i.gsm + 'gsm' : ''].filter(Boolean).join(' ')), `${fmt(x.i.packets)} · ${dmy(x.d)}${x.d < localDateISO() ? ' <b style="color:#dc2626;">late</b>' : ''}`)), 'Nothing due in the next 7 days'))}
-      ${tile('offcut', 'offcut', 'Offcut stock', fmt(f.offcutSheets), `sheets · ${fmt(f.offcuts.length)} papers`, () => list(f.offcuts.map(e => row(esc(e.label), fmt(e.sheets) + ' sheets')), 'No offcut paper on hand'))}
+      ${tile('short', f.shortPapers.some(e => e.have <= 0) ? 'out' : 'low', 'Low / Out of Stock', fmt(f.shortPapers.length), 'papers short', () => {
+        const q = (e, v) => `${fmt(Math.max(0, v) / e.ps)} ${e.unit}`;
+        return `<div class="cd-sub" style="margin-bottom:6px;">Used in the period (the Stock date filter) against the stock now: used 50, have 20 → need 30 more. Pending Stock jobs count too.</div>`
+          + list(f.shortPapers.map(e => row(`${esc(e.label)} <small style="color:${e.have <= 0 ? '#dc2626' : '#b45309'};font-weight:700;">${e.have <= 0 ? 'OUT' : 'LOW'}</small>`,
+            `used ${q(e, e.used)} · have ${q(e, e.have)} · <span style="color:#dc2626;">need ${q(e, e.want - e.have)} more</span>${e.need > e.used ? ` <small style="color:var(--text2);font-weight:500;">(pending jobs need ${q(e, e.need)})</small>` : ''}`)),
+            'Enough paper for what was used in this period');
+      })}
+      ${(() => {
+        // Due this week is part of Pending imports (owner, 2026-11-14).
+        const lbl = i => esc([i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : ''].filter(Boolean).join(' '));
+        const soonIds = new Set(f.importsSoon.map(x => x.i.id));
+        const subTxt = f.importsSoon.length ? `${fmt(f.importsSoon.length)} due this week${f.importsOverdue ? ` · <b style="color:#dc2626;">${fmt(f.importsOverdue)} late</b>` : ''}` : 'none due this week';
+        return tile('imports', 'import', 'Pending imports', fmt(f.imports.length), subTxt, () =>
+          head(`Due this week · ${fmt(f.importsSoon.length)}`)
+          + list(f.importsSoon.map(x => row(lbl(x.i), `${fmt(x.i.packets)} · ${dmy(x.d)}${x.d < localDateISO() ? ' <b style="color:#dc2626;">late</b>' : ''}`)), 'Nothing due in the next 7 days')
+          + head(`Later · ${fmt(f.imports.length - soonIds.size)}`)
+          + list(f.imports.filter(i => !soonIds.has(i.id)).map(i => row(lbl(i), `${fmt(i.packets)}${i.expected_arrival ? ' · ' + dmy(i.expected_arrival) : ''}`)), 'None'));
+      })()}
+      ${(() => {
+        // Offcut in pkts + reams (owner, 2026-11-14); See more shows the sheets too.
+        const o = f.offcuts.reduce((a, e) => { a[e.unit] += e.sheets / e.ps; return a; }, { pkts: 0, reams: 0 });
+        const val = [o.pkts ? fmt(o.pkts) + ' pkts' : '', o.reams ? fmt(o.reams) + ' reams' : ''].filter(Boolean).join(' + ') || '0';
+        return tile('offcut', 'offcut', 'Offcut stock', val, `${fmt(f.offcuts.length)} papers`, () => list(f.offcuts.map(e => row(esc(e.label), `${fmt(e.sheets / e.ps)} ${e.unit} · ${fmt(e.sheets)} sheets`)), 'No offcut paper on hand'));
+      })()}
       ${(() => {
         // Paper changed on the card, the old paper's issue never reversed (owner, 2026-11-03).
         const st = ceoDash.stalePaper;
@@ -7517,32 +7591,46 @@ function renderCeoDash() {
         return row(`<a onclick="ceoDashOpenJob(${r.id})">${esc(r.idDisplay || ('E-' + r.id))}</a> <span style="${none ? red : ''}">${esc(r.name || '')}</span>${withCo ? ` <small style="color:var(--text2);">${esc(r.client || '')}</small>` : ''}`,
           `${fmt(r.cartons)} UC · ${esc(r.deliveredAt || '')} · ${none ? rateBox(r) : `excl. ${fmtRate(r.amountExTax)} · incl. ${fmtRate(r.amountIncTax)}`}`);
       };
-      // See more: the companies; one clicked shows each of its deliveries, a product with no rate in red.
-      const more = () => {
+      // See more (owner, 2026-11-14): each tile its own figure - excl. tax or incl. tax; the companies, one clicked
+      // shows its deliveries. "Without a rate" is just the jobs and a Rate box (one per job, for all its deliveries).
+      const more = kind => () => {
+        const amt = x => fmtRate(kind === 'inc' ? x.inc : x.ex);
+        const rowAmt = r => fmtRate(kind === 'inc' ? r.amountIncTax : r.amountExTax);
         if (ceoDash.saleCo === '__norate') {
-          const nr = [].concat(...f.saleCompanies.map(c => c.rows)).filter(r => r.rate === null || r.rate === undefined);
+          const byJob = new Map();
+          for (const r of [].concat(...f.saleCompanies.map(c => c.rows)).filter(r => r.rate === null || r.rate === undefined)) {
+            const e = byJob.get(r.id) || { r, idx: [], merged: false };
+            e.idx.push(r.deliveryIndex); if (r._merged) e.merged = true;
+            byJob.set(r.id, e);
+          }
+          const box = e => (!canRate || e.merged) ? `<span style="${red}">no rate</span>`
+            : `<input type="number" min="0" step="any" placeholder="Rate" onclick="event.stopPropagation()" onchange="ceoDashSaveRates(${e.r.id}, '${e.idx.join(',')}', this.value)" style="width:90px;padding:4px 6px;border:1px solid #fca5a5;border-radius:5px;text-align:right;font-size:13px;">`;
           return `<div style="margin-bottom:8px;"><button class="btn btn-sm" onclick="ceoDashSaleCo('')">&lsaquo; All companies</button></div>`
-            + head(`Without a rate · ${fmt(nr.length)}`)
-            + (canRate ? '<div class="cd-sub" style="margin-bottom:6px;">Type the rate and press Enter (or click away) - it is saved on that delivery, as in the Sale Report.</div>' : '')
-            + list(nr.map(r => saleRow(r, true)), 'Every delivery in this period has a rate');
+            + head(`Without a rate · ${fmt(byJob.size)} job${byJob.size === 1 ? '' : 's'}`)
+            + (canRate ? '<div class="cd-sub" style="margin-bottom:6px;">Type the rate, press Enter (or tap away) - it is saved.</div>' : '')
+            + list([...byJob.values()].map(e => row(`<a onclick="ceoDashOpenJob(${e.r.id})">${esc(e.r.idDisplay || ('E-' + e.r.id))}</a> ${esc(e.r.name || '')} <small style="color:var(--text2);">${esc(e.r.client || '')}</small>`, box(e))), 'Every delivery in this period has a rate');
         }
         const co = ceoDash.saleCo && f.saleCompanies.find(c => c.key === ceoDash.saleCo);
         if (co) {
           return `<div style="margin-bottom:8px;"><button class="btn btn-sm" onclick="ceoDashSaleCo('')">&lsaquo; All companies</button></div>`
-            + head(`${esc(co.name)} · excl. ${fmtRate(co.ex)} · incl. ${fmtRate(co.inc)}${noRateTxt(co.noRate)}`)
-            + list(co.rows.map(r => saleRow(r, false)), 'No deliveries');
+            + head(`${esc(co.name)} · ${amt(co)}${noRateTxt(co.noRate)}`)
+            + list(co.rows.map(r => {
+                const none = r.rate === null || r.rate === undefined;
+                return row(`<a onclick="ceoDashOpenJob(${r.id})">${esc(r.idDisplay || ('E-' + r.id))}</a> <span style="${none ? red : ''}">${esc(r.name || '')}</span>`,
+                  `${fmt(r.cartons)} UC · ${esc(r.deliveredAt || '')} · ${none ? rateBox(r) : rowAmt(r)}`);
+              }), 'No deliveries');
         }
-        return `<div class="cd-sub">Click a company to see its deliveries. A product with no rate is counted as 0 and shown in red.</div>`
+        return `<div class="cd-sub">Click a company to see its deliveries.</div>`
           + head(`By company · highest first${noRateTxt(f.saleNoRate)}`)
-          + `<div class="cd-list">` + f.saleCompanies.map(c => `<div class="cd-co-row" onclick="ceoDashSaleCo('${esc(c.key).replace(/'/g, '&#39;')}')"><span>${esc(c.name)} <small style="color:var(--text2);">${fmt(c.rows.length)} deliver${c.rows.length === 1 ? 'y' : 'ies'}</small>${c.noRate ? ` <small style="${red}">${fmt(c.noRate)} no rate</small>` : ''}</span><b>excl. ${fmtRate(c.ex)} · incl. ${fmtRate(c.inc)} &rsaquo;</b></div>`).join('') + `</div>`
+          + `<div class="cd-list">` + f.saleCompanies.map(c => `<div class="cd-co-row" onclick="ceoDashSaleCo('${esc(c.key).replace(/'/g, '&#39;')}')"><span>${esc(c.name)} <small style="color:var(--text2);">${fmt(c.rows.length)} deliver${c.rows.length === 1 ? 'y' : 'ies'}</small>${c.noRate ? ` <small style="${red}">${fmt(c.noRate)} no rate</small>` : ''}</span><b>${amt(c)} &rsaquo;</b></div>`).join('') + `</div>`
           + (f.saleCompanies.length ? '' : '<div class="cd-sub">No sales</div>');
       };
       return `<div class="cd-zone cd-zone-5">
     <div class="cd-sec">Sales <small>· its own date filter</small></div>
     ${ceoDashRangeBar('cd-m', ceoDash.mrange, ceoDash.mdfrom, ceoDash.mdto, 'setCeoDashSalesRange', 'setCeoDashSalesCustom', 'renderCeoDash')}
     <div class="cd-grid cd-fill">
-      ${tile('sale-ex', 'money', 'Sale excl. tax', fmtRate(f.saleEx), `${fmt(f.saleRowsCount)} deliver${f.saleRowsCount === 1 ? 'y' : 'ies'}${noRateTxt(f.saleNoRate)}`, more)}
-      ${tile('sale-inc', 'money', 'Sale incl. tax', fmtRate(f.saleInc), `with sales tax${noRateTxt(f.saleNoRate)}`, more)}
+      ${tile('sale-ex', 'money', 'Sale excl. tax', fmtRate(f.saleEx), `${fmt(f.saleRowsCount)} deliver${f.saleRowsCount === 1 ? 'y' : 'ies'}${noRateTxt(f.saleNoRate)}`, more('ex'))}
+      ${tile('sale-inc', 'money', 'Sale incl. tax', fmtRate(f.saleInc), `with sales tax${noRateTxt(f.saleNoRate)}`, more('inc'))}
     </div>
     </div>`;
     })() : ''}`;
