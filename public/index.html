@@ -6670,11 +6670,11 @@ async function loadCeoDashStock() {
   if (b && b.to != null)   qs.set('to', ceoDashIso(b.to));
   ceoDash.txs = null; ceoDash.jobIssued = null; ceoDash.err = ''; ceoDash.bal = null;
   if (mode === 'dashboard') renderCeoDash();
-  // Paper balance (owner, 2026-11-14): with the jobs + offcut at both ends - on its own, so a failure leaves the rest.
+  // Where the issued paper went (owner, 2026-11-14) - on its own, so a failure leaves the rest.
   const bq = new URLSearchParams();
   if (b && b.from != null) bq.set('from', ceoDashIso(b.from));
   if (b && b.to != null)   bq.set('to', ceoDashIso(b.to));
-  api('GET', '/api/reports/paper-balance?' + bq.toString())
+  api('GET', '/api/reports/paper-trace?' + bq.toString())
     .then(r => { if (seq === ceoDashStockSeq) { ceoDash.bal = r; if (mode === 'dashboard') renderCeoDash(); } })
     .catch(e => { if (seq === ceoDashStockSeq) { ceoDash.bal = { error: e.message }; if (mode === 'dashboard') renderCeoDash(); } });
   try {
@@ -7265,7 +7265,7 @@ function renderCeoDash() {
         const hasOther = iu.other.pkts || iu.other.reams;
         const value = !iu.loaded ? '…' : `<span class="cd-pair"><span><b style="color:#1d4ed8;">${u(iu.issued)}</b> <small>issued</small></span><span><b style="color:#15803d;">${u(usedAll)}</b> <small>used</small></span><span><b style="color:#7c3aed;">${u(iu.delivered)}</b> <small>delivered</small></span></span>`;
         const sub = !iu.loaded ? 'loading…' : `used: E jobs ${u(iu.used)} (${fmt(iu.usedJobs.length)} printed) + manual jobs ${u(iu.manual)}`
-          + (hasOther ? ` · sold / damaged ${u(iu.other)}` : '') + ' · the balance: Paper balance';
+          + (hasOther ? ` · sold / damaged ${u(iu.other)}` : '') + ' · where it went: Where the issued paper went';
         const manualList = iu.manualRows.map(r => row(`Manual job ${esc(extractManualJobCardNo(r.t.notes) || '—')}${r.off ? ' <small style="color:#0369a1;font-weight:700;">OFFCUT</small>' : ''}`,
           `${esc([r.t.paper_type, r.t.item_size, r.t.item_gsm ? r.t.item_gsm + 'gsm' : ''].filter(Boolean).join(' '))} · ${fmt(r.v)} ${r.un} · ${esc(fmtDMYT12(r.t.created_at))}`));
         const otherList = iu.otherRows.map(r => row(`${esc(String(r.t.reason || '').replace(/^./, c => c.toUpperCase()))}${r.off ? ' <small style="color:#0369a1;font-weight:700;">OFFCUT</small>' : ''}`,
@@ -7301,46 +7301,100 @@ function renderCeoDash() {
           + (iu.waived.length ? head(`Processed without paper · ${fmt(iu.waived.length)} (not counted)`) + list(iu.waived.map(x => row(job(x.j), `card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'} · left Printing ${date(x.ms)}`)), '') : '') : null);
       })()}
       ${(() => {
-        // Paper balance (owner, 2026-11-14), like a stock ledger: what was with the jobs (issued, not printed
-        // yet) and in offcut at the start, + issued, - used, - what is with the jobs and in offcut at the end.
-        // What is left is the real difference; paper issued one month and printed the next cancels out.
+        // Where the issued paper went (owner, 2026-11-14): the paper issued in the period, followed to today.
+        // E jobs: a printed job's card is shared out by how much of its paper came in the period (issued 40 of
+        // its 50 -> 80% of its card); what it was issued above that is the difference. Offcut is followed through
+        // the offcut stock first in, first out. Issued = everything below; the difference should be 0.
         const iu = f.issuedUsed, b = ceoDash.bal;
-        const z = v => Math.abs(v) < 0.005;
+        const Z = () => ({ pkts: 0, reams: 0 }), z = v => Math.abs(v) < 0.005;
         const u = x => [!z(x.pkts) ? fmt(x.pkts) + ' pkts' : '', !z(x.reams) ? fmt(x.reams) + ' reams' : ''].filter(Boolean).join(' + ') || '0';
         const sgn = x => [['pkts', x.pkts], ['reams', x.reams]].filter(([, v]) => !z(v)).map(([un, v]) => (v > 0 ? '+' : '') + fmt(v) + ' ' + un).join(' · ');
-        const ready = iu.loaded && b && !b.error;
-        if (!ready) return tile('paper-balance', 'stock cd-wide', 'Paper balance', b && b.error ? '—' : '…', b && b.error ? 'could not load: ' + esc(b.error) : 'loading…', null);
-        const plus = [b.floorStart, b.offStart, iu.issued, b.offAdded], minus = [iu.used, iu.manual, iu.other, b.floorEnd, b.offEnd];
-        const sum = l => l.reduce((a, x) => ({ pkts: a.pkts + (+x.pkts || 0), reams: a.reams + (+x.reams || 0) }), { pkts: 0, reams: 0 });
-        const P = sum(plus), M = sum(minus), G = { pkts: P.pkts - M.pkts, reams: P.reams - M.reams };
-        const gTxt = sgn(G);
-        const value = gTxt ? `<b style="color:#b45309;">${gTxt}</b> <small>difference</small>` : `<b style="color:#15803d;">0</b> <small>nothing missing</small>`;
-        const sub = `with jobs, not printed yet: ${u(b.floorEnd)} · offcut in stock: ${u(b.offEnd)}`;
-        const startL = b.startMs > 0 ? date(b.startMs) : 'the start', endL = b.endIsNow ? 'now' : date(b.endMs - 1);
-        const manualFresh = { pkts: iu.manualRows.filter(r => !r.off && r.un === 'pkts').reduce((a, r) => a + r.v, 0), reams: iu.manualRows.filter(r => !r.off && r.un === 'reams').reduce((a, r) => a + r.v, 0) };
-        const balRow = (sign, label, val, note, strong) => `<tr${strong ? ' style="border-top:2px solid var(--border);font-weight:800;"' : ''}><td style="padding:5px 6px;width:18px;color:var(--text2);font-weight:800;">${sign}</td><td style="padding:5px 6px;">${label}${note ? `<div style="font-size:11px;color:var(--text2);font-weight:500;">${note}</div>` : ''}</td><td style="padding:5px 6px;text-align:right;white-space:nowrap;font-weight:700;">${val}</td></tr>`;
-        const hasAdded = !z(b.offAdded.pkts) || !z(b.offAdded.reams), hasOther = !z(iu.other.pkts) || !z(iu.other.reams);
+        const ready = iu.loaded && b && !b.error && Array.isArray(b.jobs);
+        if (!ready) return tile('paper-balance', 'stock cd-wide', 'Where the issued paper went', b && b.error ? '—' : '…', b && b.error ? 'could not load: ' + esc(b.error) : 'loading…', null);
+        const add = (a, x) => { a.pkts += +x.pkts || 0; a.reams += +x.reams || 0; return a; };
+        const unOf = t => isReamPaper(t) ? 'reams' : 'pkts';
+        // Per job: issued in the period / ever, per unit.
+        const per = new Map();
+        for (const r of b.jobs) {
+          const e = per.get(r.job_id) || { id: r.job_id, name: r.name, deleted: r.deleted, period: Z(), total: Z() };
+          const un = unOf(r.paper_type), ps = packetSize(r.paper_type || '');
+          e.period[un] += (+r.s_period || 0) / ps; e.total[un] += (+r.s_total || 0) / ps;
+          per.set(r.job_id, e);
+        }
+        const E = { all: Z(), delivered: Z(), notDelivered: Z(), notPrinted: Z(), diff: Z(), deleted: Z() };
+        const rows = { printed: [], notPrinted: [], deleted: [] };
+        for (const e of per.values()) {
+          add(E.all, e.period);
+          const j = e.deleted ? null : (jobs || []).find(x => x.id === e.id);
+          if (!j) { add(E.deleted, e.period); rows.deleted.push(e); continue; }
+          const printed = !j.is_shade_card && (j.stage_index || 0) >= 2 && jobLeftPrintingMs(j) != null;
+          if (!printed) { add(E.notPrinted, e.period); rows.notPrinted.push({ e, j }); continue; }
+          // The card and its delivered share, per unit (as Packets issued vs used reads them).
+          const parts = ceoDashJobParts(j);
+          const isMil = !!(j.stock_group_name || j.group_job_id);
+          const shipped = (Array.isArray(j.deliveries) && j.deliveries.length > 0) || (j.stage_index || 0) >= STAGES.length - 1;
+          const totalPk = parseFloat((j.particulars || {}).quantity_of_packets) || 0;
+          const r = isMil ? (totalPk > 0 ? jobDeliveredPackets(j) / totalPk : 0) : 0;
+          const card = Z(), dlv = Z();
+          for (const q of parts) { const k = q.ream ? 'reams' : 'pkts'; card[k] += q.pk; dlv[k] += isMil ? q.base * r : (shipped ? q.pk : 0); }
+          const x = { e, j, used: Z(), dlv: Z(), diff: Z() };
+          for (const k of ['pkts', 'reams']) {
+            const p = e.period[k]; if (z(p)) continue;
+            const share = p / Math.max(e.total[k], p);
+            x.used[k] = card[k] * share; x.dlv[k] = Math.min(dlv[k], card[k]) * share; x.diff[k] = p - x.used[k];
+          }
+          E.delivered.pkts += x.dlv.pkts; E.delivered.reams += x.dlv.reams;
+          E.notDelivered.pkts += x.used.pkts - x.dlv.pkts; E.notDelivered.reams += x.used.reams - x.dlv.reams;
+          add(E.diff, x.diff);
+          rows.printed.push(x);
+        }
+        const manualRows = iu.manualRows.filter(r => !r.off), soldRows = iu.otherRows.filter(r => !r.off);
+        const manual = manualRows.reduce((a, r) => { a[r.un] += r.v; return a; }, Z());
+        const sold = soldRows.reduce((a, r) => { a[r.un] += r.v; return a; }, Z());
+        const off = { moved: Z(), e: Z(), manual: Z(), other: Z(), still: Z() };
+        for (const k of ['pkts', 'reams']) { const o = (b.offcut || {})[k]; if (o) for (const c of Object.keys(off)) off[c][k] = +o[c] || 0; }
+        const toOff = iu.toOffcut;
+        // The traced parts add up to what was moved to offcut (a reversed or edge row can shift the trace a little).
+        for (const k of ['pkts', 'reams']) { const m = off.moved[k]; if (m > 0) for (const c of ['e', 'manual', 'other', 'still']) off[c][k] = off[c][k] * toOff[k] / m; }
+        // Anything else that left the store (a stock-out the lines above do not cover).
+        const rest = { pkts: iu.issued.pkts - E.all.pkts - manual.pkts - toOff.pkts - sold.pkts, reams: iu.issued.reams - E.all.reams - manual.reams - toOff.reams - sold.reams };
+        const D = add(add(add(Z(), E.diff), E.deleted), rest);
+        const dTxt = sgn(D);
+        const value = `<span class="cd-pair"><span><b style="color:#1d4ed8;">${u(iu.issued)}</b> <small>issued</small></span><span>${dTxt ? `<b style="color:#b45309;">${dTxt}</b> <small>difference</small>` : '<b style="color:#15803d;">&#10003; 0</b> <small>difference - all accounted for</small>'}</span></span>`;
+        const sub = `E jobs printed ${u(add(add(Z(), E.delivered), E.notDelivered))} · not printed yet ${u(E.notPrinted)} · manual jobs ${u(manual)} · to offcut ${u(toOff)}`;
+        const tr = (lvl, label, val, note, cls) => `<tr${cls === 'total' ? ' style="border-top:2px solid var(--border);font-weight:800;"' : ''}><td style="padding:5px 6px 5px ${6 + lvl * 22}px;${lvl ? 'color:var(--text2);' : 'font-weight:700;'}">${lvl ? '&#8627; ' : ''}${label}${note ? `<div style="font-size:11px;color:var(--text2);font-weight:500;">${note}</div>` : ''}</td><td style="padding:5px 6px;text-align:right;white-space:nowrap;font-weight:${lvl ? 600 : 800};${cls === 'warn' ? 'color:#b45309;' : ''}">${val}</td></tr>`;
+        const offOn = !z(toOff.pkts) || !z(toOff.reams);
         const table = `<table style="width:100%;border-collapse:collapse;font-size:13px;margin:6px 0 12px;">
-            ${balRow('', `With the jobs, not printed yet · ${startL}`, u(b.floorStart), 'paper issued to jobs that had not left Printing')}
-            ${balRow('+', `Offcut in stock · ${startL}`, u(b.offStart), '')}
-            ${balRow('+', '<b style="color:#1d4ed8;">Issued from the store</b>', u(iu.issued), `to E jobs ${u(iu.toE)} · to manual jobs ${u(manualFresh)} · to offcut ${u(iu.toOffcut)}${hasOther ? ' · sold / damaged' : ''}`)}
-            ${hasAdded ? balRow('+', 'Offcut added / corrected by hand', u(b.offAdded), 'offcut typed in, or its balance edited') : ''}
-            ${balRow('−', 'Used on E jobs', u(iu.used), `${fmt(iu.usedJobs.length)} job${iu.usedJobs.length === 1 ? '' : 's'} printed - their job-card packets, fresh paper or offcut`)}
-            ${balRow('−', 'Used on manual jobs', u(iu.manual), 'fresh paper or offcut')}
-            ${hasOther ? balRow('−', 'Sold / damaged / adjustment', u(iu.other), '') : ''}
-            ${balRow('−', `With the jobs, not printed yet · ${endL}`, u(b.floorEnd), `${fmt(b.floorEnd.jobCount || 0)} job${b.floorEnd.jobCount === 1 ? '' : 's'}`)}
-            ${balRow('−', `Offcut in stock · ${endL}`, u(b.offEnd), '')}
-            ${balRow('=', 'Difference', gTxt || '0', gTxt ? 'more than 0 = paper that is nowhere: missing, or a job printed with less than it was issued · less than 0 = jobs used more than was issued to them (see the job list in Packets issued vs used: red = less issued than the card)' : 'everything is accounted for', true)}
+            ${tr(0, '<span style="color:#1d4ed8;">Issued from the store</span>', u(iu.issued), 'everything below adds up to this')}
+            ${tr(1, 'Given to E jobs', u(E.all), `${fmt(per.size)} job${per.size === 1 ? '' : 's'}`)}
+            ${tr(2, 'Printed and delivered', u(E.delivered))}
+            ${tr(2, 'Printed, not delivered yet', u(E.notDelivered))}
+            ${tr(2, 'Not printed yet', u(E.notPrinted), `${fmt(rows.notPrinted.length)} job${rows.notPrinted.length === 1 ? '' : 's'} still in CTP / Printing / Pending`)}
+            ${(!z(E.diff.pkts) || !z(E.diff.reams)) ? tr(2, 'Difference on printed jobs', sgn(E.diff), 'issued more (+) or less (−) than their job card used', 'warn') : ''}
+            ${(!z(E.deleted.pkts) || !z(E.deleted.reams)) ? tr(2, 'Jobs deleted since', u(E.deleted), 'paper issued to a job that was deleted', 'warn') : ''}
+            ${tr(1, 'Manual jobs', u(manual), `${fmt(manualRows.length)} entr${manualRows.length === 1 ? 'y' : 'ies'}`)}
+            ${offOn ? tr(1, 'Moved to offcut', u(toOff)) : ''}
+            ${offOn ? tr(2, 'then used on E jobs', u(off.e)) : ''}
+            ${offOn ? tr(2, 'then used on manual jobs', u(off.manual)) : ''}
+            ${offOn && (!z(off.other.pkts) || !z(off.other.reams)) ? tr(2, 'then sold / damaged', u(off.other)) : ''}
+            ${offOn ? tr(2, 'still in offcut', u(off.still)) : ''}
+            ${(!z(sold.pkts) || !z(sold.reams)) ? tr(1, 'Sold / damaged / adjustment', u(sold)) : ''}
+            ${(!z(rest.pkts) || !z(rest.reams)) ? tr(1, 'Other stock-outs', sgn(rest), '', 'warn') : ''}
+            ${tr(0, 'Difference', dTxt || '0 &#10003;', dTxt ? 'paper that does not add up - mostly printed jobs issued more or less than their card used (list below)' : 'everything issued is accounted for', 'total')}
           </table>`;
-        const jobRow = e => { const j = (jobs || []).find(x => x.id === e.id); return row(j ? job(j) : `E-${e.id} ${esc(e.name || '')}`, u(e)); };
-        return tile('paper-balance', 'stock cd-wide', 'Paper balance', value, sub, () =>
-          `<div class="cd-sub">Like a stock ledger: what was on the floor at the start, plus what came in, less what was used, less what is on the floor now. Paper issued in one month and printed in the next is on the floor - so it cancels out, and the difference left is the real one.</div>`
+        const jl = j => job(j);
+        const diffRows = rows.printed.filter(x => !z(x.diff.pkts) || !z(x.diff.reams))
+          .sort((a, c) => (Math.abs(c.diff.pkts) + Math.abs(c.diff.reams) * 5) - (Math.abs(a.diff.pkts) + Math.abs(a.diff.reams) * 5))
+          .map(x => row(jl(x.j), `issued in the period ${u(x.e.period)} · used on its card ${u(x.used)} · <b style="color:#b45309;">${sgn(x.diff)}</b>`));
+        return tile('paper-balance', 'stock cd-wide', 'Where the issued paper went', value, sub, () =>
+          `<div class="cd-sub">The paper the store issued in the period, and where it is today. A job's card is shared out by how much of its paper came in the period (40 of its 50 packets → 80% of its card).</div>`
           + table
-          + head(`With the jobs now - issued, not printed yet · ${fmt(b.floorEnd.jobCount || 0)} jobs · ${u(b.floorEnd)}`)
-          + list((b.floorEnd.jobs || []).map(jobRow), 'No paper waiting with the jobs')
-          + head(`Manual jobs · ${fmt(iu.manualRows.length)} · ${u(iu.manual)}`)
-          + list(iu.manualRows.map(r => row(`Manual job ${esc(extractManualJobCardNo(r.t.notes) || '—')}${r.off ? ' <small style="color:#0369a1;font-weight:700;">OFFCUT</small>' : ''}`,
-              `${esc([r.t.paper_type, r.t.item_size, r.t.item_gsm ? r.t.item_gsm + 'gsm' : ''].filter(Boolean).join(' '))} · ${fmt(r.v)} ${r.un} · ${esc(fmtDMYT12(r.t.created_at))}`)), 'No manual job in this period'));
+          + head(`Difference on printed jobs · ${fmt(diffRows.length)}`) + list(diffRows, 'None - every printed job used what it was issued')
+          + head(`Not printed yet · ${fmt(rows.notPrinted.length)} · ${u(E.notPrinted)}`)
+          + list(rows.notPrinted.sort((a, c) => (c.e.period.pkts + c.e.period.reams * 5) - (a.e.period.pkts + a.e.period.reams * 5)).map(x => row(jl(x.j), u(x.e.period))), 'None')
+          + head(`Manual jobs · ${fmt(manualRows.length)} · ${u(manual)}`)
+          + list(manualRows.map(r => row(`Manual job ${esc(extractManualJobCardNo(r.t.notes) || '—')}`, `${esc([r.t.paper_type, r.t.item_size, r.t.item_gsm ? r.t.item_gsm + 'gsm' : ''].filter(Boolean).join(' '))} · ${fmt(r.v)} ${r.un} · ${esc(fmtDMYT12(r.t.created_at))}`)), 'None')
+          + (rows.deleted.length ? head(`Jobs deleted since · ${fmt(rows.deleted.length)}`) + list(rows.deleted.map(e => row(`E-${e.id} ${esc(e.name || '')}`, u(e.period))), '') : ''));
       })()}
       ${tile('paper', 'stock', 'Paper issued', paperVal, f.paperLoaded ? fmt(f.paperKg) + ' kg (fresh paper)' : 'loading…', f.paperLoaded ? () => list(f.paperBy.map(e => row(esc(e.label), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
       ${tile('paper-type', 'stock', 'Paper by type', f.paperLoaded ? fmt(f.paperByType.length) : '…', f.paperLoaded ? 'paper types issued' : 'loading…', f.paperLoaded ? () => list(f.paperByType.map(e => row(esc(e.type), `${fmt(e.units)} ${e.ream ? 'reams' : 'pkts'} · ${fmt(e.kg)} kg`)), 'No paper issued') : null)}
