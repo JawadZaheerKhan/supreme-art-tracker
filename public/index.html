@@ -7753,6 +7753,10 @@ function companyNamesDatalistHtml() {
 }
 // The Jobs tab's Company Settings: add a company, set each one's tolerance %.
 function openCompanyTolerances() {
+  if (!document.getElementById('ct-other-css')) document.head.insertAdjacentHTML('beforeend', `<style id="ct-other-css">
+    .ct-other { margin-top: 3px; font-size: 12px; color: #92400e; }
+    .ct-other .ct-fix { padding: 1px 10px; font-size: 11.5px; margin-left: 4px; border-color: #d97706; color: #92400e; }
+  </style>`);
   const can = isSuperAdmin() || hasPerm('job_btn_company_settings', 'yes');
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:640px;">
     <h2>&#127970; Company Settings</h2>
@@ -7770,13 +7774,18 @@ function openCompanyTolerances() {
 }
 // Settings rows, then companies on jobs that have none yet (setting one adds it).
 function companyTolListRows() {
-  const rows = companyTols.map(c => ({ id: c.id, company: String(c.company || '').trim(), pct: c.tolerance_pct, jobs: 0, ids: [] }));
+  const rows = companyTols.map(c => ({ id: c.id, company: String(c.company || '').trim(), pct: c.tolerance_pct, jobs: 0, ids: [], other: new Map() }));
   for (const j of (jobs || [])) {
     const n = String(j.client || '').trim();
     if (!n) continue;
     const hit = companyTolRow(n);
     const row = hit ? rows.find(r => r.company.toLowerCase() === String(hit.company || '').trim().toLowerCase()) : rows.find(r => r.company.toLowerCase() === n.toLowerCase());
-    if (row) { row.jobs++; row.ids.push(j.id); } else rows.push({ company: n, pct: null, jobs: 1, ids: [j.id] });
+    if (row) {
+      row.jobs++; row.ids.push(j.id);
+      // Typed another way on the job (owner, 2026-11-14) - shown under the row with a Fix.
+      const k = n.toLowerCase();
+      if (row.other && k !== row.company.toLowerCase()) row.other.set(k, (row.other.get(k) || 0) + 1);
+    } else rows.push({ company: n, pct: null, jobs: 1, ids: [j.id] });
   }
   return rows.sort((a, b) => a.company.localeCompare(b.company));
 }
@@ -7788,12 +7797,29 @@ function renderCompanyTolList() {
   el.innerHTML = rows.length ? `<table style="width:100%;border-collapse:collapse;font-size:13px;">
     <thead><tr style="background:var(--bg2);"><th style="text-align:left;padding:6px 8px;">Company</th><th style="text-align:right;padding:6px 8px;width:130px;">Tolerance %</th>${can ? '<th style="width:70px;"></th>' : ''}</tr></thead>
     <tbody>${rows.map(r => `<tr style="border-bottom:1px solid var(--border);">
-      <td style="padding:6px 8px;">${esc(r.company)} ${r.jobs ? `<a data-company="${esc(r.company)}" onclick="companyJobsList(this.dataset.company)" style="font-size:11.5px;color:#1d4ed8;cursor:pointer;text-decoration:underline;" title="Open this company's jobs">${r.jobs} job${r.jobs === 1 ? '' : 's'} &rsaquo;</a>` : '<small style="color:var(--text2);">0 jobs</small>'}</td>
+      <td style="padding:6px 8px;">${esc(r.company)} ${r.jobs ? `<a data-company="${esc(r.company)}" onclick="companyJobsList(this.dataset.company)" style="font-size:11.5px;color:#1d4ed8;cursor:pointer;text-decoration:underline;" title="Open this company's jobs">${r.jobs} job${r.jobs === 1 ? '' : 's'} &rsaquo;</a>` : '<small style="color:var(--text2);">0 jobs</small>'}${companyTolOtherHtml(r, can)}</td>
       <td style="padding:4px 8px;text-align:right;">${can
         ? `<input type="number" min="0" max="100" step="any" value="${r.pct === null || r.pct === undefined ? '' : esc(String(+r.pct))}" placeholder="none" data-company="${esc(r.company)}" onchange="saveCompanyTol(this.dataset.company, this.value)" style="width:90px;padding:4px 6px;text-align:right;">`
         : (r.pct === null || r.pct === undefined ? '<span style="color:var(--text3);">none</span>' : esc(String(+r.pct)) + '%')}</td>
       ${can ? `<td style="padding:4px 8px;text-align:right;">${(!r.jobs && r.id) ? `<button class="btn btn-sm btn-danger" data-company="${esc(r.company)}" onclick="deleteCompanyTol(${r.id}, this.dataset.company)" title="No jobs under this company - delete it">Delete</button>` : ''}</td>` : ''}
     </tr>`).join('')}</tbody></table>` : '<div style="color:var(--text3);font-style:italic;padding:10px;">No companies match.</div>';
+}
+// "On jobs as ..." under a Company Settings row: the other ways its jobs have the company typed.
+function companyTolOtherHtml(r, can) {
+  if (!r.other || !r.other.size) return '';
+  return [...r.other.entries()].sort((a, b) => b[1] - a[1]).map(([name, n]) => `<div class="ct-other">&#9888; On ${n} job${n === 1 ? '' : 's'} as &ldquo;${esc(name)}&rdquo;${can && r.id ? ` <button class="btn btn-sm ct-fix" data-from="${esc(name)}" data-company="${esc(r.company)}" data-n="${n}" onclick="fixCompanyJobs(${r.id}, this.dataset.from, this.dataset.company, +this.dataset.n)" title="Change these jobs to ${esc(r.company)}">Fix</button>` : ''}</div>`).join('');
+}
+async function fixCompanyJobs(id, from, company, n) {
+  const ok = await confirmDialog({ title: 'Fix the company name?', message: `${n} job${n === 1 ? '' : 's'} with the company typed as "${from}" will be changed to "${company}". Client logins on "${from}" move too.`, confirmText: 'Fix' });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const r = await api('POST', `/api/company-tolerances/${id}/fix-jobs`, { from });
+    await loadJobs();
+    notify(`${company}: ${r.jobs} job${r.jobs === 1 ? '' : 's'} fixed${r.users ? ` · ${r.users} client login${r.users === 1 ? '' : 's'}` : ''}`);
+    if (document.getElementById('ct-list')) renderCompanyTolList(); else openCompanyTolerances();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 // A company's jobs, newest first; a job clicked opens its job card (company and the rest editable there).
 function companyJobsList(company) {

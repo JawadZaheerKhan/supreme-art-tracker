@@ -10698,6 +10698,31 @@ app.post('/api/company-tolerances', requirePermission('job_btn_company_settings'
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Jobs typed another way -> the Company Settings name (owner, 2026-11-14): every job whose company is
+// `from` (any case) becomes this row's name (jobs keep companies in lower case). Client logins bound to
+// `from` move with them, so they still see their jobs.
+app.post('/api/company-tolerances/:id/fix-jobs', requirePermission('job_btn_company_settings'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const from = String(req.body?.from ?? '').trim().toLowerCase();
+    const [row] = await sql`SELECT * FROM finance.company_settings WHERE id = ${id}`;
+    if (!row) return res.status(404).json({ error: 'Company not found.' });
+    const to = String(row.company || '').trim().toLowerCase();
+    if (!from) return res.status(400).json({ error: 'Which name to fix?' });
+    if (from === to) return res.json({ ok: true, jobs: 0, users: 0 });
+    const jobsDone = await sql`UPDATE jobs SET client = ${to} WHERE lower(btrim(client)) = ${from} RETURNING id`;
+    const usersDone = await sql`UPDATE users SET client_company = ${row.company} WHERE lower(btrim(client_company)) = ${from} RETURNING id`;
+    await logAudit(sql, req, {
+      action: 'company_settings.fix_jobs', entityType: 'company_settings', entityId: row.id,
+      summary: `Company name fixed: "${from}" -> "${row.company}" on ${jobsDone.length} job${jobsDone.length === 1 ? '' : 's'}${usersDone.length ? ` and ${usersDone.length} client login${usersDone.length === 1 ? '' : 's'}` : ''}`,
+      metadata: { from, to, job_ids: jobsDone.map(r => r.id), user_ids: usersDone.map(r => r.id) },
+    });
+    res.json({ ok: true, jobs: jobsDone.length, users: usersDone.length });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // Delete a company from Company Settings - only one no job is under (its NTN / Destination go too).
 app.delete('/api/company-tolerances/:id', requirePermission('job_btn_company_settings'), async (req, res) => {
   try {
