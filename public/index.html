@@ -30176,7 +30176,22 @@ function selectStickerJob(id) {
   document.getElementById('stk-job').value = id;
   document.getElementById('stk-job-search').value = stickerJobLabel(j);
   closeStickerJobList();
+  // Quantity per carton + Total Cases from what the Station packed (owner, 2026-11-14).
+  const v = stickerVariantsFromJob(j);
+  stickerVariants = v.length ? v : [{ qty: '', total: '' }];
   applyStickerJob(j);
+  renderStickerVariants();
+}
+// One row per qty in each carton: Carton Shipper lines first, then Loose (the part-filled cartons go last).
+function stickerVariantsFromJob(j) {
+  const p = (j && j.particulars) || {};
+  const out = [];
+  for (const key of ['ready_packets_qty', 'loose_shipper_qty']) {
+    const by = new Map();
+    for (const l of shipperLinesUpTo(p[key], null)) if (l.per > 0 && l.cartons > 0) by.set(l.per, (by.get(l.per) || 0) + l.cartons);
+    for (const [per, n] of by) out.push({ qty: String(+per.toFixed(3)), total: String(+n.toFixed(3)) });
+  }
+  return out;
 }
 
 // Apply a selected job's fields to the read-only autofill inputs and
@@ -41860,7 +41875,7 @@ function stationUpdateHtml() {
       const cur = stationShipperOverride[inputId] !== undefined ? stationShipperOverride[inputId] : passValue(f, passIdx);
       const saved = shipperLines(cur);
       const count = stationShipperLineCount[inputId] !== undefined ? Math.max(1, stationShipperLineCount[inputId]) : Math.max(1, saved.length);
-      const box = (k, suffix, ph, val, padLabel) => `<input type="text" ${isTouch ? `inputmode="none" readonly onclick="stationOpenPad('${inputId}-${suffix}${k}', '${padLabel}')"` : laptopAttrs} class="numpad-target station-shipper-in" id="${inputId}-${suffix}${k}" value="${esc(val)}" placeholder="${ph}">`;
+      const box = (k, suffix, ph, val, padLabel) => `<input type="text" ${isTouch ? `inputmode="none" readonly onclick="stationOpenPad('${inputId}-${suffix}${k}', '${padLabel}')"` : laptopAttrs} class="numpad-target station-shipper-in" id="${inputId}-${suffix}${k}" value="${esc(val)}" placeholder="${ph}" oninput="stationReadyAutoSum()">`;
       // Carton type per line (owner, 2026-10-14): picked from the Carton
       // Shippers types; the saved stock follows it. A Loose line starts on
       // the first Carton Shipper line's type until the operator changes it.
@@ -42104,6 +42119,28 @@ function stationShipperCombine(q, n) {
   if (qq) return `${qq}x1`;
   return nn;
 }
+// Ready to Deliver (owner, 2026-11-14): Ready Cartons Qty = every Carton Shipper + Loose Carton Shipper
+// line, qty in each x cartons (200x3 + loose 100x1 = 700) - so a wrong count shows up. Still typeable by hand;
+// the next shipper change sets it again. Only Ready to Deliver has a Ready Cartons Qty box.
+function stationReadyAutoSum() {
+  document.querySelectorAll('input[id^="sf-delivered_cartons_qty-p"]').forEach(r => {
+    const pass = r.dataset.pass;
+    let total = 0, any = false;
+    for (const key of ['ready_packets_qty', 'loose_shipper_qty']) {
+      const h = document.getElementById(`sf-${key}-p${pass}`);
+      if (!h) continue;
+      const n = parseInt(h.dataset.lines, 10) || 1;
+      for (let k = 0; k < n; k++) {
+        const q = document.getElementById(`${h.id}-q${k}`), c = document.getElementById(`${h.id}-n${k}`);
+        if (!q || !c) continue;
+        const l = shipperParse(stationShipperCombine(q.value, c.value));   // a qty with no carton count = 1 carton
+        if (l.per > 0 && l.cartons > 0) { total += l.per * l.cartons; any = true; }
+      }
+    }
+    if (any) { r.value = String(+total.toFixed(3)); r.dataset.auto = '1'; }
+    else if (r.dataset.auto === '1') { r.value = ''; r.dataset.auto = ''; }
+  });
+}
 function stationShipperSync() {
   document.querySelectorAll('input.station-shipper-val').forEach(h => {
     const n = parseInt(h.dataset.lines, 10) || 1;
@@ -42217,6 +42254,7 @@ function stationShipperRemoveLine(fieldId, k) {
     stationShipperOverride[fieldId] = parts.join('+');
   }
   stationRender();
+  stationReadyAutoSum();
 }
 // After a line is removed, what the field holds until it is saved.
 let stationShipperOverride = {};
@@ -42369,9 +42407,11 @@ function stationPadPress(d) {
   input.value = input.value + d;
   stationPadSyncDisplay();
   stationResetIdle();
+  stationPadShipperSum(input);
 }
-function stationPadBack()  { const i = stationPadInput(); if (i) i.value = i.value.slice(0, -1); stationPadSyncDisplay(); stationResetIdle(); }
-function stationPadClear() { const i = stationPadInput(); if (i) i.value = ''; stationPadSyncDisplay(); stationResetIdle(); }
+function stationPadBack()  { const i = stationPadInput(); if (i) i.value = i.value.slice(0, -1); stationPadSyncDisplay(); stationResetIdle(); stationPadShipperSum(i); }
+function stationPadClear() { const i = stationPadInput(); if (i) i.value = ''; stationPadSyncDisplay(); stationResetIdle(); stationPadShipperSum(i); }
+function stationPadShipperSum(i) { if (i && i.classList.contains('station-shipper-in')) stationReadyAutoSum(); }
 function stationPadDone()  { stationClosePad(); }
 function stationClosePad() {
   stationPadKey = null;
