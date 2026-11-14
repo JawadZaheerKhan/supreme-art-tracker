@@ -2391,6 +2391,11 @@
   .lc-dot { width: 13px; height: 13px; border-radius: 50%; background: #16a34a; border: 0; padding: 0; margin-right: 6px; vertical-align: -1px; cursor: pointer; box-shadow: 0 0 0 2px #dcfce7; }
   .lc-dot:hover { background: #15803d; }
   .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .lc-rep td.lc-ed { cursor: pointer; }
+  .lc-rep td.lc-ed:hover { outline: 2px dashed #A32D2D; outline-offset: -3px; }
+  .lc-rep td.is-editing { background: #fff7ed !important; }
+  .lc-ed-in { width: 100%; min-width: 80px; padding: 8px; font-size: 15px; font-weight: 700; border: 2px solid #A32D2D; border-radius: 6px; }
+  .lc-ed-empty { color: var(--text2); font-size: 12px; font-style: italic; }
   .lc-sortby { display: inline-flex; border: 1px solid var(--border2); border-radius: 8px; overflow: hidden; }
   .lc-sortby button { padding: 6px 12px; border: 0; background: #fff; font-weight: 700; font-size: 13px; cursor: pointer; color: var(--text); }
   .lc-sortby button + button { border-left: 1px solid var(--border2); }
@@ -26803,7 +26808,7 @@ function lcTableHtml(g, withLegend) {
     ${nums.map(n => { const sec = lcSectionOf(g.form, n) || {}; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === n) || [])[1] || '')}">${n}</th>`; }).join('')}
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
   const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td style="white-space:nowrap;">${esc(hm12(e.entry_time))}</td><td style="white-space:nowrap;">${lcEntryTimeHtml(e)}</td>
-    <td>${lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${lcWasteHtml(e)}</td><td>${lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
+    <td${canEdit ? ` class="lc-ed" title="Tap to change the previous job" onclick="lcInlineEdit(${e.id}, 'prev_job', this)"` : ''}>${lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;"${canEdit ? ` class="lc-ed" title="Tap to change the waste QA counted" onclick="lcInlineEdit(${e.id}, 'waste', this)"` : ''}>${lcWasteHtml(e) || (canEdit ? '<span class="lc-ed-empty">+ waste</span>' : '')}</td><td${canEdit ? ` class="lc-ed" title="Tap to change the new job" onclick="lcInlineEdit(${e.id}, 'new_job', this)"` : ''}>${lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
     ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
   return `<div class="lc-log">
@@ -26883,6 +26888,42 @@ function openLcEdit(id) {
       <button class="btn btn-primary" onclick="saveLcEdit(${e.id})">Save</button>
     </div>
   </div>`);
+}
+// Edit in the table (owner, 2026-11-14): the cell turns into a box; Enter or tapping away saves, Esc leaves it.
+function lcInlineEdit(id, key, td) {
+  if (td.querySelector('input')) return;
+  const e = (lcState.rows || []).find(r => r.id === id);
+  if (!e) return;
+  const isNum = key === 'waste';
+  const cur = e[key] == null ? '' : String(e[key]);
+  td.classList.add('is-editing');
+  td.innerHTML = `<input class="lc-ed-in" type="${isNum ? 'number' : 'text'}" ${isNum ? 'inputmode="decimal" min="0" step="any"' : 'inputmode="numeric"'} value="${esc(cur)}" placeholder="${isNum ? 'waste' : 'job no.'}">`;
+  const inp = td.querySelector('input');
+  inp.addEventListener('click', ev => ev.stopPropagation());
+  let done = false;
+  const finish = async ok => {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    if (!ok || v === cur.trim()) { renderLineClearanceReport(); return; }
+    if (!isNum && !v) { notify('Enter the job number'); renderLineClearanceReport(); return; }
+    if (isNum && v !== '' && !(+v >= 0)) { notify('Waste must be a number'); renderLineClearanceReport(); return; }
+    await lcSaveRow(e, { [key]: v });
+  };
+  inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); finish(true); } else if (ev.key === 'Escape') finish(false); });
+  inp.addEventListener('blur', () => finish(true));
+  inp.focus(); inp.select();
+}
+async function lcSaveRow(e, change) {
+  const body = { entry_date: String(e.entry_date || '').slice(0, 10), entry_time: e.entry_time || '', prev_job: e.prev_job || '', prev_company: e.prev_company || '',
+    waste: e.waste == null ? '' : String(e.waste), new_job: e.new_job || '', new_company: e.new_company || '', points: { ...(e.points || {}) },
+    qc_cleared: !!e.qc_cleared, remarks: e.remarks || '', ...change };
+  try {
+    if (lcAtStation()) await api('POST', `/api/station/line-clearance/${e.id}/edit`, { ...body, ...lcStationWho() });
+    else await api('PUT', '/api/line-clearance/' + e.id, body);
+    notify('Saved');
+    if (!lcAtStation()) lcState.highlight = e.id;   // the app's report flashes the row it saved
+    if (lcAtStation()) await stationLoadLcReport(); else await openLineClearanceReport();
+  } catch (err) { notify('Error: ' + err.message); renderLineClearanceReport(); }
 }
 async function saveLcEdit(id) {
   const v = k => (document.getElementById('lce-' + k) || {}).value || '';

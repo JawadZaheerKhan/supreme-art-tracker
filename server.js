@@ -8436,9 +8436,14 @@ async function lcUpdate(sql, req, id, b, by) {
   const points = {};
   for (const n of nums) points[n] = given[n] === true;
   const cleared = nums.every(n => points[n]);
+  // A new job number with the company left as it was: that job's own company (owner, 2026-11-14).
+  let prevCo = lcText(b.prev_company, 120), nextCo = lcText(b.new_company, 120);
+  const coOf = async v => { const id = lcJobId(v); if (!id) return null; const j = (await sql`SELECT client FROM jobs WHERE id = ${id} AND deleted_at IS NULL`)[0]; return j && j.client ? String(j.client) : null; };
+  if (lcJobId(prev) !== lcJobId(cur.prev_job) && prevCo === (cur.prev_company || '')) prevCo = (await coOf(prev)) || prevCo;
+  if (lcJobId(next) !== lcJobId(cur.new_job) && nextCo === (cur.new_company || '')) nextCo = (await coOf(next)) || nextCo;
   const row = (await sql`
-    UPDATE line_clearance SET entry_date = ${date}, entry_time = ${lcText(b.entry_time, 10)}, prev_job = ${prev}, prev_company = ${lcText(b.prev_company, 120)},
-      new_job = ${next}, new_company = ${lcText(b.new_company, 120)}, waste = ${waste}, points = ${JSON.stringify(points)}, cleared = ${cleared},
+    UPDATE line_clearance SET entry_date = ${date}, entry_time = ${lcText(b.entry_time, 10)}, prev_job = ${prev}, prev_company = ${prevCo},
+      new_job = ${next}, new_company = ${nextCo}, waste = ${waste}, points = ${JSON.stringify(points)}, cleared = ${cleared},
       qc_cleared = ${b.qc_cleared === true}, remarks = ${lcText(b.remarks, 500)}, edited_at = NOW(), edited_by = ${by}
     WHERE id = ${id} RETURNING *`)[0];
   await logAudit(sql, req, { action: 'line_clearance.update', entityType: 'line_clearance', entityId: id,
