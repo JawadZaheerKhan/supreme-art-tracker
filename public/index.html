@@ -26717,7 +26717,7 @@ let _costLastRows = null, _costLastTotals = null;
 // ── Line Clearance report (owner, 2026-11-11) ───────────────
 // A bar of machines (with a search box) - one log per machine. Picking a machine shows its check
 // points on top. Waste: the previous job's job card waste (green) and what QA counted (red).
-const lcState = { from: '', to: '', machine: '', search: '', rows: null, sort: 'job' };   // sort: 'job' | 'entry', latest first
+const lcState = { from: '', to: '', machine: '', search: '', rows: null, sort: 'job' };   // sort: 'job' | 'entry', oldest first
 function openLineClearancePage() {
   openReportsGroup('line-clearance-group');
   setReportsTab('line-clearance');
@@ -26760,9 +26760,10 @@ function lcPointMark(e, n) {
 // Latest first, by the Job Time QA typed (date + time) or by when the entry was saved (owner, 2026-11-13).
 const lcJobAt = e => String(e.entry_date || '').slice(0, 10) + 'T' + (e.entry_time || '00:00');
 const lcEntryAt = e => { const t = new Date(e.created_at).getTime(); return isFinite(t) ? t : 0; };
+// Oldest first (owner, 2026-11-14) - the way the paper log reads.
 function lcSortCmp(a, b) {
-  return lcState.sort === 'entry' ? (lcEntryAt(b) - lcEntryAt(a)) || (b.id - a.id)
-    : lcJobAt(b).localeCompare(lcJobAt(a)) || (lcEntryAt(b) - lcEntryAt(a)) || (b.id - a.id);
+  return lcState.sort === 'entry' ? (lcEntryAt(a) - lcEntryAt(b)) || (a.id - b.id)
+    : lcJobAt(a).localeCompare(lcJobAt(b)) || (lcEntryAt(a) - lcEntryAt(b)) || (a.id - b.id);
 }
 function lcEntryTimeHtml(e) { const t = lcEntryAt(e); return t ? `${esc(fmtDMY(new Date(t)))}<div class="lc-sub">${esc(fmtTime12(new Date(t)))}</div>` : ''; }
 // One log per machine (and per paper form, if a machine ever has both).
@@ -26770,7 +26771,7 @@ function lcGroups(rows) {
   const map = new Map();
   for (const r of rows) { const k = r.machine + '\u0000' + r.form; if (!map.has(k)) map.set(k, { machine: r.machine, form: r.form, list: [] }); map.get(k).list.push(r); }
   for (const g of map.values()) g.list.sort(lcSortCmp);
-  // Latest first across machines too (owner, 2026-11-13): the machine with the newest entry (by the Sort by pick) on top.
+  // Across machines too: the machine with the earliest entry (by the Sort by pick) on top.
   const order = lcMachineOrder(lcCodeOf());
   return [...map.values()].sort((x, y) => lcSortCmp(x.list[0], y.list[0]) || order(x.machine, y.machine) || x.form.localeCompare(y.form));
 }
@@ -26857,7 +26858,7 @@ function lcToolbarHtml() {
           <select onchange="lcSetFilter('machine', this.value)" title="Machine"><option value="">All machines</option>${[...new Set((lcState.rows || []).map(r => r.machine))].sort(lcMachineOrder(lcCodeOf())).map(m => `<option value="${esc(m)}" ${lcState.machine === m ? 'selected' : ''}>${lcCodeOf().get(m) ? esc(lcCodeOf().get(m)) + ' · ' : ''}${esc(m)}</option>`).join('')}</select>
           <input type="search" placeholder="Job no., company..." value="${esc(lcState.search)}" oninput="lcSearch(this.value)">
         </div></div>
-      <div><div class="dash-flbl">Sort by <span style="font-weight:500;text-transform:none;">(latest first)</span></div>
+      <div><div class="dash-flbl">Sort by <span style="font-weight:500;text-transform:none;">(oldest first)</span></div>
         <div class="lc-sortby">${[['job', 'Job time'], ['entry', 'Entry time']].map(([k, l]) => `<button type="button" class="${(lcState.sort || 'job') === k ? 'is-on' : ''}" onclick="lcSetFilter('sort', '${k}')">${l}</button>`).join('')}</div></div>
       <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-sm" onclick="printLineClearance()">&#128424; Print</button></div>
     </div>`;
