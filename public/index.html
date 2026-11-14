@@ -2348,6 +2348,10 @@
   .lc-ops-row.is-empty .lc-ops-m b { color: var(--text2); }
   .lc-ops-m { flex: 0 0 190px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
   .lc-ops-code { display: inline-block; padding: 1px 8px; border-radius: 6px; background: #A32D2D; color: #fff; font-size: 12px; font-weight: 800; letter-spacing: .02em; }
+  .lc-ops-saved { display: inline-block; margin-left: 8px; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 700; vertical-align: middle; background: var(--bg); color: var(--text2); }
+  .lc-ops-saved.is-saving { background: #fef3c7; color: #92400e; }
+  .lc-ops-saved.is-saved { background: #dcfce7; color: #166534; }
+  .lc-ops-saved.is-error { background: #fee2e2; color: #991b1b; }
   .lc-ops-none { color: var(--text2); font-size: 13px; font-style: italic; }
   .lc-ops-row.is-drop { background: #dcfce7; outline: 2px dashed #16a34a; outline-offset: -2px; border-radius: 8px; }
   .lc-ops-p { flex: 1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -40354,7 +40358,16 @@ async function stationOpenCustomPersonPicker() {
   stationPersonPickView = 'custom';
   stationRender();
   try {
-    stationCustomPersons = await api('GET', '/api/operators/all-persons');
+    // One line per person (owner, 2026-11-14) - someone on 3 machines is listed once, with all 3.
+    const byName = new Map();
+    for (const x of (await api('GET', '/api/operators/all-persons')) || []) {
+      const k = String(x.name || '').trim().toLowerCase();
+      if (!k) continue;
+      const hit = byName.get(k);
+      if (!hit) byName.set(k, { ...x, machines: x.machine ? [x.machine] : [] });
+      else { if (x.machine && !hit.machines.includes(x.machine)) hit.machines.push(x.machine); if (!hit.name_ur && x.name_ur) hit.name_ur = x.name_ur; }
+    }
+    stationCustomPersons = [...byName.values()].map(x => ({ ...x, machine: x.machines.join(', ') }));
   } catch (e) {
     stationCustomPersons = [];
     notify('Could not load operators: ' + e.message);
@@ -40566,6 +40579,7 @@ function stationQaFromWaiting(i) {
 // ── Today's operators (owner, 2026-11-13): who works on which machine today ──
 async function stationOpenQaOps() {
   stationView = 'qa-ops';
+  _opsSaveState = '';
   stationQaOps = null;
   stationRender();
   try { stationQaOps = await api('POST', '/api/station/machine-ops', { pin: stationOperator.pin }); }
@@ -40579,6 +40593,7 @@ function stationQaOpsRemove(machine, person) {
   stationQaOpsEdit[machine] = (stationQaOpsEdit[machine] || []).filter(x => x !== person);
   stationResetIdle();
   stationRender();
+  stationQaOpsAutoSave();
 }
 function stationQaOpsMove(from, to, person) {
   if (!to || from === to) return;
@@ -40587,6 +40602,7 @@ function stationQaOpsMove(from, to, person) {
   if (!l.includes(person)) l.push(person);
   stationResetIdle();
   stationRender();
+  stationQaOpsAutoSave();
 }
 // Drag a name onto another machine - pointer events, so a finger on a tablet / phone works as well as a mouse.
 let _opsDrag = null;
@@ -40638,23 +40654,39 @@ function stationQaOpsAdd(machine, sel) {
   const l = stationQaOpsEdit[machine] || (stationQaOpsEdit[machine] = []);
   if (!l.includes(p)) l.push(p);
   stationRender();
+  stationQaOpsAutoSave();
 }
-async function stationQaOpsSave(btn) {
-  if (btn) btn.disabled = true;
-  try {
-    await api('POST', '/api/station/machine-ops/save', { pin: stationOperator.pin, assign: stationQaOpsEdit, person_name: (stationPerson && stationPerson.name) || '' });
-    notify("Today's operators saved");
-    stationView = 'qa'; stationRender();
-  } catch (e) { notify('Error: ' + e.message); if (btn) btn.disabled = false; }
+// Every change saves by itself (owner, 2026-11-14) - a short wait so quick taps go as one save; the latest wins.
+let _opsSaveTimer = null, _opsSaveState = '';   // '' | 'saving' | 'saved' | 'error'
+function stationQaOpsAutoSave() {
+  clearTimeout(_opsSaveTimer);
+  stationQaOpsSetState('saving');
+  _opsSaveTimer = setTimeout(async () => {
+    const snap = JSON.parse(JSON.stringify(stationQaOpsEdit || {}));
+    try {
+      await api('POST', '/api/station/machine-ops/save', { pin: stationOperator.pin, assign: snap, person_name: (stationPerson && stationPerson.name) || '' });
+      if (stationQaOps) { stationQaOps.from = stationQaOps.date; stationQaOps.assign = snap; }
+      if (!_opsSaveTimer || JSON.stringify(snap) === JSON.stringify(stationQaOpsEdit || {})) stationQaOpsSetState('saved');
+    } catch (e) { stationQaOpsSetState('error'); notify('Could not save today\'s operators: ' + e.message); }
+  }, 700);
+}
+function stationQaOpsSetState(st) {
+  _opsSaveState = st;
+  const el = document.getElementById('lc-ops-saved');
+  if (el) el.outerHTML = stationQaOpsStateHtml();
+}
+function stationQaOpsStateHtml() {
+  const t = { saving: ['is-saving', 'Saving…'], saved: ['is-saved', '&#10003; Saved'], error: ['is-error', '&#9888; Not saved - try again'] }[_opsSaveState];
+  return `<span id="lc-ops-saved" class="lc-ops-saved ${t ? t[0] : ''}">${t ? t[1] : 'Changes save by themselves'}</span>`;
 }
 function stationQaOpsHtml() {
   const d = stationQaOps;
   const head = `<div class="station-head">
-      <div><div class="station-who" style="font-size:20px;">Today's operators</div><div class="station-where" style="font-size:14px;">${esc(fmtDMY(localDateISO()))} &middot; who works on which machine</div></div>
+      <div><div class="station-who" style="font-size:20px;">Today's operators ${stationQaOpsStateHtml()}</div><div class="station-where" style="font-size:14px;">${esc(fmtDMY(localDateISO()))} &middot; who works on which machine</div></div>
       <div style="display:flex;gap:8px;"><button class="btn" onclick="stationView='qa'; stationRender();">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>`;
   if (!d || !stationQaOpsEdit) return head + '<div class="empty">Loading…</div>';
-  const note = `<div class="lc-ops-note">${d.from && d.from !== d.date ? `Starting from ${esc(fmtDMY(d.from))}. ` : d.from ? '' : 'Starting with every machine\'s own operators. '}Drag a name onto another machine to move them, &#128465; to take one off, + someone else to add. Then Save.</div>`;
+  const note = `<div class="lc-ops-note">${d.from && d.from !== d.date ? `Starting from ${esc(fmtDMY(d.from))}. ` : d.from ? '' : 'Starting with every machine\'s own operators. '}Drag a name onto another machine to move them, &#128465; to take one off, + someone else to add. Every change saves by itself.</div>`;
   const machines = [...d.machines].sort((a, b) => (!a.code - !b.code) || (a.code || '').localeCompare(b.code || '', undefined, { numeric: true }) || a.name.localeCompare(b.name));
   const rows = machines.map(m => {
     const on = stationQaOpsEdit[m.name] || [];
@@ -40667,8 +40699,7 @@ function stationQaOpsHtml() {
         ${others.length ? `<select class="lc-ops-add" onchange="stationQaOpsAdd(${M}, this)"><option value="">+ someone else</option>${others.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select>` : ''}</div>
     </div>`;
   }).join('');
-  return head + `<div class="lc-wrap">${note}<div class="lc-card lc-ops">${rows}</div>
-    <button class="btn lc-save" onclick="stationQaOpsSave(this)">&#10003; Save today's operators</button></div>`;
+  return head + `<div class="lc-wrap">${note}<div class="lc-card lc-ops">${rows}</div></div>`;
 }
 function stationQaSet(field, value) { if (stationQa) stationQa[field] = value; stationResetIdle(); }
 // Special jobs (not in the app) always start with 4 (owner, 2026-11-11) - their company is typed.
