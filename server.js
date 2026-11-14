@@ -5195,6 +5195,108 @@ app.post('/api/reports/job-issued', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Paper balance (owner, 2026-11-14): what the Dashboard's Paper balance needs besides the figures it already
+// has - the paper with the jobs (issued, the job not past Printing yet) and the offcut in stock, at the start and
+// at the end of the period, and the offcut added / corrected by hand in it. "With the jobs" uses the same rows as
+// job-issued: fresh paper issued to the job plus the offcut issued to it, less what came back. A job counts as
+// printed from the moment it reached a stage after Printing (as the Dashboard's Used).
+app.get('/api/reports/paper-balance', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const day = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d || '')); return m ? businessWallClockToMs(+m[1], +m[2], +m[3], 0, 0) : null; };
+    const fromMs = day(req.query.from) ?? 0;                     // no start = all time: nothing before it
+    const toDay = day(req.query.to), now = Date.now();
+    const endMs = Math.min(now, toDay != null ? toDay + 86400000 : now);
+    const startIso = new Date(fromMs).toISOString(), endIso = new Date(endMs).toISOString();
+    const unitOf = t => isReamPaperSrv(t) ? 'reams' : 'pkts';
+    const z = () => ({ pkts: 0, reams: 0 });
+    const leftMs = st => {
+      for (let i = 2; i < 30; i++) {
+        const r = st && st[i];
+        if (!r) continue;
+        let ms = r.at ? Date.parse(r.at) : NaN;
+        if (!Number.isFinite(ms) && r.time) {
+          const m = String(r.time).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+          if (m) ms = businessWallClockToMs(+m[3], +m[2], +m[1], +(m[4] || 0), +(m[5] || 0));
+        }
+        if (Number.isFinite(ms)) return ms;
+      }
+      return null;
+    };
+    const jobs = await sql`
+      SELECT id, name, client, stage_index, is_shade_card,
+             CASE WHEN jsonb_typeof(stages) = 'object' THEN (SELECT jsonb_object_agg(k, jsonb_build_object('at', v->'at', 'time', v->'time')) FROM jsonb_each(stages) e(k, v))
+                  WHEN jsonb_typeof(stages) = 'array' THEN (SELECT jsonb_object_agg((n - 1)::text, jsonb_build_object('at', v->'at', 'time', v->'time')) FROM jsonb_array_elements(stages) WITH ORDINALITY a(v, n))
+             END AS st
+        FROM jobs WHERE deleted_at IS NULL`;
+    const byId = new Map(jobs.map(j => [j.id, j]));
+    const printedAt = new Map();
+    for (const j of jobs) if (!j.is_shade_card && (j.stage_index || 0) >= 2) { const ms = leftMs(j.st || {}); if (ms != null) printedAt.set(j.id, ms); }
+    const iss = await sql`
+      SELECT t.job_id, i.paper_type,
+             SUM(CASE WHEN t.created_at < ${startIso}::timestamptz THEN -t.change ELSE 0 END)::float AS s_open,
+             SUM(-t.change)::float AS s_close
+        FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id
+       WHERE t.job_id IS NOT NULL AND t.created_at < ${endIso}::timestamptz
+         AND ((COALESCE(i.is_offcut, false) = false AND t.reason = 'job-consumed' AND t.change < 0)
+           OR (COALESCE(i.is_offcut, false) = true AND t.reason IN ('job-consumed', 'job-auto-offcut', 'job-auto-offcut-refund')))
+         AND t.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+       GROUP BY t.job_id, i.paper_type`;
+    const withJobs = (key, atMs) => {
+      const tot = z(), per = new Map();
+      for (const r of iss) {
+        const j = byId.get(r.job_id);
+        if (!j) continue;                                        // a deleted job: its paper is with no job
+        const p = printedAt.get(r.job_id);
+        if (p != null && p < atMs) continue;                     // printed by then: in Used
+        const v = (+r[key] || 0) / packetSize(r.paper_type);
+        if (Math.abs(v) < 1e-9) continue;
+        const u = unitOf(r.paper_type);
+        tot[u] += v;
+        const e = per.get(r.job_id) || { id: r.job_id, name: j.name, client: j.client, pkts: 0, reams: 0 };
+        e[u] += v; per.set(r.job_id, e);
+      }
+      return { ...tot, jobs: [...per.values()].sort((a, b) => (b.pkts + b.reams * 5) - (a.pkts + a.reams * 5)) };
+    };
+    const offAt = async iso => {
+      const rows = await sql`
+        SELECT i.paper_type, SUM(i.current_balance - COALESCE((SELECT SUM(t.change) FROM inventory_transactions t
+                 WHERE t.item_id = i.id AND t.created_at >= ${iso}::timestamptz), 0))::float AS sheets
+          FROM inventory_items i
+         WHERE COALESCE(i.is_offcut, false) = true AND (i.deleted_at IS NULL OR i.deleted_at > ${iso}::timestamptz)
+         GROUP BY i.paper_type`;
+      const o = z();
+      for (const r of rows) o[unitOf(r.paper_type)] += (+r.sheets || 0) / packetSize(r.paper_type);
+      return o;
+    };
+    const offStart = fromMs > 0 ? await offAt(startIso) : z();
+    const offEnd = await offAt(endIso);
+    // Offcut moves in the period the Dashboard already counts: into offcut from issued paper (part of Issued),
+    // to jobs (with the jobs), to manual jobs / sold / damaged (Used). The rest was typed in or corrected by hand.
+    const flows = await sql`
+      SELECT i.paper_type,
+             SUM(CASE WHEN t.reason = 'offcut-transfer-in' THEN t.change ELSE 0 END)::float AS into_offcut,
+             SUM(CASE WHEN t.job_id IS NOT NULL AND t.reason IN ('job-consumed', 'job-auto-offcut', 'job-auto-offcut-refund') THEN -t.change ELSE 0 END)::float AS to_jobs,
+             SUM(CASE WHEN t.change < 0 AND (t.reason = 'manual-job-card' OR (t.job_id IS NULL AND t.reason NOT IN ('correction', 'job-edit-revert', 'job-edit-apply')))
+                       AND (t.deleted_at IS NULL OR t.deleted_scope IS DISTINCT FROM 'history') THEN -t.change ELSE 0 END)::float AS used_out
+        FROM inventory_transactions t JOIN inventory_items i ON i.id = t.item_id
+       WHERE COALESCE(i.is_offcut, false) = true AND t.created_at >= ${startIso}::timestamptz AND t.created_at < ${endIso}::timestamptz
+         AND t.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+       GROUP BY i.paper_type`;
+    const fl = { into: z(), toJobs: z(), used: z() };
+    for (const r of flows) { const u = unitOf(r.paper_type), ps = packetSize(r.paper_type); fl.into[u] += (+r.into_offcut || 0) / ps; fl.toJobs[u] += (+r.to_jobs || 0) / ps; fl.used[u] += (+r.used_out || 0) / ps; }
+    const offAdded = z();
+    for (const u of ['pkts', 'reams']) offAdded[u] = offEnd[u] - offStart[u] - fl.into[u] + fl.toJobs[u] + fl.used[u];
+    const floorStart = fromMs > 0 ? withJobs('s_open', fromMs) : { ...z(), jobs: [] };
+    const floorEnd = withJobs('s_close', endMs);
+    res.json({ startMs: fromMs, endMs, endIsNow: endMs >= now - 1000, floorStart, floorEnd: { ...floorEnd, jobs: floorEnd.jobs.slice(0, 300), jobCount: floorEnd.jobs.length },
+      floorStartJobs: floorStart.jobs.length, offStart, offEnd, offAdded });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // Issues of a paper that is no longer on the job card (main, 2nd or 3rd paper, by paper
 // group): the paper was changed and the old issue was never reversed (owner, 2026-11-03).
 app.get('/api/reports/stale-paper-issues', requireAuth, async (req, res) => {
