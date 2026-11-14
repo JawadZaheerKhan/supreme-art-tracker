@@ -7688,6 +7688,13 @@ function companyTolRow(client) {
   const hits = companyTols.filter(c => { const have = companyTokens(c.company); return have.length && companyTokenSubset(want, have); });
   return hits.length === 1 ? hits[0] : null;
 }
+// A job's company as Company Settings names it ("ferozsons" -> "Ferozsons Laboratories Limited"); as typed
+// when Company Settings has no row for it.
+function companyNameOf(client) {
+  const n = String(client || '').trim();
+  const r = n ? companyTolRow(n) : null;
+  return (r && String(r.company || '').trim()) || n;
+}
 function companyTolFor(client) {
   const r = companyTolRow(client);
   const v = r && r.tolerance_pct !== null && r.tolerance_pct !== undefined && r.tolerance_pct !== '' ? Number(r.tolerance_pct) : null;
@@ -33472,7 +33479,7 @@ function buildProductGroups() {
       groups.set(key, { key, name: resolved.name, companies: new Set(), jobs: [], cartons: 0, revenue: 0, type: detectProductType(resolved.name) });
     }
     const g = groups.get(key);
-    if (j.client) g.companies.add(String(j.client).trim());
+    if (j.client) g.companies.add(companyNameOf(j.client));   // the Company Settings name (owner, 2026-11-14)
     g.jobs.push(j);
     const shipped = totalDeliveredCartons(j);
     g.cartons += shipped;
@@ -33487,7 +33494,15 @@ function buildProductGroups() {
 function renderProductsTab() {
   __productGroupsAll = buildProductGroups();
   const companySel = document.getElementById('products-company-filter');
-  if (companySel) companySel.innerHTML = '<option value="">All companies</option>' + clientCompanyOptions(productsFilter.company);
+  if (productsFilter.company) productsFilter.company = companyNameOf(productsFilter.company);   // a saved "ferozsons" pick
+  if (companySel) {
+    const seen = new Map();
+    for (const g of __productGroupsAll) for (const c of g.companies) if (c && !seen.has(c.toLowerCase())) seen.set(c.toLowerCase(), c);
+    const cur = String(productsFilter.company || '').trim();
+    if (cur && !seen.has(cur.toLowerCase())) seen.set(cur.toLowerCase(), cur);
+    companySel.innerHTML = '<option value="">All companies</option>' + [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+      .map(n => `<option value="${esc(n)}" ${cur && cur.toLowerCase() === n.toLowerCase() ? 'selected' : ''}>${esc(n)}</option>`).join('');
+  }
   const searchEl = document.getElementById('products-search');
   if (searchEl && searchEl.value !== productsFilter.search) searchEl.value = productsFilter.search;
   const codeEl = document.getElementById('products-code-filter');
