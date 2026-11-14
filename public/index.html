@@ -7755,6 +7755,8 @@ function companyNamesDatalistHtml() {
 function openCompanyTolerances() {
   if (!document.getElementById('ct-other-css')) document.head.insertAdjacentHTML('beforeend', `<style id="ct-other-css">
     .ct-other { margin-top: 3px; font-size: 12px; color: #92400e; }
+    .ct-edit { border: 0; background: none; cursor: pointer; color: var(--text2); font-size: 14px; padding: 0 4px; }
+    .ct-edit:hover { color: #A32D2D; }
     .ct-other .ct-fix { padding: 1px 10px; font-size: 11.5px; margin-left: 4px; border-color: #d97706; color: #92400e; }
   </style>`);
   const can = isSuperAdmin() || hasPerm('job_btn_company_settings', 'yes');
@@ -7797,7 +7799,7 @@ function renderCompanyTolList() {
   el.innerHTML = rows.length ? `<table style="width:100%;border-collapse:collapse;font-size:13px;">
     <thead><tr style="background:var(--bg2);"><th style="text-align:left;padding:6px 8px;">Company</th><th style="text-align:right;padding:6px 8px;width:130px;">Tolerance %</th>${can ? '<th style="width:70px;"></th>' : ''}</tr></thead>
     <tbody>${rows.map(r => `<tr style="border-bottom:1px solid var(--border);">
-      <td style="padding:6px 8px;">${esc(r.company)} ${r.jobs ? `<a data-company="${esc(r.company)}" onclick="companyJobsList(this.dataset.company)" style="font-size:11.5px;color:#1d4ed8;cursor:pointer;text-decoration:underline;" title="Open this company's jobs">${r.jobs} job${r.jobs === 1 ? '' : 's'} &rsaquo;</a>` : '<small style="color:var(--text2);">0 jobs</small>'}${companyTolOtherHtml(r, can)}</td>
+      <td style="padding:6px 8px;">${esc(r.company)}${can && r.id ? ` <button type="button" class="ct-edit" onclick="renameCompanyTol(${r.id})" title="Edit the name - it changes on all this company's jobs">&#9998;</button>` : ''} ${r.jobs ? `<a data-company="${esc(r.company)}" onclick="companyJobsList(this.dataset.company)" style="font-size:11.5px;color:#1d4ed8;cursor:pointer;text-decoration:underline;" title="Open this company's jobs">${r.jobs} job${r.jobs === 1 ? '' : 's'} &rsaquo;</a>` : '<small style="color:var(--text2);">0 jobs</small>'}${companyTolOtherHtml(r, can)}</td>
       <td style="padding:4px 8px;text-align:right;">${can
         ? `<input type="number" min="0" max="100" step="any" value="${r.pct === null || r.pct === undefined ? '' : esc(String(+r.pct))}" placeholder="none" data-company="${esc(r.company)}" onchange="saveCompanyTol(this.dataset.company, this.value)" style="width:90px;padding:4px 6px;text-align:right;">`
         : (r.pct === null || r.pct === undefined ? '<span style="color:var(--text3);">none</span>' : esc(String(+r.pct)) + '%')}</td>
@@ -7808,6 +7810,31 @@ function renderCompanyTolList() {
 function companyTolOtherHtml(r, can) {
   if (!r.other || !r.other.size) return '';
   return [...r.other.entries()].sort((a, b) => b[1] - a[1]).map(([name, n]) => `<div class="ct-other">&#9888; On ${n} job${n === 1 ? '' : 's'} as &ldquo;${esc(name)}&rdquo;${can && r.id ? ` <button class="btn btn-sm ct-fix" data-from="${esc(name)}" data-company="${esc(r.company)}" data-n="${n}" onclick="fixCompanyJobs(${r.id}, this.dataset.from, this.dataset.company, +this.dataset.n)" title="Change these jobs to ${esc(r.company)}">Fix</button>` : ''}</div>`).join('');
+}
+// Edit a company's name (owner, 2026-11-14): changes on all its jobs, the ones typed another way too.
+async function renameCompanyTol(id) {
+  const r = companyTolListRows().find(x => x.id === id);
+  if (!r) return;
+  const others = r.other ? [...r.other.keys()] : [];
+  const to = await promptDialog({ title: 'Edit company name', defaultValue: r.company, confirmText: 'Save',
+    message: `The new name goes on all ${r.jobs} job${r.jobs === 1 ? '' : 's'} of ${r.company}${others.length ? ` (the ones typed as ${others.map(o => '"' + o + '"').join(', ')} too)` : ''}, and its client logins.` });
+  if (to === null || to === undefined) return;
+  const name = String(to).trim().replace(/\s+/g, ' ');
+  if (!name || name === r.company) return;
+  const other = companyTols.find(c => c.id !== id && String(c.company || '').trim().toLowerCase() === name.toLowerCase());
+  if (other) {
+    const ok = await confirmDialog({ title: `"${other.company}" is already a company`, confirmText: 'Join them',
+      message: `Join the two? All ${r.jobs} job${r.jobs === 1 ? '' : 's'} of ${r.company} move to ${other.company}, and "${r.company}" leaves Company Settings. ${other.company}'s tolerance stays.` });
+    if (!ok) return;
+  }
+  showSaving(true);
+  try {
+    const res = await api('POST', `/api/company-tolerances/${id}/rename`, { to: name, also: others });
+    await Promise.all([loadCompanyTols(), loadJobs()]);
+    notify(res.merged ? `Joined into ${res.company} · ${res.jobs} job${res.jobs === 1 ? '' : 's'}` : `Renamed to ${res.company || name} · ${res.jobs} job${res.jobs === 1 ? '' : 's'}`);
+    if (document.getElementById('ct-list')) renderCompanyTolList(); else openCompanyTolerances();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 async function fixCompanyJobs(id, from, company, n) {
   const ok = await confirmDialog({ title: 'Fix the company name?', message: `${n} job${n === 1 ? '' : 's'} with the company typed as "${from}" will be changed to "${company}". Client logins on "${from}" move too.`, confirmText: 'Fix' });

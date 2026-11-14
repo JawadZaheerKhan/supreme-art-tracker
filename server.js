@@ -10723,6 +10723,59 @@ app.post('/api/company-tolerances/:id/fix-jobs', requirePermission('job_btn_comp
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Rename a company (owner, 2026-11-14): its Company Settings name and every job under it - the other ways its
+// jobs have it typed come as `also` - plus client logins and the finance rows kept by company name (receipts,
+// opening balance, chart of accounts party, waste of board). A name that is already another company joins the
+// two: that one's tolerance / NTN / Destination stay (blanks are taken from this one) and this row goes.
+app.post('/api/company-tolerances/:id/rename', requirePermission('job_btn_company_settings'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const to = String(req.body?.to ?? '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    if (!to) return res.status(400).json({ error: 'Type the new name.' });
+    const [row] = await sql`SELECT * FROM finance.company_settings WHERE id = ${id}`;
+    if (!row) return res.status(404).json({ error: 'Company not found.' });
+    const old = String(row.company || '').trim();
+    if (to === old) return res.json({ ok: true, jobs: 0, unchanged: true });
+    const also = Array.isArray(req.body?.also) ? req.body.also.slice(0, 50) : [];
+    const froms = [...new Set([old, ...also].map(v => String(v || '').trim().toLowerCase()).filter(Boolean))];
+    const [target] = await sql`SELECT * FROM finance.company_settings WHERE lower(company) = lower(${to}) AND id <> ${id}`;
+    // One opening balance per company: two would collide once they carry the same name.
+    const openings = await sql`SELECT id FROM finance.party_openings WHERE lower(btrim(company)) = ANY(${[...froms, to.toLowerCase()]})`;
+    if (openings.length > 1) return res.status(409).json({ error: `Both names have an opening balance in the Party Ledger - keep one there first, then rename.` });
+    const jobRows = await sql`SELECT id FROM jobs WHERE lower(btrim(client)) = ANY(${froms})`;
+    const q = [
+      sql`UPDATE jobs SET client = ${to.toLowerCase()} WHERE lower(btrim(client)) = ANY(${froms})`,   // jobs keep companies in lower case
+      sql`UPDATE users SET client_company = ${to} WHERE lower(btrim(client_company)) = ANY(${froms})`,
+      sql`UPDATE finance.party_receipts SET company = ${to} WHERE lower(btrim(company)) = ANY(${froms})`,
+      sql`UPDATE finance.party_openings SET company = ${to} WHERE lower(btrim(company)) = ANY(${froms})`,
+      sql`UPDATE finance.chart_accounts SET company = ${to} WHERE lower(btrim(company)) = ANY(${froms})`,
+      sql`UPDATE finance.waste_board_sales SET company = ${to} WHERE lower(btrim(company)) = ANY(${froms})`,
+    ];
+    if (target) {
+      q.push(sql`UPDATE finance.company_settings SET tolerance_pct = COALESCE(tolerance_pct, ${row.tolerance_pct}),
+                   ntn = COALESCE(NULLIF(btrim(ntn), ''), ${row.ntn}), destination = COALESCE(NULLIF(btrim(destination), ''), ${row.destination}),
+                   updated_by = ${req.user.email}, updated_at = NOW() WHERE id = ${target.id}`);
+      q.push(sql`DELETE FROM finance.company_settings WHERE id = ${id}`);
+    } else {
+      q.push(sql`UPDATE finance.company_settings SET company = ${to}, updated_by = ${req.user.email}, updated_at = NOW() WHERE id = ${id}`);
+    }
+    await sql.transaction(q);
+    await logAudit(sql, req, {
+      action: target ? 'company_settings.merge' : 'company_settings.rename', entityType: 'company_settings', entityId: target ? target.id : id,
+      summary: target
+        ? `Company "${old}" joined into "${target.company}" (${jobRows.length} job${jobRows.length === 1 ? '' : 's'})`
+        : `Company renamed: "${old}" -> "${to}" (${jobRows.length} job${jobRows.length === 1 ? '' : 's'})`,
+      metadata: { from: old, also: froms, to: target ? target.company : to, job_ids: jobRows.map(r => r.id) },
+    });
+    res.json({ ok: true, jobs: jobRows.length, merged: !!target, company: target ? target.company : to });
+  } catch (err) {
+    if (err && err.code === '23505') return res.status(409).json({ error: 'That name is already used - try again.' });
+    console.error(err); res.status(500).json({ error: err.message });
+  }
+});
+
 // Delete a company from Company Settings - only one no job is under (its NTN / Destination go too).
 app.delete('/api/company-tolerances/:id', requirePermission('job_btn_company_settings'), async (req, res) => {
   try {
