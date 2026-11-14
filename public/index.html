@@ -7289,16 +7289,53 @@ function renderCeoDash() {
           return [d.pkts, d.reams].some(v => Math.abs(v) >= 0.005) ? ' · ' + [['pkts', d.pkts], ['reams', d.reams]].filter(([, v]) => Math.abs(v) >= 0.005).map(([un, v]) => `<b style="color:${v > 0 ? '#b45309' : '#b91c1c'};">${v > 0 ? '+' : ''}${fmt(v)} ${un}</b>`).join(' ') : ''; };
         const coRows = [...byCo.values()].sort((a, b) => (b.used.pkts + b.used.reams) - (a.used.pkts + a.used.reams))
           .map(e => row(`${esc(e.name)} <small style="color:var(--text2);">${fmt(e.jobs)} job${e.jobs === 1 ? '' : 's'}</small>`, `issued to these jobs ${u(e.issued)} · used ${u(e.used)} · delivered ${u(e.delivered)}${coDiff(e)}${(e.off.pkts || e.off.reams) ? ` · <span style="color:var(--text2);font-weight:500;">${u(e.off)} on offcut</span>` : ''}`));
+        // See more, simple (owner, 2026-11-14): a small summary table, one line on what each means, then the
+        // manual jobs (one line per job), companies and jobs as tables - each opened with a tap.
+        const nn = v => Math.abs(v) < 0.005 ? '<span style="color:var(--text3);">—</span>' : fmt(v);
+        const sg = v => Math.abs(v) < 0.005 ? '<span style="color:var(--text3);">—</span>' : `<b style="color:${v > 0 ? '#b45309' : '#b91c1c'};">${v > 0 ? '+' : ''}${fmt(v)}</b>`;
+        const th = 'padding:6px 8px;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--text2);border-bottom:2px solid var(--border);';
+        const td = 'padding:6px 8px;border-bottom:1px solid var(--border);';
+        const tbl = (heads, rows, empty) => rows.length ? `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead><tr>${heads.map((h, k) => `<th style="${th}text-align:${k ? 'right' : 'left'};">${h}</th>`).join('')}</tr></thead>
+            <tbody>${rows.map(r => `<tr>${r.map((c, k) => `<td style="${td}text-align:${k ? 'right' : 'left'};${k ? 'white-space:nowrap;' : ''}">${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
+          : `<div class="cd-sub" style="padding:6px 0;">${empty}</div>`;
+        const fold = (title, inner) => `<details style="margin-top:10px;border:1px solid var(--border);border-radius:8px;padding:6px 10px;"><summary style="cursor:pointer;font-weight:800;font-size:13px;">${title}</summary><div style="margin-top:6px;">${inner}</div></details>`;
+        const summary = tbl(['', 'Packets', 'Reams'], [
+          ['<b style="color:#1d4ed8;">Issued</b> <small style="color:var(--text2);">from the store</small>', nn(iu.issued.pkts), nn(iu.issued.reams)],
+          [`<b style="color:#15803d;">Used on E jobs</b> <small style="color:var(--text2);">${fmt(iu.usedJobs.length)} printed</small>`, nn(iu.used.pkts), nn(iu.used.reams)],
+          [`<b style="color:#15803d;">Used on manual jobs</b> <small style="color:var(--text2);">${fmt(new Set(iu.manualRows.map(r => extractManualJobCardNo(r.t.notes) || '—')).size)} jobs</small>`, nn(iu.manual.pkts), nn(iu.manual.reams)],
+          ...(hasOther ? [['Sold / damaged', nn(iu.other.pkts), nn(iu.other.reams)]] : []),
+          ['<b style="color:#7c3aed;">Delivered</b>', nn(iu.delivered.pkts), nn(iu.delivered.reams)],
+        ], '');
+        // Manual jobs: one line per job number.
+        const mj = new Map();
+        for (const r of iu.manualRows) {
+          const no = extractManualJobCardNo(r.t.notes) || '—';
+          const e = mj.get(no) || { no, papers: new Set(), pkts: 0, reams: 0, off: false, ms: 0 };
+          e.papers.add([r.t.paper_type, r.t.item_size, r.t.item_gsm ? r.t.item_gsm + 'gsm' : ''].filter(Boolean).join(' '));
+          e[r.un] += r.v; if (r.off) e.off = true;
+          e.ms = Math.max(e.ms, new Date(r.t.created_at).getTime() || 0);
+          mj.set(no, e);
+        }
+        const mjRows = [...mj.values()].sort((a, c) => c.ms - a.ms).map(e => [`<b>${esc(e.no)}</b>${e.off ? ' <small style="color:#0369a1;font-weight:700;">OFFCUT</small>' : ''}<div style="font-size:11px;color:var(--text2);">${esc([...e.papers].join(', '))}</div>`, nn(e.pkts), nn(e.reams), e.ms ? esc(fmtDMY(localDateISO(new Date(e.ms)))) : '']);
+        const coTbl = [...byCo.values()].sort((a, c) => (c.used.pkts + c.used.reams) - (a.used.pkts + a.used.reams))
+          .map(e => [`${esc(e.name)} <small style="color:var(--text2);">${fmt(e.jobs)}</small>`, u(e.used), u(e.delivered)]);
+        const jobTbl = iu.usedJobs.map(x => {
+          const card = partsSum(x, () => true), got = { pkts: x.issued.pkts + x.off.pkts, reams: x.issued.reams + x.off.reams };
+          const dlv = partsSum({ parts: x.parts.map(q => ({ ...q, pk: q.delivered })) }, () => true);
+          const diff = [['pkts', got.pkts - card.pkts], ['reams', got.reams - card.reams]].filter(([, v]) => Math.abs(v) >= 0.005)
+            .map(([un, v]) => `${sg(v)} ${un}`).join(' ') || sg(0);
+          return [job(x.j), u(card), u(got), u(dlv), diff];
+        });
         return tile('issued-used', 'stock cd-wide', 'Packets issued vs used vs delivered', value, sub, iu.loaded ? () =>
-          `<div class="cd-sub">Issued = all paper that left the store in the period (the same as the Paper issued tile). Used = the jobs whose printing was done in the period (now in Coating or later, Ready or Delivered): their job-card packets for the 1st, 2nd and 3rd paper (+ approved extra packets for each), each in its own unit (reams for paper, pkts for board). The offcut issued to those jobs (Issue buttons, any stage) is part of Used too (that offcut came out of issued paper). Manual jobs = the Manual Job Card stock-outs in the period, off fresh paper or offcut. Delivered = all the used packets of the jobs that have a delivery - a partial one too; a MIL job counts per delivery, as the Sale Report does. On each job: what the store issued to it (any date) against its card - more in orange, less in red.</div>`
-          + head(`Manual jobs · ${fmt(iu.manualRows.length)} · ${u(iu.manual)}`)
-          + list(manualList, 'No manual job in this period')
-          + (otherList.length ? head(`Sold / damaged / adjustment · ${u(iu.other)}`) + list(otherList, '') : '')
-          + head(`By company · ${fmt(byCo.size)}`)
-          + list(coRows, 'No job left Printing in this period')
-          + head(`Jobs · ${fmt(iu.usedJobs.length)} · issued ${u(iu.issued)} · used ${u(iu.used)} · delivered ${u(iu.delivered)}`)
-          + list(iu.usedJobs.map(x => row(job(x.j), `issued to it ${u(x.issued)} · card ${partsTxt(x)}${gap(x)} · delivered ${u(partsSum({ parts: x.parts.map(q => ({ ...q, pk: q.delivered })) }, () => true))} · left Printing ${date(x.ms)}`)), 'No job left Printing in this period')
-          + (iu.waived.length ? head(`Processed without paper · ${fmt(iu.waived.length)} (not counted)`) + list(iu.waived.map(x => row(job(x.j), `card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'} · left Printing ${date(x.ms)}`)), '') : '') : null);
+          summary
+          + `<div class="cd-sub" style="margin-top:8px;"><b>Issued</b> = paper out of the store. <b>Used</b> = the job cards of the jobs printed in this period + manual jobs (fresh paper or offcut). <b>Delivered</b> = the used packets of the jobs that shipped. Where every packet went: <b>Where the issued paper went</b>.</div>`
+          + fold(`Manual jobs · ${fmt(mj.size)}`, tbl(['Manual job', 'Packets', 'Reams', 'Date'], mjRows, 'No manual job in this period'))
+          + (otherList.length ? fold(`Sold / damaged · ${fmt(iu.otherRows.length)}`, list(otherList, '')) : '')
+          + fold(`By company · ${fmt(byCo.size)}`, tbl(['Company (jobs)', 'Used', 'Delivered'], coTbl, 'No job printed in this period'))
+          + fold(`Jobs printed · ${fmt(iu.usedJobs.length)}`, tbl(['Job', 'Card', 'Issued to it', 'Delivered', 'Difference'], jobTbl, 'No job printed in this period')
+              + '<div class="cd-sub" style="margin-top:4px;">Difference: issued to it more (orange) or less (red) than its card.</div>')
+          + (iu.waived.length ? fold(`Processed without paper · ${fmt(iu.waived.length)} (not counted)`, list(iu.waived.map(x => row(job(x.j), `card ${fmt(x.pk)} ${x.ream ? 'reams' : 'pkts'}`)), '')) : '') : null);
       })()}
       ${(() => {
         // Where the issued paper went (owner, 2026-11-14): the paper issued in the period, followed to today.
