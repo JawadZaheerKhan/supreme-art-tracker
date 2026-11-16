@@ -5174,6 +5174,24 @@ app.get('/api/reports/job-numbers', requirePermission('rpt_job_number_register',
 // Fresh paper issued to these jobs from the store, any date, net of reversals - the
 // Dashboard's "Packets issued vs used" (owner, 2026-11-03). Offcut is left out: it left
 // the store as fresh paper already, so counting it again would double it. Per job and paper type.
+// The reversals of a job's paper issues (owner, 2026-11-16) - for the job's History; a reversal row carries no job
+// of its own, the issue it undid does.
+app.get('/api/jobs/:id/paper-reversals', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    if (!(id > 0)) return res.json([]);
+    res.json(await sql`
+      SELECT r.id, r.created_at, r.user_email, r.actor_name, r.change, r.reverses_tx_id, o.created_at AS issued_at,
+             i.paper_type, i.size, i.gsm, i.brand, COALESCE(i.is_offcut, false) AS offcut
+        FROM inventory_transactions r
+        JOIN inventory_transactions o ON o.id = r.reverses_tx_id
+        LEFT JOIN inventory_items i ON i.id = r.item_id
+       WHERE o.job_id = ${id}
+       ORDER BY r.created_at`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 app.post('/api/reports/job-issued', requireAuth, async (req, res) => {
   try {
     await dbReady;

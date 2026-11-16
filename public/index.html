@@ -12130,6 +12130,28 @@ function jhPaperLabel(it) {
 }
 // Which History lines open an issuance: stock issues, and the old automatic
 // "auto-consumed from offcut" at CTP (before 16 Sep 2026).
+// A job's History with its paper issues' reversals in it (owner, 2026-11-16): each reversal its own line, and the
+// issue it undid says "(reversed on ...)".
+function jhWithReversals(audit, revs) {
+  const rows = Array.isArray(audit) ? audit.slice() : [];
+  const list = Array.isArray(revs) ? revs : [];
+  if (!list.length) return rows;
+  const revOf = new Map(list.map(r => [Number(r.reverses_tx_id), r]));
+  const day = t => fmtDMY(localDateISO(new Date(t)));
+  for (let k = 0; k < rows.length; k++) {
+    const a = rows[k];
+    const ids = a && a.metadata && Array.isArray(a.metadata.tx_ids) ? a.metadata.tx_ids.map(Number) : [];
+    const hit = ids.map(x => revOf.get(x)).filter(Boolean);
+    if (hit.length && jhIsIssueEntry(a)) rows[k] = { ...a, summary: `${a.summary || ''} (reversed on ${day(hit[0].created_at)})` };
+  }
+  for (const r of list) {
+    const sheets = Math.abs(+r.change || 0), ps = packetSize(r.paper_type || '');
+    const paper = [r.paper_type, r.size, r.gsm ? r.gsm + 'gsm' : ''].filter(Boolean).join(' ') + (r.brand ? ' · ' + r.brand : '') + (r.offcut ? ' (offcut)' : '');
+    rows.push({ id: -Number(r.id), action: 'job.paper_reversed', created_at: r.created_at, user_email: r.user_email, actor_name: r.actor_name || '',
+      summary: `Paper issue reversed: ${fmtPkts(sheets / ps, { keepZero: true })} ${packetUnitLabel(r.paper_type || '').toLowerCase()} (${sheets.toLocaleString()} sheets) of ${paper} back to stock — the issue of ${day(r.issued_at)}` });
+  }
+  return rows.sort((x, y) => new Date(y.created_at) - new Date(x.created_at));
+}
 function jhIsIssueEntry(a) {
   return !!a && (a.action === 'job.issue_stock' || (a.action === 'job.process_from_ctp' && /offcut/i.test(a.summary || '')));
 }
@@ -15824,7 +15846,7 @@ async function reverseJobHistory(jobId, auditId) {
 // "2nd paper changed from 0 to 3 packets" - no "->" or "|".
 function jhActionLabel(action) {
   const k = String(action || '');
-  const map = { 'job.create': 'Created', 'job.update': 'Edited', 'job.station': 'Station', 'job.issue_stock': 'Paper issued',
+  const map = { 'job.create': 'Created', 'job.update': 'Edited', 'job.station': 'Station', 'job.issue_stock': 'Paper issued', 'job.paper_reversed': 'Issue reversed',
     'job.process_to_ctp': 'Sent to CTP', 'job.process_from_ctp': 'CTP done', 'job.delete': 'Archived', 'job.restore': 'Restored' };
   if (map[k]) return map[k];
   const t = k.replace(/^job\./, '').replace(/[._]+/g, ' ').trim();
@@ -38162,8 +38184,11 @@ async function openHistory(id) {
     if (el) el.innerHTML = 'Error: ' + e.message;
   });
   try {
-    const audit = await api('GET', `/api/audit?entity_type=job&entity_id=${id}`);
-    document.getElementById('job-audit-content').innerHTML = renderAuditFeed(audit, { jobId: id });
+    const [audit, revs] = await Promise.all([
+      api('GET', `/api/audit?entity_type=job&entity_id=${id}`),
+      api('GET', `/api/jobs/${id}/paper-reversals`).catch(() => []),
+    ]);
+    document.getElementById('job-audit-content').innerHTML = renderAuditFeed(jhWithReversals(audit, revs), { jobId: id });
   } catch(e) {
     document.getElementById('job-audit-content').innerHTML = 'Error: ' + e.message;
   }
