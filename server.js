@@ -8428,7 +8428,10 @@ app.post('/api/station/machine-ops', requireStationUser, async (req, res) => {
     const today = businessDateISO();
     const machines = await stationMachineList(sql);
     const { from, assign } = await machineOpsFor(sql, today);
-    const people = [...new Set(machines.flatMap(m => (Array.isArray(m.persons) ? m.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean)))].sort((a, b) => a.localeCompare(b));
+    // "+ someone else" (owner, 2026-11-16): every active operator in Users -> Operators - a machine with no PIN
+    // (breaking, driver, loader...) too, not only the station machines; QC / QA people are not operators.
+    const everyone = await sql`SELECT persons FROM operators WHERE active AND COALESCE(kind, '') = '' AND persons IS NOT NULL`;
+    const people = [...new Set([...machines, ...everyone].flatMap(m => (Array.isArray(m.persons) ? m.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean)))].sort((a, b) => a.localeCompare(b));
     res.json({ date: today, from, assign, people,
       machines: machines.map(m => ({ name: m.name, code: m.machine_code || '', persons: (Array.isArray(m.persons) ? m.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean) })) });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
