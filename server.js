@@ -5226,24 +5226,32 @@ app.get('/api/reports/paper-trace', requireAuth, async (req, res) => {
     const fromMs = day(req.query.from) ?? 0, toDay = day(req.query.to), now = Date.now();
     const endMs = Math.min(now, toDay != null ? toDay + 86400000 : now);
     const startIso = new Date(fromMs).toISOString(), endIso = new Date(endMs).toISOString();
-    const jobs = await sql`
-      WITH p AS (
-        SELECT t.job_id, i.paper_type, SUM(-t.change)::float AS s
-          FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id
+    // Every paper the jobs that got fresh paper in the period were issued (owner, 2026-11-16) - each paper (type,
+    // size, gsm, offcut or not) apart, with the period's fresh part and all of it (fresh + offcut, less what came back),
+    // so the Dashboard can give the card's packets to the paper that matches the card first.
+    const rows = await sql`
+      WITH js AS (
+        SELECT DISTINCT t.job_id FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id
          WHERE t.job_id IS NOT NULL AND COALESCE(i.is_offcut, false) = false AND t.reason = 'job-consumed' AND t.change < 0
            AND t.created_at >= ${startIso}::timestamptz AND t.created_at < ${endIso}::timestamptz
            AND t.reverses_tx_id IS NULL
            AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
-           AND (t.deleted_at IS NULL OR t.deleted_scope IS DISTINCT FROM 'history')
-         GROUP BY t.job_id, i.paper_type)
-      SELECT p.job_id, p.paper_type, p.s AS s_period, (j.id IS NULL OR j.deleted_at IS NOT NULL) AS deleted, j.name, j.client,
-             (SELECT SUM(-t.change) FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id
-               WHERE t.job_id = p.job_id AND i.paper_type IS NOT DISTINCT FROM p.paper_type
-                 AND ((COALESCE(i.is_offcut, false) = false AND t.reason = 'job-consumed' AND t.change < 0)
-                   OR (COALESCE(i.is_offcut, false) = true AND t.reason IN ('job-consumed', 'job-auto-offcut', 'job-auto-offcut-refund')))
-                 AND t.reverses_tx_id IS NULL
-                 AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id))::float AS s_total
-        FROM p LEFT JOIN jobs j ON j.id = p.job_id`;
+           AND (t.deleted_at IS NULL OR t.deleted_scope IS DISTINCT FROM 'history'))
+      SELECT t.job_id, i.paper_type, i.size, i.gsm::text AS gsm, COALESCE(i.is_offcut, false) AS offcut,
+             SUM(CASE WHEN COALESCE(i.is_offcut, false) = false AND t.reason = 'job-consumed' AND t.change < 0
+                       AND t.created_at >= ${startIso}::timestamptz AND t.created_at < ${endIso}::timestamptz
+                       AND (t.deleted_at IS NULL OR t.deleted_scope IS DISTINCT FROM 'history') THEN -t.change ELSE 0 END)::float AS s_period,
+             SUM(-t.change)::float AS s_total
+        FROM inventory_transactions t LEFT JOIN inventory_items i ON i.id = t.item_id
+       WHERE t.job_id IN (SELECT job_id FROM js)
+         AND ((COALESCE(i.is_offcut, false) = false AND t.reason = 'job-consumed' AND t.change < 0)
+           OR (COALESCE(i.is_offcut, false) = true AND t.reason IN ('job-consumed', 'job-auto-offcut', 'job-auto-offcut-refund')))
+         AND t.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+       GROUP BY t.job_id, i.paper_type, i.size, i.gsm, COALESCE(i.is_offcut, false)`;
+    const jIds = [...new Set(rows.map(r => r.job_id))];
+    const jInfo = new Map((jIds.length ? await sql`SELECT id, name, client, deleted_at FROM jobs WHERE id = ANY(${jIds})` : []).map(j => [j.id, j]));
+    const jobs = rows.map(r => { const j = jInfo.get(r.job_id); return { ...r, name: j ? j.name : '', client: j ? j.client : '', deleted: !j || !!j.deleted_at }; });
     // Offcut: the sheets moved in during the period, followed first in, first out through each offcut item.
     const moved = await sql`
       SELECT t.id, t.item_id FROM inventory_transactions t

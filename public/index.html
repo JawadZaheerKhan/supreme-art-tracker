@@ -6646,11 +6646,11 @@ function ceoDashJobParts(j) {
     if (!(base + top > 0)) continue;
     extrasPk += base;
     const it = itemOf(x.inventory_item_id);
-    extras.push({ label, base, pk: base + top, ream: !!(it && isReamPaper(it.paper_type)) });
+    extras.push({ label, base, pk: base + top, ream: !!(it && isReamPaper(it.paper_type)), itemId: x.inventory_item_id });
   }
   const mainIt = itemOf(j.inventory_item_id);
   const mainBase = Math.max(0, total - extrasPk), mainTop = topFor(null);
-  const main = mainBase + mainTop > 0 ? [{ label: '1st', base: mainBase, pk: mainBase + mainTop, ream: !!(mainIt && isReamPaper(mainIt.paper_type)) }] : [];
+  const main = mainBase + mainTop > 0 ? [{ label: '1st', base: mainBase, pk: mainBase + mainTop, ream: !!(mainIt && isReamPaper(mainIt.paper_type)), itemId: j.inventory_item_id }] : [];
   return [...main, ...extras];
 }
 // The jobs counted as Used in a period: every job that left Printing in it (now in
@@ -7428,11 +7428,17 @@ function renderCeoDash() {
         if (!ready) return tile('paper-balance', 'stock cd-wide', 'Where the issued paper went', b && b.error ? '—' : '…', b && b.error ? 'could not load: ' + esc(b.error) : 'loading…', null);
         const add = (a, x) => { a.pkts += +x.pkts || 0; a.reams += +x.reams || 0; return a; };
         const unOf = t => isReamPaper(t) ? 'reams' : 'pkts';
-        // Per job: issued in the period / ever, per unit.
+        // Per job: each paper it got (type, size, gsm, offcut or not) - issued in the period / ever.
+        const keyOf = (t, sz, g, off) => [t, sz, g, off ? 'offcut' : ''].map(x => String(x == null ? '' : x).trim().toLowerCase()).join('|');
+        const itKey = id => { const it = (inventoryAll || []).find(i => i.id === Number(id)); return it ? keyOf(it.paper_type, it.size, it.gsm, it.is_offcut) : ''; };
         const per = new Map();
         for (const r of b.jobs) {
-          const e = per.get(r.job_id) || { id: r.job_id, name: r.name, deleted: r.deleted, period: Z(), total: Z() };
+          const e = per.get(r.job_id) || { id: r.job_id, name: r.name, deleted: r.deleted, period: Z(), total: Z(), keys: new Map() };
           const un = unOf(r.paper_type), ps = packetSize(r.paper_type || '');
+          const k = keyOf(r.paper_type, r.size, r.gsm, r.offcut);
+          const kk = e.keys.get(k) || { un, period: 0, total: 0 };
+          kk.period += (+r.s_period || 0) / ps; kk.total += (+r.s_total || 0) / ps;
+          e.keys.set(k, kk);
           e.period[un] += (+r.s_period || 0) / ps; e.total[un] += (+r.s_total || 0) / ps;
           per.set(r.job_id, e);
         }
@@ -7452,12 +7458,32 @@ function renderCeoDash() {
           const r = isMil ? (totalPk > 0 ? jobDeliveredPackets(j) / totalPk : 0) : 0;
           const card = Z(), dlv = Z();
           for (const q of parts) { const k = q.ream ? 'reams' : 'pkts'; card[k] += q.pk; dlv[k] += isMil ? q.base * r : (shipped ? q.pk : 0); }
-          const x = { e, j, used: Z(), dlv: Z(), diff: Z() };
-          for (const k of ['pkts', 'reams']) {
-            const p = e.period[k]; if (z(p)) continue;
-            const share = p / Math.max(e.total[k], p);
-            x.used[k] = card[k] * share; x.dlv[k] = Math.min(dlv[k], card[k]) * share; x.diff[k] = p - x.used[k];
+          // The card's packets go to the paper that matches it first (owner, 2026-11-16); what is left is shared out
+          // over the job's other papers of that unit (by what is left of them, else by what they got).
+          const usedK = new Map([...e.keys.keys()].map(k => [k, 0]));
+          const leftK = new Map([...e.keys].map(([k, v]) => [k, v.total]));
+          const rest = Z();
+          for (const q of parts) {
+            const un = q.ream ? 'reams' : 'pkts';
+            let need = q.pk;
+            const k = itKey(q.itemId);
+            if (k && leftK.has(k)) { const take = Math.min(need, Math.max(0, leftK.get(k))); usedK.set(k, usedK.get(k) + take); leftK.set(k, leftK.get(k) - take); need -= take; }
+            rest[un] += need;
           }
+          for (const un of ['pkts', 'reams']) {
+            if (z(rest[un])) continue;
+            const ks = [...e.keys].filter(([, v]) => v.un === un).map(([k]) => k);
+            if (!ks.length) continue;
+            const remSum = ks.reduce((a, k) => a + Math.max(0, leftK.get(k)), 0), totSum = ks.reduce((a, k) => a + e.keys.get(k).total, 0);
+            for (const k of ks) usedK.set(k, usedK.get(k) + rest[un] * (remSum > 0 ? Math.max(0, leftK.get(k)) / remSum : totSum > 0 ? e.keys.get(k).total / totSum : 1 / ks.length));
+          }
+          const x = { e, j, used: Z(), dlv: Z(), diff: Z() };
+          for (const [k, v] of e.keys) {
+            if (z(v.period)) continue;
+            const u = usedK.get(k) * v.period / Math.max(v.total, v.period);   // this period's share of that paper
+            x.used[v.un] += u; x.diff[v.un] += v.period - u;
+          }
+          for (const un of ['pkts', 'reams']) x.dlv[un] = card[un] > 0 ? x.used[un] * Math.min(1, dlv[un] / card[un]) : 0;
           E.delivered.pkts += x.dlv.pkts; E.delivered.reams += x.dlv.reams;
           E.notDelivered.pkts += x.used.pkts - x.dlv.pkts; E.notDelivered.reams += x.used.reams - x.dlv.reams;
           add(E.diff, x.diff);
