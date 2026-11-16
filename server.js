@@ -8306,10 +8306,25 @@ app.get('/api/dashboard/running-now', requirePermission('dashboard_tab_access', 
         FROM line_clearance
        WHERE deleted_at IS NULL
        ORDER BY machine, entry_date DESC, entry_time DESC, created_at DESC`;
-    const ids = [...new Set(rows.map(r => lcJobId(r.new_job)).filter(Boolean))];
+    // Cleared once (owner, 2026-11-16) on every machine but the printing and die cutting / embellishment ones:
+    // their QA entries from before that moment no longer show here (nothing is deleted). The moment is saved the
+    // first time this runs; a QA entry made after it shows as usual.
+    let clr = (await sql`SELECT value FROM schema_meta WHERE key = 'running_now_cleared_at'`)[0];
+    if (!clr) {
+      await sql`INSERT INTO schema_meta (key, value) VALUES ('running_now_cleared_at', ${new Date().toISOString()}) ON CONFLICT (key) DO NOTHING`;
+      clr = (await sql`SELECT value FROM schema_meta WHERE key = 'running_now_cleared_at'`)[0];
+    }
+    const clearedAt = clr ? Date.parse(clr.value) : NaN;
+    const machines = await sql`SELECT name, machine_code, roles FROM operators WHERE active AND COALESCE(kind, '') = '' AND NOT is_manager`;
+    const low = v => String(v || '').trim().toLowerCase();
+    const mByName = new Map(machines.map(m => [low(m.name), m])), mByCode = new Map(machines.filter(m => m.machine_code).map(m => [low(m.machine_code), m]));
+    const isCleared = r => !isQaMachine(mByName.get(low(r.machine)) || mByCode.get(low(r.machine_code)))
+      && Number.isFinite(clearedAt) && new Date(r.created_at).getTime() <= clearedAt;
+    const ids = [...new Set(rows.filter(r => !isCleared(r)).map(r => lcJobId(r.new_job)).filter(Boolean))];
     const jobs = ids.length ? await sql`SELECT id, name, client FROM jobs WHERE id = ANY(${ids}) AND deleted_at IS NULL` : [];
     const byId = new Map(jobs.map(j => [j.id, j]));
     res.json(rows.map(r => {
+      if (isCleared(r)) return { id: r.id, machine: r.machine, machine_code: r.machine_code, sections: r.sections, new_job: '', new_company: '', prev_job: '', entry_date: r.entry_date, entry_time: '', job_id: null, job_name: '', cleared: true };
       const j = byId.get(lcJobId(r.new_job));
       return { ...r, job_id: j ? j.id : null, job_name: j ? j.name : '', new_company: r.new_company || (j ? j.client : '') || '' };
     }));
@@ -8349,8 +8364,12 @@ app.post('/api/station/line-clearance-report', requireStationUser, async (req, r
 });
 // ── QA at the Station: waiting jobs + today's operators (owner, 2026-11-13) ──
 // The machines (not QC / QA / manager entries) with their ID and people.
+// Printing and die cutting / embellishment machines (owner, 2026-11-16): the ones QA follows - Running now keeps
+// their job, and QA's Pending lists only jobs that came off them.
+const QA_MACHINE_ROLES = ['print', 'diecut', 'embellish'];
+const isQaMachine = m => !!m && Array.isArray(m.roles) && m.roles.some(r => QA_MACHINE_ROLES.includes(r));
 async function stationMachineList(sql) {
-  return sql`SELECT name, machine_code, persons FROM operators
+  return sql`SELECT name, machine_code, persons, roles FROM operators
               WHERE active AND COALESCE(kind, '') = '' AND NOT is_manager AND COALESCE(pin, '') <> '' ORDER BY name`;
 }
 // Who works on which machine on a date: that day's choice, else the last day saved before it.
@@ -8369,7 +8388,8 @@ app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
     const v = await verifyQaPin(sql, req.body.pin);
     if (v.error) return res.status(v.status).json({ error: v.error });
     const yday = yesterdayISO(), today = businessDateISO();
-    const machines = await stationMachineList(sql);
+    // Only jobs off a printing or die cutting / embellishment machine (owner, 2026-11-16).
+    const machines = (await stationMachineList(sql)).filter(isQaMachine);
     const byM = new Map(machines.map(m => [String(m.name).trim().toLowerCase(), m]));
     const jobs = await sql`SELECT id, name, client, log FROM jobs WHERE deleted_at IS NULL AND updated_at > NOW() - INTERVAL '3 days'`;
     const lcs = await sql`SELECT machine, machine_code, prev_job FROM line_clearance WHERE deleted_at IS NULL AND entry_date >= ${yday}`;
