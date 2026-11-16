@@ -2393,6 +2393,10 @@
   .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   .lc-job-link { font-weight: 600; color: inherit; cursor: pointer; text-decoration: underline; text-decoration-color: #c9a9a9; text-underline-offset: 3px; }
   .lc-job-link:hover { color: #A32D2D; text-decoration-color: #A32D2D; }
+  .lc-secpick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+  .lc-secpick-btn { padding: 8px 16px; border: 2px solid var(--border); border-radius: 20px; background: var(--bg); font-weight: 700; font-size: 14px; cursor: pointer; }
+  .lc-secpick-btn.is-on { border-color: #A32D2D; background: #A32D2D; color: #fff; }
+  .lc-secpick-note { font-size: 12px; color: var(--text2); }
   .lc-cell-in { width: 7.5ch; padding: 1px 2px; border: 0; border-bottom: 1px dashed transparent; background: transparent; font: inherit; font-weight: 700; color: inherit; border-radius: 0; }
   .lc-cell-in:hover { border-bottom-color: var(--border2); }
   .lc-cell-in:focus { outline: none; border-bottom: 2px solid #A32D2D; background: #fff7ed; }
@@ -41211,11 +41215,13 @@ function stationQaJob(which, value) {
   if (!String(value).trim() || lcIsSpecialJob(value)) return;
   _lcJobTimers[which] = setTimeout(async () => {
     try {
-      const r = await api('GET', '/api/station/job-company?job=' + encodeURIComponent(value));
+      const mq = which === 'prev' && stationQa && stationQa.machine ? '&machine=' + encodeURIComponent(stationQa.machine) : '';
+      const r = await api('GET', '/api/station/job-company?job=' + encodeURIComponent(value) + mq);
       if (!stationQa || stationQa[which + '_job'] !== value) return;   // typed on since
       const el = document.getElementById('lc-' + which + '-company');
       if (r && r.found) { stationQa[which + '_company'] = r.client; if (el) el.innerHTML = lcCompanyOptions(r.client); if (hint) hint.textContent = ''; }
       else if (hint) hint.textContent = 'not in the app - pick the company';
+      if (which === 'prev' && r && r.found) stationQaSectionFromStage(r.stage);
     } catch (e) { /* offline: QA types it */ }
   }, 450);
 }
@@ -41242,7 +41248,41 @@ function stationQaMachine(name) {
   q.machine_code = (m && m.code) || '';
   const hit = m && lcSectionsForRoles(m.roles);
   if (hit) { q.form = hit.form; q.sections = hit.sections; q.points = {}; }
+  q.section_note = '';
   stationRender();
+  // A previous job already typed: a die + embellishment machine takes the section from what it did there.
+  if (q.prev_job && !lcIsSpecialJob(q.prev_job) && stationQaSecOptions(m).length > 1) stationQaJob('prev', q.prev_job);
+}
+// A machine that does work of both forms (Die Cutting and Embellishment / Coating): its choices [form, section].
+function stationQaSecOptions(m) {
+  const hits = ((m && m.roles) || []).map(r => LC_ROLE_SECTION[r]).filter(Boolean).filter(h => h[1] !== undefined);
+  const out = [];
+  for (const h of hits) if (!out.some(o => o[0] === h[0] && o[1] === h[1])) out.push(h);
+  return new Set(out.map(o => o[0])).size > 1 ? out : [];
+}
+const lcSecLabel = n => n === 'Coating' ? 'Embellishment / Coating' : n;
+function stationQaPickSection(form, name, note) {
+  const q = stationQa;
+  if (!q) return;
+  if (!(q.form === form && q.sections.length === 1 && q.sections[0] === name)) { q.form = form; q.sections = [name]; q.points = {}; }
+  q.section_note = note || '';
+  const act = document.activeElement && document.activeElement.id;
+  stationRender();
+  if (act) { const el = document.getElementById(act); if (el && el.focus) { el.focus(); try { const n = el.value.length; el.setSelectionRange(n, n); } catch (e) { /* not a text box */ } } }
+}
+// The previous job's latest entry on this machine says what it did there: Die Cutting or Embellishment. Points
+// QA already ticked for another section are left alone.
+function stationQaSectionFromStage(stage) {
+  const q = stationQa;
+  if (!q || !stage) return;
+  const opts = stationQaSecOptions(stationQaMachines.find(x => x.name === q.machine));
+  if (opts.length < 2) return;
+  const want = /die/i.test(stage) ? 'Die Cutting' : /coat|embellish/i.test(stage) ? 'Coating' : '';
+  const o = opts.find(x => x[1] === want);
+  if (!o) return;
+  const ticked = Object.values(q.points || {}).some(Boolean);
+  if (ticked && !(q.form === o[0] && q.sections.includes(o[1]))) return;
+  stationQaPickSection(o[0], o[1], `from ${lcJobNo(q.prev_job)}'s entry on this machine`);
 }
 function stationQaSection(form, name) {
   const q = stationQa;
@@ -41283,7 +41323,13 @@ function stationQaHtml() {
         <h3>Machine &amp; jobs</h3>
         <div class="lc-grid">
           <div class="lc-field lc-wide"><label>Machine <span class="urdu" dir="rtl" lang="ur">مشین</span>${q.sections.map(n => ` <span class="lc-sec-tag">${esc(n)}</span>`).join('')}</label>
-            ${stationMpickHtml(machineOpts, q.machine)}</div>
+            ${stationMpickHtml(machineOpts, q.machine)}
+            ${(() => {
+              const opts = stationQaSecOptions(stationQaMachines.find(x => x.name === q.machine));
+              if (opts.length < 2) return '';
+              return `<div class="lc-secpick">${opts.map(o => `<button type="button" class="lc-secpick-btn${q.form === o[0] && q.sections.includes(o[1]) ? ' is-on' : ''}" onclick="stationQaPickSection('${o[0]}', ${esc(JSON.stringify(o[1]))})">${esc(lcSecLabel(o[1]))}</button>`).join('')}
+                <span class="lc-secpick-note">${q.section_note ? esc(q.section_note) : 'this machine does both - pick what the job was'}</span></div>`;
+            })()}</div>
           <div class="lc-field"><label>Date <span class="urdu" dir="rtl" lang="ur">تاریخ</span></label><input type="date" value="${esc(q.entry_date)}" onchange="stationQaSet('entry_date', this.value)"></div>
           <div class="lc-field"><label>Time <span class="urdu" dir="rtl" lang="ur">وقت</span></label><input type="time" value="${esc(q.entry_time)}" onchange="stationQaSet('entry_time', this.value)"></div>
           <div class="lc-field"><label>QC <span class="urdu" dir="rtl" lang="ur">کیو سی</span></label>
@@ -41309,7 +41355,7 @@ function stationQaHtml() {
 function lcJobFields(q, which, label, ur, coLabel) {
   // Number pad on a tablet (owner, 2026-11-12); company = a dropdown of the job-card companies.
   return `<div class="lc-field"><label>${label} <span class="urdu" dir="rtl" lang="ur">${ur}</span></label>
-      <input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${esc(q[which + '_job'] || '')}" oninput="stationQaJob('${which}', this.value)"></div>
+      <input type="text" id="lc-${which}-job" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${esc(q[which + '_job'] || '')}" oninput="stationQaJob('${which}', this.value)"></div>
     <div class="lc-field"><label>${coLabel} <span id="lc-${which}-hint" class="lc-hint">${lcIsSpecialJob(q[which + '_job']) ? 'manual job - pick the company' : ''}</span></label>
       <select id="lc-${which}-company" onchange="stationQaCompany('${which}', this)">${lcCompanyOptions(q[which + '_company'])}</select></div>`;
 }

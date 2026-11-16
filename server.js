@@ -8282,8 +8282,17 @@ app.get('/api/station/job-company', requireStationUser, async (req, res) => {
     const sql = getDb();
     const id = lcJobId(req.query.job);
     if (!id) return res.json({ found: false });
-    const j = (await sql`SELECT id, client FROM jobs WHERE id = ${id} AND deleted_at IS NULL`)[0];
-    res.json(j ? { found: true, client: j.client || '' } : { found: false });
+    const j = (await sql`SELECT id, client, log FROM jobs WHERE id = ${id} AND deleted_at IS NULL`)[0];
+    if (!j) return res.json({ found: false });
+    // With ?machine=: the stage of the job's latest entry on that machine (owner, 2026-11-16) - the QA screen picks
+    // Die Cutting or Embellishment from it for a machine that does both.
+    let stage = '';
+    const mach = String(req.query.machine || '').trim().toLowerCase();
+    if (mach) for (const e of (Array.isArray(j.log) ? j.log : [])) {
+      const m = /^(.+?)\s*·\s*([^()]+?)\s*\((.+?)\)$/.exec(String((e && e.by) || ''));
+      if (m && m[2].trim().toLowerCase() === mach) stage = m[3].trim();   // the log runs oldest first: the latest wins
+    }
+    res.json({ found: true, client: j.client || '', stage });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Every company on a job card - QA picks a manual job's (4...) company from it.
@@ -8529,16 +8538,20 @@ async function lineClearanceRows(sql, from, to) {
         // a die + emboss machine's QA entry is under Coating, its waste was entered as Die Cutting Waste). An
         // entry made later than QA's counts the same.
         const p = pj.particulars || {}, lowM = String(r.machine || '').trim().toLowerCase();
-        let onMachine = null;
+        const onM = new Set();
         for (const k of Object.keys(p)) {
           if (!/waste/i.test(k) || !p[k] || !Array.isArray(p[k].entries)) continue;
-          for (const e of p[k].entries) if (e && String(e.machine || '').trim().toLowerCase() === lowM) onMachine = (onMachine || 0) + parseQtyMult(e.qty || '').total;
+          for (const e of p[k].entries) if (e && String(e.machine || '').trim().toLowerCase() === lowM) { total = (total || 0) + parseQtyMult(e.qty || '').total; onM.add(k); }
         }
-        if (onMachine != null) total = onMachine;
-        else {
-          // No entry names this machine (older cards): the waste of the entry's own section(s), as before.
-          const keys = new Set((r.sections || []).flatMap(sec => LC_SECTION_WASTE_KEYS[sec] || []));
-          for (const k of keys) { const v = rowSum(p[k], r.machine); if (v != null) total = (total || 0) + v; }
+        // The entry's own section(s) too: an older row with no machine on it (a plain quantity) counts; a row that
+        // names only other machines counts only when nothing at all was entered on this machine (as before).
+        const keys = new Set((r.sections || []).flatMap(sec => LC_SECTION_WASTE_KEYS[sec] || []));
+        for (const k of keys) {
+          if (onM.has(k)) continue;
+          const row = p[k];
+          const legacy = row && !(Array.isArray(row.entries) && row.entries.length);
+          if (!legacy && onM.size) continue;
+          const v = rowSum(row, r.machine); if (v != null) total = (total || 0) + v;
         }
       }
       r.jc_waste = total;
