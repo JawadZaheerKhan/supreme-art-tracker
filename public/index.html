@@ -7013,8 +7013,9 @@ function ceoDashFigures() {
     if (!(t.change < 0)) continue;
     const un = isReamPaper(t.paper_type) ? 'reams' : 'pkts', v = Math.abs(t.change) / packetSize(t.paper_type || ''), off = !!t.item_is_offcut;
     if (t.reason === 'manual-job-card') { iu.manual[un] += v; iu.manualRows.push({ t, v, un, off }); }
-    else if (t.job_id) { if (!off) iu.toE[un] += v; }          // off offcut: already in the E job's card packets
+    // Moved to offcut, a job number on it or not (owner, 2026-11-16: 6 such October rows were counted as "other").
     else if (!off && t.reason === 'offcut') iu.toOffcut[un] += v;
+    else if (t.job_id) { if (!off) iu.toE[un] += v; }          // off offcut: already in the E job's card packets
     else { iu.other[un] += v; iu.otherRows.push({ t, v, un, off }); }
   }
   iu.manualRows.sort((a, b) => new Date(b.t.created_at) - new Date(a.t.created_at));
@@ -7377,7 +7378,7 @@ function renderCeoDash() {
         const cos = new Map();
         const coOf = name => { const nm = companyNameOf(name) || '—', k = nm.toLowerCase(); if (!cos.has(k)) cos.set(k, { name: nm, issued: Zc(), used: Zc(), delivered: Zc(), jobs: [] }); return cos.get(k); };
         for (const t of (ceoDash.txs || [])) {
-          if (!(t.change < 0) || !t.job_id || t.reason === 'manual-job-card') continue;
+          if (!(t.change < 0) || !t.job_id || t.reason === 'manual-job-card' || t.reason === 'offcut') continue;   // moved to offcut has its own line
           const jj = (jobs || []).find(x => x.id === t.job_id);
           coOf(jj ? jj.client : '(job deleted)').issued[isReamPaper(t.paper_type) ? 'reams' : 'pkts'] += Math.abs(t.change) / packetSize(t.paper_type || '');
         }
