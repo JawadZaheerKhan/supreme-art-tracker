@@ -3186,7 +3186,8 @@ app.get('/api/cost-batches', requirePermission('rpt_cost_report', 'view'), async
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Dashboard Report warnings: the ignored ones (owner, 2026-11-11).
-const WARNING_KINDS = new Set(['wastage-negative', 'packets-over']);
+const WARNING_KINDS = new Set(['wastage-negative', 'packets-over', 'stale-paper']);   // stale-paper: Old paper not reversed (owner, 2026-11-16)
+const WARNING_TEXT = { 'wastage-negative': 'wastage below 0', 'packets-over': 'packets over the job card', 'stale-paper': 'old paper not reversed' };
 app.get('/api/report-warnings/ignored', requirePermission('dashboard_tab_access', 'view'), async (req, res) => {
   try {
     await dbReady;
@@ -3207,7 +3208,7 @@ app.post('/api/report-warnings/ignore', requirePermission('dash_btn_ignore_warni
       VALUES (${kind}, ${jobId}, ${idx}, ${value}, ${req.user?.email || null})
       ON CONFLICT (kind, job_id, delivery_index) DO UPDATE SET value = EXCLUDED.value, ignored_by = EXCLUDED.ignored_by, ignored_at = NOW()`;
     await logAudit(sql, req, { action: 'report_warning.ignore', entityType: 'job', entityId: jobId,
-      summary: `Dashboard: ignored the ${kind === 'wastage-negative' ? 'wastage below 0' : 'packets over the job card'} warning on Job E-${jobId}, delivery #${idx + 1}${value !== null ? ' (' + value + ')' : ''}` });
+      summary: `Dashboard: ignored the ${WARNING_TEXT[kind]} warning on Job E-${jobId}${kind === 'stale-paper' ? '' : ', delivery #' + (idx + 1)}${value !== null ? ' (' + value + ')' : ''}` });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -3219,7 +3220,7 @@ app.delete('/api/report-warnings/ignore/:kind/:job_id/:index', requirePermission
     if (!WARNING_KINDS.has(kind) || !(jobId > 0) || !(idx >= 0)) return res.status(400).json({ error: 'Not a warning.' });
     await sql`DELETE FROM finance.report_warning_ignores WHERE kind = ${kind} AND job_id = ${jobId} AND delivery_index = ${idx}`;
     await logAudit(sql, req, { action: 'report_warning.unignore', entityType: 'job', entityId: jobId,
-      summary: `Dashboard: the ${kind === 'wastage-negative' ? 'wastage below 0' : 'packets over the job card'} warning on Job E-${jobId}, delivery #${idx + 1} shows again` });
+      summary: `Dashboard: the ${WARNING_TEXT[kind]} warning on Job E-${jobId}${kind === 'stale-paper' ? '' : ', delivery #' + (idx + 1)} shows again` });
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
