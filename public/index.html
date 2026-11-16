@@ -12152,6 +12152,28 @@ function jhWithReversals(audit, revs) {
   }
   return rows.sort((x, y) => new Date(y.created_at) - new Date(x.created_at));
 }
+// Which paper of the card an issue was (owner, 2026-11-16): "1st paper issued", "2nd paper issued"... - the issued
+// paper (type, size, gsm - any brand) matched with the card's 1st / 2nd / 3rd paper; offcut says so.
+function jhIssueLabel(a, job) {
+  if (job && jhIsOffcutEntry(a, job)) return 'Offcut issued';
+  // What the issue was saved for: primary / secondary / third (older ones: only "secondary" true or false).
+  const m = (a && a.metadata) || {};
+  const saved = { primary: '1st', secondary: '2nd', third: '3rd' }[m.source] || (m.secondary === true ? '2nd' : m.secondary === false ? '1st' : '');
+  if (saved) return saved + ' paper issued';
+  const inv = typeof inventoryAll !== 'undefined' ? inventoryAll : [];
+  const key = it => it ? [it.paper_type, it.size, it.gsm].map(x => String(x == null ? '' : x).trim().toLowerCase()).join('|') : '';
+  const p = (job && job.particulars) || {};
+  const card = job ? [[1, job.inventory_item_id], [2, p.secondary_paper && p.secondary_paper.inventory_item_id], [3, p.third_paper && p.third_paper.inventory_item_id]]
+    .map(([n, id]) => [n, key(inv.find(i => i.id === Number(id)))]).filter(c => c[1]) : [];
+  const nums = new Set();
+  for (const x of jhEntryItems(a, job)) {
+    const k = key(inv.find(i => i.id === Number(x && x.item_id)));
+    const hit = k && card.find(c => c[1] === k);
+    if (hit) nums.add(hit[0]);
+  }
+  const ord = n => ({ 1: '1st', 2: '2nd', 3: '3rd' })[n];
+  return nums.size ? [...nums].sort().map(ord).join(' + ') + ' paper issued' : 'Paper issued';
+}
 function jhIsIssueEntry(a) {
   return !!a && (a.action === 'job.issue_stock' || (a.action === 'job.process_from_ctp' && /offcut/i.test(a.summary || '')));
 }
@@ -15928,7 +15950,7 @@ function renderAuditFeed(rows, opts) {
         return `
       <div class="audit-row${link || txLink ? ' cv-summary-row' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in its report" style="cursor:pointer;"` : txLink ? ` onclick="openTxEditInReport(${a.id}, ${invItemId || 'null'})" title="Open the edited entry in the Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} report" style="cursor:pointer;"` : ''}>
         <div class="audit-time">${timeOf(a.created_at)}</div>
-        <div><span class="audit-tag-badge">${jobId ? esc(jhActionLabel(a.action)) : esc(String(a.action || '').toUpperCase())}</span></div>
+        <div><span class="audit-tag-badge">${jobId ? esc(jhIsIssueEntry(a) ? jhIssueLabel(a, jhJob) : jhActionLabel(a.action)) : esc(String(a.action || '').toUpperCase())}</span></div>
         <div class="audit-desc">${jobId ? jhPlainSummary(a, jhJob) : `<b>${esc(a.summary || '')}</b>`} <span class="audit-by">· by ${esc(jobId ? jhWho(a) : (a.user_email || 'system'))}</span>${issueExtra(a)}${revExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
       </div>`;
       }).join('')}
