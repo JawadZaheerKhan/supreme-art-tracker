@@ -8525,8 +8525,21 @@ async function lineClearanceRows(sql, from, to) {
       r.new_company = r.new_company || (nj ? nj.client : '') || null;
       let total = null;
       if (pj) {
-        const keys = new Set((r.sections || []).flatMap(sec => LC_SECTION_WASTE_KEYS[sec] || []));
-        for (const k of keys) { const v = rowSum((pj.particulars || {})[k], r.machine); if (v != null) total = (total || 0) + v; }
+        // The waste the operator entered on this machine, whatever stage he entered it under (owner, 2026-11-16:
+        // a die + emboss machine's QA entry is under Coating, its waste was entered as Die Cutting Waste). An
+        // entry made later than QA's counts the same.
+        const p = pj.particulars || {}, lowM = String(r.machine || '').trim().toLowerCase();
+        let onMachine = null;
+        for (const k of Object.keys(p)) {
+          if (!/waste/i.test(k) || !p[k] || !Array.isArray(p[k].entries)) continue;
+          for (const e of p[k].entries) if (e && String(e.machine || '').trim().toLowerCase() === lowM) onMachine = (onMachine || 0) + parseQtyMult(e.qty || '').total;
+        }
+        if (onMachine != null) total = onMachine;
+        else {
+          // No entry names this machine (older cards): the waste of the entry's own section(s), as before.
+          const keys = new Set((r.sections || []).flatMap(sec => LC_SECTION_WASTE_KEYS[sec] || []));
+          for (const k of keys) { const v = rowSum(p[k], r.machine); if (v != null) total = (total || 0) + v; }
+        }
       }
       r.jc_waste = total;
     }
