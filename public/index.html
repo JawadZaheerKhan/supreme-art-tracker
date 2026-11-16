@@ -7442,7 +7442,7 @@ function renderCeoDash() {
           e.period[un] += (+r.s_period || 0) / ps; e.total[un] += (+r.s_total || 0) / ps;
           per.set(r.job_id, e);
         }
-        const E = { all: Z(), delivered: Z(), notDelivered: Z(), notPrinted: Z(), diff: Z(), deleted: Z() };
+        const E = { all: Z(), delivered: Z(), notDelivered: Z(), notPrinted: Z(), diff: Z(), deleted: Z(), ignored: Z(), sentOff: Z() };
         const rows = { printed: [], notPrinted: [], deleted: [] };
         for (const e of per.values()) {
           add(E.all, e.period);
@@ -7477,7 +7477,9 @@ function renderCeoDash() {
             const remSum = ks.reduce((a, k) => a + Math.max(0, leftK.get(k)), 0), totSum = ks.reduce((a, k) => a + e.keys.get(k).total, 0);
             for (const k of ks) usedK.set(k, usedK.get(k) + rest[un] * (remSum > 0 ? Math.max(0, leftK.get(k)) / remSum : totSum > 0 ? e.keys.get(k).total / totSum : 1 / ks.length));
           }
-          const x = { e, j, used: Z(), dlv: Z(), diff: Z() };
+          const x = { e, j, used: Z(), dlv: Z(), diff: Z(), gap: Z() };
+          for (const [k, v] of e.keys) x.gap[v.un] += v.total - usedK.get(k);
+          x.fp = Math.round((x.gap.pkts + x.gap.reams * 1000) * 100) / 100;
           for (const [k, v] of e.keys) {
             if (z(v.period)) continue;
             const u = usedK.get(k) * v.period / Math.max(v.total, v.period);   // this period's share of that paper
@@ -7486,7 +7488,12 @@ function renderCeoDash() {
           for (const un of ['pkts', 'reams']) x.dlv[un] = card[un] > 0 ? x.used[un] * Math.min(1, dlv[un] / card[un]) : 0;
           E.delivered.pkts += x.dlv.pkts; E.delivered.reams += x.dlv.reams;
           E.notDelivered.pkts += x.used.pkts - x.dlv.pkts; E.notDelivered.reams += x.used.reams - x.dlv.reams;
-          add(E.diff, x.diff);
+          // Marked (owner, 2026-11-16) while the job's figures stay the same: sent to offcut (only an extra, +), or ignored.
+          const igMap = ceoDash.ignored instanceof Map ? ceoDash.ignored : new Map();
+          const held = kind => { const m = igMap.get(ceoWarnKey(kind, j.id, 0)); return !!m && (m.value === null || Math.abs(+m.value - x.fp) < 0.01); };
+          x.sentOff = held('paper-diff-offcut') && (x.diff.pkts > 0.005 || x.diff.reams > 0.005);
+          x.ignored = !x.sentOff && held('paper-diff');
+          add(x.sentOff ? E.sentOff : x.ignored ? E.ignored : E.diff, x.diff);
           rows.printed.push(x);
         }
         const manualRows = iu.manualRows.filter(r => !r.off), soldRows = iu.otherRows.filter(r => !r.off);
@@ -7516,20 +7523,25 @@ function renderCeoDash() {
             <td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;${strong ? 'font-weight:800;' : ''}">${cell(x.pkts)}</td>
             <td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;${strong ? 'font-weight:800;' : ''}">${cell(x.reams)}</td></tr>`;
         };
-        const offOn = !z(toOff.pkts) || !z(toOff.reams);
+        const sentOn = !z(E.sentOff.pkts) || !z(E.sentOff.reams);
+        const offOn = !z(toOff.pkts) || !z(toOff.reams) || sentOn;
+        const eShown = { pkts: E.all.pkts - E.sentOff.pkts, reams: E.all.reams - E.sentOff.reams };
+        const offShown = { pkts: toOff.pkts + E.sentOff.pkts, reams: toOff.reams + E.sentOff.reams };
         const printedAll = add(add(Z(), E.delivered), E.notDelivered);
         const table = `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;margin:4px 0 8px;">
             <thead><tr><th style="${th}text-align:left;"></th><th style="${th}text-align:right;">Packets</th><th style="${th}text-align:right;">Reams</th></tr></thead>
             <tbody>
             ${line(0, '<span style="color:#1d4ed8;">Issued from the store</span>', iu.issued)}
-            ${line(1, 'E jobs', E.all, { note: `${fmt(per.size)} jobs` })}
+            ${line(1, 'E jobs', eShown, { note: `${fmt(per.size)} jobs` })}
             ${line(2, 'Delivered', E.delivered, { skipEmpty: true })}
             ${line(2, 'Printed, not delivered yet', E.notDelivered, { skipEmpty: true })}
             ${line(2, 'Not printed yet', E.notPrinted, { skipEmpty: true, note: `${fmt(rows.notPrinted.length)} jobs` })}
             ${line(2, 'Issued more (+) / less (−) than the card used', E.diff, { skipEmpty: true, signed: true })}
             ${line(2, 'Job deleted since', E.deleted, { skipEmpty: true })}
+            ${line(2, 'Ignored', E.ignored, { skipEmpty: true, signed: true, note: 'difference you ignored' })}
             ${line(1, 'Manual jobs', manual, { skipEmpty: true, note: `${fmt(new Set(manualRows.map(r => extractManualJobCardNo(r.t.notes) || '—')).size)} jobs` })}
-            ${offOn ? line(1, 'Moved to offcut', toOff) : ''}
+            ${offOn ? line(1, 'Moved to offcut', offShown) : ''}
+            ${sentOn ? line(2, 'Extra sent to offcut from jobs', E.sentOff, { note: 'marked by you - added to offcut by hand' }) : ''}
             ${offOn ? line(2, 'Taken from offcut for E jobs', off.e, { skipEmpty: true }) : ''}
             ${offOn ? line(2, 'Taken from offcut for manual jobs', off.manual, { skipEmpty: true }) : ''}
             ${offOn ? line(2, 'Sold / damaged from offcut', off.other, { skipEmpty: true }) : ''}
@@ -7544,9 +7556,13 @@ function renderCeoDash() {
             <tbody>${trs.map(r => `<tr>${r.map((c, k) => `<td style="${td}text-align:${k ? 'right' : 'left'};${k ? 'white-space:nowrap;' : ''}">${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
           : `<div class="cd-sub" style="padding:6px 0;">${empty}</div>`;
         const fold = (title, inner) => `<details style="margin-top:10px;border:1px solid var(--border);border-radius:8px;padding:6px 10px;"><summary style="cursor:pointer;font-weight:800;font-size:13px;">${title}</summary><div style="margin-top:6px;">${inner}</div></details>`;
-        const diffJobs = rows.printed.filter(x => !z(x.diff.pkts) || !z(x.diff.reams))
+        const canMark = seeBtn('dash_btn_ignore_warning');
+        const markBtn = (x, kind, text, tip) => ` <button class="btn btn-sm" data-acc="dash_btn_ignore_warning" onclick="event.stopPropagation(); ceoDashIgnoreWarning('${kind}', ${x.j.id}, 0, ${x.fp})" title="${tip}" style="padding:1px 7px;font-size:10.5px;margin-left:6px;">${text}</button>`;
+        const diffJobs = rows.printed.filter(x => !x.sentOff && !x.ignored && (!z(x.diff.pkts) || !z(x.diff.reams)))
           .sort((a, c) => (Math.abs(c.diff.pkts) + Math.abs(c.diff.reams) * 5) - (Math.abs(a.diff.pkts) + Math.abs(a.diff.reams) * 5))
-          .map(x => [job(x.j), u(x.e.period), u(x.used), [['pkts', x.diff.pkts], ['reams', x.diff.reams]].filter(([, v]) => !z(v)).map(([un, v]) => `${sv(v)} ${un}`).join(' ')]);
+          .map(x => [job(x.j), u(x.e.period), u(x.used), [['pkts', x.diff.pkts], ['reams', x.diff.reams]].filter(([, v]) => !z(v)).map(([un, v]) => `${sv(v)} ${un}`).join(' ')
+            + (canMark ? ((x.diff.pkts > 0.005 || x.diff.reams > 0.005) ? markBtn(x, 'paper-diff-offcut', 'Sent to offcut', 'The extra went to offcut (added by hand) - count it under Moved to offcut') : '')
+              + markBtn(x, 'paper-diff', 'Ignore', 'This one is fine - take it out of the difference') : '')]);
         const waiting = rows.notPrinted.sort((a, c) => (c.e.period.pkts + c.e.period.reams * 5) - (a.e.period.pkts + a.e.period.reams * 5))
           .map(x => [job(x.j), nn(x.e.period.pkts), nn(x.e.period.reams)]);
         const mj = new Map();
