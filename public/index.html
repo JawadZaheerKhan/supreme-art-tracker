@@ -2391,6 +2391,8 @@
   .lc-dot { width: 13px; height: 13px; border-radius: 50%; background: #16a34a; border: 0; padding: 0; margin-right: 6px; vertical-align: -1px; cursor: pointer; box-shadow: 0 0 0 2px #dcfce7; }
   .lc-dot:hover { background: #15803d; }
   .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .lc-job-link { font-weight: 600; color: inherit; cursor: pointer; text-decoration: underline; text-decoration-color: #c9a9a9; text-underline-offset: 3px; }
+  .lc-job-link:hover { color: #A32D2D; text-decoration-color: #A32D2D; }
   .lc-cell-in { width: 7.5ch; padding: 1px 2px; border: 0; border-bottom: 1px dashed transparent; background: transparent; font: inherit; font-weight: 700; color: inherit; border-radius: 0; }
   .lc-cell-in:hover { border-bottom-color: var(--border2); }
   .lc-cell-in:focus { outline: none; border-bottom: 2px solid #A32D2D; background: #fff7ed; }
@@ -27200,8 +27202,16 @@ function lcGroupSections(g) {
   return LC_FORMS[g.form].sections.filter(x => used.has(x.name));
 }
 // A job number with its company under it.
+// A job's name in the report opens its job card right there (owner, 2026-11-16) - in the app, not on paper or at
+// the Station (no job card there).
+function lcJobNameHtml(job, name, print) {
+  if (!name) return '';
+  const m = String(job || '').match(/\d+/), id = m && !m[0].startsWith('4') ? +m[0] : 0;
+  const inApp = !print && id && !lcAtStation() && typeof jobs !== 'undefined' && jobs.some(j => j.id === id);
+  return inApp ? ` <a class="lc-job-link" onclick="event.stopPropagation(); openEdit(${id})" title="Open E-${id}'s job card">${esc(name)}</a>` : ` <span style="font-weight:600;">${esc(name)}</span>`;
+}
 function lcJobCell(job, co, print, name) {
-  return `<b>${esc(lcJobNo(job))}</b>${name ? ` <span style="font-weight:600;">${esc(name)}</span>` : ''}${String(job || '').match(/^\D*4/) ? ' <span style="font-size:10px;font-weight:700;color:#b45309;">manual</span>' : ''}${co ? (print ? `<div style="font-size:7pt;">${esc(co)}</div>` : `<div class="lc-co">${esc(co)}</div>`) : ''}`;
+  return `<b>${esc(lcJobNo(job))}</b>${lcJobNameHtml(job, name, print)}${String(job || '').match(/^\D*4/) ? ' <span style="font-size:10px;font-weight:700;color:#b45309;">manual</span>' : ''}${co ? (print ? `<div style="font-size:7pt;">${esc(co)}</div>` : `<div class="lc-co">${esc(co)}</div>`) : ''}`;
 }
 function lcCompanyText(e) {
   const p = e.prev_company || '', n = e.new_company || '';
@@ -27316,7 +27326,7 @@ function lcJobCellIn(e, side) {
   const name = e[side + '_job_name'], co = e[side + '_company'];
   return `<input class="lc-cell-in" inputmode="numeric" enterkeyhint="done" autocomplete="off" value="${esc(v ? lcJobNo(v) : '')}" data-was="${esc(v ? lcJobNo(v) : '')}"
       placeholder="${side === 'new' ? '+ new job' : '+ job no.'}" title="Type the job number - Enter or tap away saves"
-      onkeydown="if (event.key === 'Enter') { event.preventDefault(); this.blur(); }" onchange="lcCellSave(${e.id}, '${key}', this)">${name ? ` <span style="font-weight:600;">${esc(name)}</span>` : ''}${co ? `<div class="lc-co">${esc(co)}</div>` : ''}`;
+      onkeydown="if (event.key === 'Enter') { event.preventDefault(); this.blur(); }" onchange="lcCellSave(${e.id}, '${key}', this)">${lcJobNameHtml(v, name, false)}${co ? `<div class="lc-co">${esc(co)}</div>` : ''}`;
 }
 function lcWasteIn(e) {
   const jc = e.jc_waste != null ? `<span style="color:#166534;font-weight:700;" title="Job card waste of the previous job">${esc(lcWaste(e.jc_waste))}</span> <span style="color:var(--text2);">/</span> ` : '';
