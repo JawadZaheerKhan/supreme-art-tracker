@@ -8372,13 +8372,25 @@ async function stationMachineList(sql) {
   return sql`SELECT name, machine_code, persons, roles FROM operators
               WHERE active AND COALESCE(kind, '') = '' AND NOT is_manager AND COALESCE(pin, '') <> '' ORDER BY name`;
 }
-// Who works on which machine on a date: that day's choice, else the last day saved before it.
+// Who works on which machine (owner, 2026-11-16): the machine's operators in Users -> Operators - the same list
+// the Station's "Today's operators" screen shows and changes (the per-day lists it used to keep are not read any more).
 async function machineOpsFor(sql, date) {
-  const r = await sql`SELECT key, value FROM schema_meta WHERE key LIKE 'machine_ops:%' AND key <= ${'machine_ops:' + date} ORDER BY key DESC LIMIT 1`;
-  if (!r[0]) return { from: null, assign: {} };
-  let a = {};
-  try { a = JSON.parse(r[0].value) || {}; } catch (e) { a = {}; }
-  return { from: r[0].key.slice('machine_ops:'.length), assign: a };
+  const rows = await sql`SELECT name, persons FROM operators WHERE active AND COALESCE(kind, '') = '' AND NOT is_manager`;
+  const assign = {};
+  for (const r of rows) {
+    const names = (Array.isArray(r.persons) ? r.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean);
+    if (names.length) assign[r.name] = names;
+  }
+  return { from: date, assign };
+}
+// Today's operators at the Station: a QA Incharge or a QC PIN (owner, 2026-11-16).
+async function verifyOpsPin(sql, rawPin) {
+  const pin = String(rawPin || '').trim();
+  if (!validPin(pin)) return { status: 400, error: 'Enter a 3-digit PIN' };
+  const op = (await sql`SELECT id, name, kind FROM operators WHERE pin = ${pin} AND active LIMIT 1`)[0];
+  if (!op) return { status: 401, error: 'PIN not recognized' };
+  if (op.kind !== 'qa' && op.kind !== 'qc') return { status: 403, error: 'Only a QA Incharge or QC PIN can change the operators.' };
+  return { operator: op };
 }
 const yesterdayISO = () => businessDateISO(new Date(Date.now() - 86400000));
 app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
@@ -8423,7 +8435,7 @@ app.post('/api/station/machine-ops', requireStationUser, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    const v = await verifyQaPin(sql, req.body.pin);
+    const v = await verifyOpsPin(sql, req.body.pin);
     if (v.error) return res.status(v.status).json({ error: v.error });
     const today = businessDateISO();
     const machines = await stationMachineList(sql);
@@ -8440,9 +8452,10 @@ app.post('/api/station/machine-ops/save', requireStationUser, async (req, res) =
   try {
     await dbReady;
     const sql = getDb();
-    const v = await verifyQaPin(sql, req.body.pin);
+    const v = await verifyOpsPin(sql, req.body.pin);
     if (v.error) return res.status(v.status).json({ error: v.error });
-    const names = new Set((await stationMachineList(sql)).map(m => m.name));
+    const stationMachines = await stationMachineList(sql);
+    const names = new Set(stationMachines.map(m => m.name));
     const given = (req.body.assign && typeof req.body.assign === 'object') ? req.body.assign : {};
     const assign = {};
     for (const [m, list] of Object.entries(given)) {
@@ -8450,12 +8463,28 @@ app.post('/api/station/machine-ops/save', requireStationUser, async (req, res) =
       const ps = [...new Set(list.map(x => String(x || '').trim().slice(0, 60)).filter(Boolean))];
       if (ps.length) assign[m] = ps;
     }
+    // Saved on the machines in Users -> Operators (owner, 2026-11-16): each station machine gets the list shown
+    // on the screen; a person keeps his Urdu name (looked up on whichever machine he is on). Only machines whose
+    // list changed are written.
+    const all = await sql`SELECT persons FROM operators WHERE persons IS NOT NULL`;
+    const known = new Map();
+    for (const r of all) for (const p of (Array.isArray(r.persons) ? r.persons : [])) {
+      const k = String((p && p.name) || '').trim().toLowerCase();
+      if (k && (!known.has(k) || (!known.get(k).name_ur && p.name_ur))) known.set(k, p);
+    }
+    const changed = [];
+    for (const m of stationMachines) {
+      const want = assign[m.name] || [];
+      const have = (Array.isArray(m.persons) ? m.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean);
+      if (JSON.stringify(want) === JSON.stringify(have)) continue;
+      const persons = want.map(n => { const p = known.get(n.toLowerCase()); return p ? { ...p, name: n } : { name: n, name_ur: '' }; });
+      await sql`UPDATE operators SET persons = ${JSON.stringify(persons)}::jsonb WHERE name = ${m.name} AND active AND COALESCE(kind, '') = '' AND NOT is_manager`;
+      changed.push(m.name);
+    }
     const today = businessDateISO();
-    await sql`INSERT INTO schema_meta (key, value) VALUES (${'machine_ops:' + today}, ${JSON.stringify(assign)})
-              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-    await logAudit(sql, req, { action: 'station.machine_ops', entityType: 'settings', entityId: null,
-      summary: `Today's operators set by ${lcText(req.body.person_name, 60) || v.operator.name}: ${Object.entries(assign).map(([m, p]) => m + ' = ' + p.join(' / ')).join('; ') || 'none'}` });
-    res.json({ date: today, assign });
+    if (changed.length) await logAudit(sql, req, { action: 'station.machine_ops', entityType: 'settings', entityId: null,
+      summary: `Machine operators changed at the Station by ${lcText(req.body.person_name, 60) || v.operator.name}: ${changed.map(m => m + ' = ' + ((assign[m] || []).join(' / ') || 'nobody')).join('; ')}` });
+    res.json({ date: today, assign, changed });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // QA's own recent entries on his screen (PIN in the body, never the URL).

@@ -41057,16 +41057,18 @@ function stationQaFromWaiting(i) {
   setTimeout(() => { const el = document.querySelector('#station-root .lc-wrap .lc-card'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 50);
 }
 // ── Today's operators (owner, 2026-11-13): who works on which machine today ──
+// Where Back from Today's operators goes: QA's screen, or QC's (owner, 2026-11-16).
+function stationOpsHome() { return stationOperator && stationOperator.is_manager ? 'manager-queue' : 'qa'; }
 async function stationOpenQaOps() {
   stationView = 'qa-ops';
   _opsSaveState = '';
   stationQaOps = null;
   stationRender();
   try { stationQaOps = await api('POST', '/api/station/machine-ops', { pin: stationOperator.pin }); }
-  catch (e) { notify('Could not load the machines: ' + e.message); stationView = 'qa'; stationRender(); return; }
-  // Nothing saved yet: every machine starts with all its people (green); after that, the last saved day.
+  catch (e) { notify('Could not load the machines: ' + e.message); stationView = stationOpsHome(); stationRender(); return; }
+  // Each machine's operators as Users -> Operators has them (owner, 2026-11-16) - one list for both.
   stationQaOpsEdit = {};
-  for (const m of stationQaOps.machines) stationQaOpsEdit[m.name] = stationQaOps.from ? [...((stationQaOps.assign || {})[m.name] || [])] : [...m.persons];
+  for (const m of stationQaOps.machines) stationQaOpsEdit[m.name] = [...m.persons];
   stationRender();
 }
 function stationQaOpsRemove(machine, person) {
@@ -41163,10 +41165,10 @@ function stationQaOpsHtml() {
   const d = stationQaOps;
   const head = `<div class="station-head">
       <div><div class="station-who" style="font-size:20px;">Today's operators ${stationQaOpsStateHtml()}</div><div class="station-where" style="font-size:14px;">${esc(fmtDMY(localDateISO()))} &middot; who works on which machine</div></div>
-      <div style="display:flex;gap:8px;"><button class="btn" onclick="stationView='qa'; stationRender();">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+      <div style="display:flex;gap:8px;"><button class="btn" onclick="stationView=stationOpsHome(); stationRender();">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>`;
   if (!d || !stationQaOpsEdit) return head + '<div class="empty">Loading…</div>';
-  const note = `<div class="lc-ops-note">${d.from && d.from !== d.date ? `Starting from ${esc(fmtDMY(d.from))}. ` : d.from ? '' : 'Starting with every machine\'s own operators. '}Drag a name onto another machine to move them, &#128465; to take one off, + someone else to add. Every change saves by itself.</div>`;
+  const note = `<div class="lc-ops-note">The same operators as Users &rarr; Operators - a change here changes them there too. Drag a name onto another machine to move them, &#128465; to take one off, + someone else to add. Every change saves by itself.</div>`;
   const machines = [...d.machines].sort((a, b) => (!a.code - !b.code) || (a.code || '').localeCompare(b.code || '', undefined, { numeric: true }) || a.name.localeCompare(b.name));
   const rows = machines.map(m => {
     const on = stationQaOpsEdit[m.name] || [];
@@ -42050,7 +42052,7 @@ function stationManagerQueueHtml() {
   return `
     <div class="station-head">
       <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}</div><div class="station-where">Manager &middot; All Stages</div></div>
-      <div style="display:flex;gap:8px;">${stationLcButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;"><button class="btn" onclick="stationOpenQaOps()" style="font-weight:700;">&#128119; Today's operators</button>${stationLcButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;padding:10px 16px 0;">${tabs}</div>
     ${searchBar}
