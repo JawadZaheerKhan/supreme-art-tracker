@@ -5154,7 +5154,15 @@ function overDeliveredMarkHtml(j) {
   return `<span title="Delivered (${delivered.toLocaleString()}) exceeds Unit Carton Qty (${cartonQty.toLocaleString()}) by ${over.toLocaleString()} — check these values." style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#dc2626;color:#fff;font-size:10px;font-weight:800;line-height:1;flex:0 0 auto;">!</span>`;
 }
 function isPartialDelivery(j) {
-  const booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
+  let booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
+  // MIL jobs (owner, 2026-11-17): done only once every Ready carton (else unit carton) has shipped, or the
+  // PO if more - most have no PO. Same as the server's deliveryTargetQty.
+  if (j && (j.stock_group_name || j.group_job_id) && !j.is_shade_card) {
+    if (j.stages && j.stages[7] && j.stages[7].finalized) return false;
+    booked = Math.max(booked, readyCartonsTotal(j) || (parseFloat(String(j.cartonqty || '').replace(/[^0-9.\-]/g, '')) || 0));
+    const got = totalDeliveredCartons(j);
+    return got > 0 && got < booked;
+  }
   if (!booked) return false;
   const fromLedger = totalDeliveredCartons(j);
   // A job already at the Delivered stage is normally closed — a legacy

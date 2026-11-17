@@ -9953,6 +9953,14 @@ function parseShipperInput(raw) {
 function deliveryTargetQty(job, stageIndex, stages, bookedQty) {
   const reopened = !!(stageIndex === 6 && stages && stages[6] && stages[6].reopened);
   if (reopened) return Math.max(bookedQty, readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty));
+  // MIL jobs (owner, 2026-11-17): no tolerance, and most have no PO Qty - they close only once every Ready
+  // carton (else every unit carton) has shipped, or the PO if that is more. Before, no PO meant the first
+  // delivery closed the job with cartons still left.
+  if (job && (job.stock_group_name || job.group_job_id) && !job.is_shade_card) {
+    const made = readyQtyFromParticularsRow(job.particulars && job.particulars.delivered_cartons_qty)
+      || (parseFloat(String(job.cartonqty || '').replace(/[^0-9.\-]/g, '')) || 0);
+    return Math.max(bookedQty || 0, made);
+  }
   const tol = Number(job && job._tolPct);
   return (bookedQty && tol > 0) ? Math.max(1, Math.round(bookedQty * (1 - tol / 100))) : bookedQty;
 }
@@ -12030,7 +12038,8 @@ app.delete('/api/jobs/:id/deliveries/:index', requirePermission('job_btn_delete_
     // there's no target to compare against, so instead revert whenever
     // nothing is left delivered at all — mirrors how such a job was
     // advanced to Delivered in the first place (see computeDeliveryUpdate).
-    const shouldRevert = bookedQty ? totalCartons < deliveryTargetQty(await withTolerance(sql, job), 0, {}, bookedQty) : totalCartons <= 0;
+    const revTarget = deliveryTargetQty(await withTolerance(sql, job), 0, {}, bookedQty);
+    const shouldRevert = revTarget ? totalCartons < revTarget : totalCartons <= 0;
     if (stage_index === 7 && shouldRevert) {
       stages[7] = { ...(stages[7] || {}), status: 'active' };
       stages[6] = { ...(stages[6] || {}), status: 'active', by, time, at: nowIso };
