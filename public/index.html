@@ -1744,7 +1744,7 @@
     transition: background 0.12s, border-color 0.12s;
   }
   #create-group-btn:hover { background: #ddd6fe; border-color: #a78bfa; }
-  /* Offcut Issuance shortcut (owner, 2026-11-17) - offcut blue, the same pill as Create Mil Job. */
+  /* Offcut Issuance shortcut (owner, 2026-11-17) - offcut blue, next to Over-issued. */
   #offcut-issue-btn { font-weight: 600; font-size: 14px; padding: 8px 16px; border-radius: 7px; font-family: var(--font); cursor: pointer;
     display: inline-flex; align-items: center; gap: 6px; background: #cffafe; color: #0e7490; border: 1.5px solid #67e8f9; }
   #offcut-issue-btn:hover { background: #a5f3fc; border-color: #22d3ee; }
@@ -3904,7 +3904,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   <div class="jobs-hero-row">
     <div class="stats-row" id="stats-row"></div>
     <div class="jobs-hero-actions">
-      <button id="offcut-issue-btn" class="ceo-hide" style="display:none;" data-acc="inv_btn_offcut_issuance" onclick="openOffcutIssueList()" title="Jobs waiting for offcut paper - issue it from here">&#9986; Offcut Issuance <span id="offcut-issue-n" class="offcut-issue-n" style="display:none;"></span></button>
       <button id="create-group-btn" class="ceo-hide whole-toggle" onclick="playActionToggle(this); openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
         <span class="whole-toggle-text">&#128230; Create Mil Job</span>
       </button>
@@ -3937,6 +3936,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       </select>
       <span id="date-custom" style="display:none;gap:6px;align-items:center;"><input type="date" id="date-from" class="filter" onchange="setDateCustom()" style="padding:6px;"><span style="color:var(--text2);font-size:12px;">to</span><input type="date" id="date-to" class="filter" onchange="setDateCustom()" style="padding:6px;"></span>
       <div class="jobs-filter-right">
+      <button id="offcut-issue-btn" class="ceo-hide" style="display:none;" data-acc="inv_btn_offcut_issuance" onclick="openOffcutIssueList()" title="Jobs waiting for offcut paper - issue it from here">&#9986; Offcut Issuance <span id="offcut-issue-n" class="offcut-issue-n" style="display:none;"></span></button>
       <button id="over-issue-alert" class="whole-toggle" style="display:none;" onclick="openOverIssuedList()" title="Jobs with over-issued paper waiting for a decision - click to pick one and go to it">
         <span class="whole-toggle-text">&#9888; <span id="over-issue-alert-label">Over-issued</span></span>
       </button>
@@ -35964,8 +35964,11 @@ function openDeliverGroupModal(groupName) {
     return { j, avail };
   }).filter(x => x.avail > 0);
   const totalAvail = available.reduce((s, x) => s + x.avail, 0);
+  // Deliver from (owner, 2026-11-17): oldest job first, or one job picked here.
+  const rowCss = 'display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);padding:3px 0;cursor:pointer;';
   const availRows = available.length
-    ? available.map(x => `<div style="font-size:11px;color:var(--text2);padding:1px 0;">E-${x.j.id} · ${esc(x.j.name)}: <b>${x.avail.toLocaleString()} available</b></div>`).join('')
+    ? `<label style="${rowCss}"><input type="radio" name="dg-from" value="" checked onchange="dgFromChanged()"> <b style="color:#5b21b6;">Oldest job first (FIFO)</b></label>`
+      + available.map(x => `<label style="${rowCss}"><input type="radio" name="dg-from" value="${x.j.id}" data-avail="${x.avail}" onchange="dgFromChanged()"> Only from E-${x.j.id} · ${esc(x.j.name)}: <b>${x.avail.toLocaleString()} available</b></label>`).join('')
     : `<div style="font-size:11px;color:#dc2626;padding:1px 0;">No jobs at Ready to Deliver — advance a job there first.</div>`;
   const gName = jsStr(groupName);
   // Finance's invoicing fields (Cartons/Packets, E-FBR, MSI, Rate, Sale Tax) show only for holders of job_btn_pricing.
@@ -35978,9 +35981,9 @@ function openDeliverGroupModal(groupName) {
     <h2 style="margin:0 0 4px;">&#128230; Deliver from Group</h2>
     <div style="font-size:12px;color:#5b21b6;font-weight:600;margin-bottom:10px;">${esc(groupName)}</div>
     <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:8px 10px;margin-bottom:12px;">
-      <div style="font-size:10px;font-weight:700;text-transform:uppercase;color:#5b21b6;margin-bottom:4px;">FIFO order (oldest job first)</div>
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;color:#5b21b6;margin-bottom:4px;">Deliver from</div>
       ${availRows}
-      ${totalAvail > 0 ? `<div style="margin-top:4px;font-size:11px;font-weight:700;color:#166534;">Total available: ${totalAvail.toLocaleString()} unit cartons</div>` : ''}
+      ${totalAvail > 0 ? `<div id="dg-avail-line" data-total="${totalAvail}" style="margin-top:4px;font-size:11px;font-weight:700;color:#166534;">Total available: ${totalAvail.toLocaleString()} unit cartons</div>` : ''}
     </div>
     ${showPricing ? `
     <div class="form-row">
@@ -36022,8 +36025,20 @@ function openDeliverGroupModal(groupName) {
     </div>
   </div>`);
 }
+// The picked "Deliver from" job: { id, avail } or null for oldest first.
+function dgFromPicked() {
+  const r = document.querySelector('input[name="dg-from"]:checked');
+  return r && r.value ? { id: Number(r.value), avail: Number(r.dataset.avail) || 0 } : null;
+}
+function dgFromChanged() {
+  const line = document.getElementById('dg-avail-line');
+  if (!line) return;
+  const p = dgFromPicked();
+  line.textContent = p ? `Available in E-${p.id}: ${p.avail.toLocaleString()} unit cartons` : `Total available: ${(Number(line.dataset.total) || 0).toLocaleString()} unit cartons`;
+}
 async function submitGroupDelivery(groupName) {
   const cartons = ((document.getElementById('dg-cartons')||{}).value||'').trim();
+  const from = dgFromPicked();
   const date    = ((document.getElementById('dg-date')||{}).value||'').trim();
   const po      = ((document.getElementById('dg-po')||{}).value||'').trim();
   const batch   = ((document.getElementById('dg-batch')||{}).value||'').trim();
@@ -36033,10 +36048,12 @@ async function submitGroupDelivery(groupName) {
   const notes   = ((document.getElementById('dg-notes')||{}).value||'').trim();
   if (!parseFloat(cartons) || parseFloat(cartons) <= 0) { await alertDialog({ title: 'Enter cartons to deliver', kind: 'warn' }); return; }
   if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  if (from && parseFloat(cartons) > from.avail) { await alertDialog({ title: `E-${from.id} has only ${from.avail.toLocaleString()} cartons available`, message: 'Lower the qty, or pick Oldest job first.', kind: 'warn' }); return; }
   // Rate / Sale Tax inputs exist only for job_btn_pricing holders; for everyone else they're simply not sent.
   const rateEl = document.getElementById('dg-rate');
   const taxEl  = document.getElementById('dg-tax');
   const body = { group_name: groupName, cartons, date, po_no: po, batch_no: batch, fbr_no: fbr, msi_no: msi, notes };
+  if (from) body.job_id = from.id;
   if (cp !== '') body.cartons_packets = cp;
   if (rateEl || taxEl) {
     const rateStr = ((rateEl||{}).value || '').trim();

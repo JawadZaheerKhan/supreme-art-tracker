@@ -10543,11 +10543,25 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
       WHERE stock_group_name = ${String(group_name).trim()} AND deleted_at IS NULL
       ORDER BY id ASC`;
     if (!groupJobs.length) return res.status(404).json({ error: 'No jobs found in this group' });
+    // Deliver from one chosen job instead of oldest first (owner, 2026-11-17): only that job, and not more
+    // than it has ready.
+    const fromJobId = req.body?.job_id ? parseInt(req.body.job_id, 10) : null;
+    if (fromJobId) {
+      const only = groupJobs.find(j => j.id === fromJobId);
+      if (!only) return res.status(400).json({ error: `Job E-${fromJobId} is not in this group.` });
+      const eligErr = deliveryEligibilityError(only);
+      if (eligErr) return res.status(400).json({ error: eligErr });
+      const readyOnly = parseFloat(((only.particulars || {}).delivered_cartons_qty || {}).quantity || '')
+        || parseFloat(String(only.cartonqty || '').replace(/[^0-9.\-]/g, '')) || 0;
+      const availOnly = Math.max(0, readyOnly - sumDeliveryCartons(only.deliveries));
+      if (totalCartons > availOnly) return res.status(400).json({ error: `E-${fromJobId} has only ${availOnly.toLocaleString()} cartons available.` });
+    }
     let remaining = totalCartons;
     const deliveriesMade = [];
     const plan = [];
     for (const job of groupJobs) {
       if (remaining <= 0) break;
+      if (fromJobId && job.id !== fromJobId) continue;
       if (deliveryEligibilityError(job)) continue;
       const readyQty = parseFloat(
         ((job.particulars || {}).delivered_cartons_qty || {}).quantity || ''
@@ -10593,7 +10607,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     const fulfilled = totalCartons - remaining;
     await logAudit(sql, req, {
       action: 'group.deliver', entityType: 'group', entityId: null,
-      summary: `FIFO delivery from group "${group_name}": ${fulfilled} cartons across ${deliveriesMade.length} job(s)${remaining > 0 ? ` — ${remaining} unfulfilled` : ''}`,
+      summary: `${fromJobId ? `Delivery from E-${fromJobId} of` : 'FIFO delivery from'} group "${group_name}": ${fulfilled} cartons across ${deliveriesMade.length} job(s)${remaining > 0 ? ` — ${remaining} unfulfilled` : ''}`,
     });
     res.json({ ok: true, deliveries_made: deliveriesMade, unfulfilled: remaining });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
