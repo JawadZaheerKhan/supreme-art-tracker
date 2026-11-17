@@ -4193,7 +4193,7 @@ function jobLogEnds(log) {
 // date|machine (lower case) -> { machine, date, mins, jobs: [{ job_id, job, name, start, end, running, mins }] }.
 async function machineHoursMap(sql, from, to) {
   const rows = await sql`
-    SELECT machine, entry_date, entry_time, new_job FROM line_clearance
+    SELECT machine, entry_date, entry_time, new_job, prev_job FROM line_clearance
      WHERE deleted_at IS NULL AND entry_date <= ${to}
      ORDER BY machine, entry_date, entry_time, created_at`;
   const at = r => String(r.entry_date instanceof Date ? r.entry_date.toISOString() : r.entry_date).slice(0, 10) + 'T' + (r.entry_time || '00:00');
@@ -4205,6 +4205,19 @@ async function machineHoursMap(sql, from, to) {
   const out = new Map();
   rows.forEach((r, i) => {
     const start = wcMin(at(r));
+    // An entry with no New Job (owner, 2026-11-17): the last job was cleared and the machine waits for the next
+    // one - no hours. It is listed (no time) so the day's list reads "E-1418 cleared - no new job yet"; the next
+    // job's time starts at its own QA entry.
+    if (!String(r.new_job || '').trim()) {
+      const date = at(r).slice(0, 10);
+      if (date >= from && date <= to) {
+        const key = date + '|' + String(r.machine || '').trim().toLowerCase();
+        const e = out.get(key) || { machine: r.machine, date, mins: 0, jobs: [] };
+        e.jobs.push({ job_id: null, job: '', idle: true, prev: String(r.prev_job || ''), start: at(r), end: null, running: false, mins: 0 });
+        out.set(key, e);
+      }
+      return;
+    }
     const nx = rows[i + 1] && rows[i + 1].machine === r.machine ? wcMin(at(rows[i + 1])) : null;
     const id = lcJobId(r.new_job), j = id ? byId.get(id) : null;
     const mLow = String(r.machine || '').trim().toLowerCase();
