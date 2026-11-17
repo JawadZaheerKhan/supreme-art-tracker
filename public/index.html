@@ -2393,6 +2393,9 @@
   .lc-mbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   .lc-job-link { font-weight: 600; color: inherit; cursor: pointer; text-decoration: underline; text-decoration-color: #c9a9a9; text-underline-offset: 3px; }
   .lc-job-link:hover { color: #A32D2D; text-decoration-color: #A32D2D; }
+  .offcut-avail { display: inline-block; margin-top: 4px; padding: 2px 10px; border-radius: 12px; background: #e0f2fe; color: #075985; border: 1px solid #7dd3fc; font-size: 11.5px; font-weight: 700; cursor: pointer; }
+  .offcut-avail:hover { background: #bae6fd; }
+  .offcut-avail-list { margin-top: 4px; padding: 6px 8px; border-radius: 6px; background: #f0f9ff; border: 1px solid #bae6fd; font-size: 11.5px; color: var(--text); }
   .lc-secpick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
   .lc-secpick-btn { padding: 8px 16px; border: 2px solid var(--border); border-radius: 20px; background: var(--bg); font-weight: 700; font-size: 14px; cursor: pointer; }
   .lc-secpick-btn.is-on { border-color: #A32D2D; background: #A32D2D; color: #fff; }
@@ -7437,9 +7440,12 @@ function renderCeoDash() {
           const un = unOf(r.paper_type), ps = packetSize(r.paper_type || '');
           const k = keyOf(r.paper_type, r.size, r.gsm, r.offcut);
           const kk = e.keys.get(k) || { un, period: 0, total: 0 };
-          kk.period += (+r.s_period || 0) / ps; kk.total += (+r.s_total || 0) / ps;
+          // Sent to offcut from this paper (owner, 2026-11-17): off the issue - it is Moved to offcut now.
+          const retP = Math.min(+r.s_ret_period || 0, +r.s_period || 0) / ps, retT = (+r.s_ret_total || 0) / ps;
+          kk.period += (+r.s_period || 0) / ps - retP; kk.total += (+r.s_total || 0) / ps - retT;
           e.keys.set(k, kk);
           e.period[un] += (+r.s_period || 0) / ps; e.total[un] += (+r.s_total || 0) / ps;
+          e.ret = e.ret || Z(); e.ret[un] += retP;
           per.set(r.job_id, e);
         }
         const E = { all: Z(), delivered: Z(), notDelivered: Z(), notPrinted: Z(), diff: Z(), deleted: Z(), ignored: Z(), sentOff: Z() };
@@ -7448,8 +7454,10 @@ function renderCeoDash() {
           add(E.all, e.period);
           const j = e.deleted ? null : (jobs || []).find(x => x.id === e.id);
           if (!j) { add(E.deleted, e.period); rows.deleted.push(e); continue; }
+          const ret = e.ret || Z();
+          add(E.sentOff, ret);
           const printed = !j.is_shade_card && (j.stage_index || 0) >= 2 && jobLeftPrintingMs(j) != null;
-          if (!printed) { add(E.notPrinted, e.period); rows.notPrinted.push({ e, j }); continue; }
+          if (!printed) { add(E.notPrinted, { pkts: e.period.pkts - ret.pkts, reams: e.period.reams - ret.reams }); rows.notPrinted.push({ e, j }); continue; }
           // The card and its delivered share, per unit (as Packets issued vs used reads them).
           const parts = ceoDashJobParts(j);
           const isMil = !!(j.stock_group_name || j.group_job_id);
@@ -7541,7 +7549,7 @@ function renderCeoDash() {
             ${line(2, 'Ignored', E.ignored, { skipEmpty: true, signed: true, note: 'difference you ignored' })}
             ${line(1, 'Manual jobs', manual, { skipEmpty: true, note: `${fmt(new Set(manualRows.map(r => extractManualJobCardNo(r.t.notes) || '—')).size)} jobs` })}
             ${offOn ? line(1, 'Moved to offcut', offShown) : ''}
-            ${sentOn ? line(2, 'Extra sent to offcut from jobs', E.sentOff, { note: 'marked by you - added to offcut by hand' }) : ''}
+            ${sentOn ? line(2, 'Sent to offcut from jobs', E.sentOff, { note: 'old / extra paper of a job, sent to offcut' }) : ''}
             ${offOn ? line(2, 'Taken from offcut for E jobs', off.e, { skipEmpty: true }) : ''}
             ${offOn ? line(2, 'Taken from offcut for manual jobs', off.manual, { skipEmpty: true }) : ''}
             ${offOn ? line(2, 'Sold / damaged from offcut', off.other, { skipEmpty: true }) : ''}
@@ -7632,7 +7640,7 @@ function renderCeoDash() {
         return tile('stale-paper', jl.length ? 'out' : 'stock', 'Old paper not reversed', st ? fmt(jl.length) : '…', st ? 'paper changed, old issue still on the job' : 'loading…', st ? () =>
           `<div class="cd-sub">These jobs were issued a paper that is no longer on their job card: the paper was changed and that issue was never reversed. Reverse it from the paper's History (or the Stock Out report) so the stock comes back.</div>`
           + list(jl.map(e => row(`<a onclick="ceoDashOpenJob(${e.id})">E-${e.id}</a> ${esc(e.name || '')}`,
-              e.rows.map(r => `issued ${pl(r.paper_type, r.size, r.gsm, r.offcut)} · ${amt(r)} · ${date(new Date(r.created_at).getTime())} &middot; card: ${pl(r.card_type, r.card_size, r.card_gsm, r.card_offcut) || '—'}`).join('<br>') + btn(e, false))), 'Every issued paper is on its job card') : null);
+              e.rows.map(r => `issued ${pl(r.paper_type, r.size, r.gsm, r.offcut)} · ${amt(r)} · ${date(new Date(r.created_at).getTime())} &middot; card: ${pl(r.card_type, r.card_size, r.card_gsm, r.card_offcut) || '—'}${seeBtn('job_btn_paper_to_offcut') ? ` <button class="btn btn-sm" data-acc="job_btn_paper_to_offcut" onclick="event.stopPropagation(); jhSendToOffcut(${e.id}, ${r.id}, ${+((+r.sheets || 0) / packetSize(r.paper_type || '')).toFixed(2)}, '${packetUnitLabel(r.paper_type || '').toLowerCase()}')" title="Send this old paper to offcut stock" style="${OFFCUT_BTN_STYLE}padding:1px 7px;font-size:10.5px;margin-left:6px;">Sent to offcut</button>` : ''}`).join('<br>') + btn(e, false))), 'Every issued paper is on its job card') : null);
       })()}
       ${tile('over-issued', 'over', 'Over-issued paper', fmt(f.overIssued.length), 'waiting for a decision', jobList(f.overIssued, j => { const p = overIssuePending(j) || {}; return `${esc(String(p.total_packets ?? ''))} ${esc(p.unit || 'packets')}${p.challan_no ? ' · challan ' + esc(p.challan_no) : ''}`; }, 'Nothing over-issued'))}
     </div>
@@ -10619,6 +10627,7 @@ function renderJobRowCompact(j, opts) {
             ${partialDelv && seeBtn('job_btn_stage_moves') ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
             ${canReopenDelivery(j) && seeBtn('job_btn_stage_moves') ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>` : ''}
             ${processWithoutPaperBtnHtml(j)}
+            ${offcutIssueShortcutHtml(j)}
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             ${!_finalizedJobIds.has(j.id) ? `<button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>` : ''}
@@ -10719,6 +10728,21 @@ function jobStockNeedSheets(j) {
   const fresh = jobFreshNeedSheets(j);
   if (fresh > 0) return fresh;
   return parseFloat(j.sheets) || 0;
+}
+// Issue offcut from the Jobs tab (owner, 2026-11-17): a job with offcut paper still to issue - its paper, or a 2nd / 3rd
+// paper that is offcut - gets the offcut Issue button right on its tile (the same issue as Inventory's Pending Stock).
+function offcutIssueShortcutHtml(j) {
+  if (!j || !canIssueOffcutStock() || !seeBtn('inv_btn_offcut_issuance') || _finalizedJobIds.has(j.id)) return '';
+  const btns = [];
+  const mainIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+  const mainOwed = j.issuance_status === 'pending' || (typeof partialPendingSheets === 'function' && partialPendingSheets(j) > 0);
+  if (mainIt && mainIt.is_offcut && mainOwed && jobStockNeedSheets(j) > 0) btns.push(['', 'Issue offcut']);
+  for (const [key, src, ord] of [['secondary_paper', 'secondary', '2nd'], ['third_paper', 'third', '3rd']]) {
+    const ref = (j.particulars || {})[key];
+    const it = ref && ref.inventory_item_id ? inventoryAll.find(x => x.id === Number(ref.inventory_item_id)) : null;
+    if (it && it.is_offcut && typeof secondaryPendingSheets === 'function' && secondaryPendingSheets(j, key) > 0) btns.push([src, `Issue offcut (${ord} paper)`]);
+  }
+  return btns.map(([src, label]) => `<button class="btn btn-sm ceo-hide" style="${OFFCUT_BTN_STYLE}" data-acc="inv_btn_offcut_issuance" onclick="issueStock(${j.id}${src ? `, '${src}'` : ''})" title="Issue this job's offcut paper">&#9986; ${label}</button>`).join('');
 }
 function cardIssueStockBtn(j) {
   const invIt   = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
@@ -11161,6 +11185,7 @@ function renderJobCard(j, opts) {
     ${clientPreview ? '' : wastageAdjBanner(j.id)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${processWithoutPaperBtnHtml(j)}
+      ${offcutIssueShortcutHtml(j)}
       ${primary}
       ${updateBtn}
       ${more}
@@ -12183,9 +12208,15 @@ function jhPaperLabel(it) {
 // "auto-consumed from offcut" at CTP (before 16 Sep 2026).
 // A job's History with its paper issues' reversals in it (owner, 2026-11-16): each reversal its own line, and the
 // issue it undid says "(reversed on ...)".
+// Issues of the open job's History: reversed ones, and what each sent to offcut (sheets) - for the Sent to offcut button.
+let jhRevTx = new Set(), jhSentTx = new Map();
 function jhWithReversals(audit, revs) {
   const rows = Array.isArray(audit) ? audit.slice() : [];
-  const list = Array.isArray(revs) ? revs : [];
+  const all = Array.isArray(revs) ? revs : [];
+  jhRevTx = new Set(all.filter(r => r.kind !== 'offcut').map(r => Number(r.reverses_tx_id)));
+  jhSentTx = new Map();
+  for (const r of all.filter(r => r.kind === 'offcut')) jhSentTx.set(Number(r.reverses_tx_id), (jhSentTx.get(Number(r.reverses_tx_id)) || 0) + Math.abs(+r.change || 0));
+  const list = all.filter(r => r.kind !== 'offcut');
   if (!list.length) return rows;
   const revOf = new Map(list.map(r => [Number(r.reverses_tx_id), r]));
   const day = t => fmtDMY(localDateISO(new Date(t)));
@@ -12194,6 +12225,7 @@ function jhWithReversals(audit, revs) {
     const ids = a && a.metadata && Array.isArray(a.metadata.tx_ids) ? a.metadata.tx_ids.map(Number) : [];
     const hit = ids.map(x => revOf.get(x)).filter(Boolean);
     if (hit.length && jhIsIssueEntry(a)) rows[k] = { ...a, summary: `${a.summary || ''} (reversed on ${day(hit[0].created_at)})` };
+    else if (jhIsIssueEntry(a) && ids.some(x => jhSentTx.has(x))) rows[k] = { ...a, summary: `${a.summary || ''} (sent to offcut)` };
   }
   for (const r of list) {
     const sheets = Math.abs(+r.change || 0), ps = packetSize(r.paper_type || '');
@@ -12224,6 +12256,45 @@ function jhIssueLabel(a, job) {
   }
   const ord = n => ({ 1: '1st', 2: '2nd', 3: '3rd' })[n];
   return nums.size ? [...nums].sort().map(ord).join(' + ') + ' paper issued' : 'Paper issued';
+}
+// Old paper on an issue line (owner, 2026-11-17): the issued paper is no longer on the card (not its 1st / 2nd / 3rd paper)
+// and something of it is left - a "Sent to offcut" button for each such issue.
+function jhCardKeys(job) {
+  const inv = typeof inventoryAll !== 'undefined' ? inventoryAll : [];
+  const key = it => it ? [it.paper_type, it.size, it.gsm, it.is_offcut ? 'o' : ''].map(x => String(x == null ? '' : x).trim().toLowerCase()).join('|') : '';
+  const p = (job && job.particulars) || {};
+  return { key, keys: new Set([job && job.inventory_item_id, p.secondary_paper && p.secondary_paper.inventory_item_id, p.third_paper && p.third_paper.inventory_item_id]
+    .map(id => key(inv.find(i => i.id === Number(id)))).filter(Boolean)) };
+}
+function jhToOffcutBtns(jobId, a, job) {
+  if (!job || !a || a.action !== 'job.issue_stock' || !seeBtn('job_btn_paper_to_offcut')) return '';
+  const items = a.metadata && Array.isArray(a.metadata.items) ? a.metadata.items : [];
+  const inv = typeof inventoryAll !== 'undefined' ? inventoryAll : [];
+  const { key, keys } = jhCardKeys(job);
+  return items.map(x => {
+    const txId = Number(x && x.tx_id), it = inv.find(i => i.id === Number(x && x.item_id));
+    if (!txId || !it || jhRevTx.has(txId) || keys.has(key(it))) return '';
+    const left = Math.max(0, (+x.sheets || 0) - (jhSentTx.get(txId) || 0));
+    if (!(left > 0)) return '';
+    const ps = packetSize(it.paper_type), unit = packetUnitLabel(it.paper_type).toLowerCase(), pk = +(left / ps).toFixed(2);
+    return `<div style="margin-top:4px;"><button class="btn btn-sm" data-acc="job_btn_paper_to_offcut" onclick="event.stopPropagation(); jhSendToOffcut(${jobId}, ${txId}, ${pk}, '${unit}')" style="${OFFCUT_BTN_STYLE}padding:2px 10px;font-size:11.5px;" title="This paper is no longer on the job card - send what is left of it to offcut stock">&#8635; Sent to offcut (${pk} ${unit})</button></div>`;
+  }).join('');
+}
+async function jhSendToOffcut(jobId, txId, maxPkts, unit) {
+  const v = await promptDialog({ title: 'Send the old paper to offcut', confirmText: 'Send to offcut', defaultValue: String(maxPkts),
+    message: `This paper is no longer on Job E-${jobId}'s card. How many ${unit} of it went to offcut? (up to ${maxPkts}) - they are added to offcut stock.` });
+  if (v === null || v === undefined) return;
+  const n = parseFloat(String(v).trim());
+  if (!(n > 0) || n > maxPkts + 0.001) { notify(`Enter 0 to ${maxPkts} ${unit}`); return; }
+  showSaving(true);
+  try {
+    await api('POST', `/api/jobs/${jobId}/paper-to-offcut`, { tx_id: txId, packets: n });
+    notify(`${n} ${unit} sent to offcut`);
+    try { await loadInventory(); } catch (e) { /* the list refreshes on its own later */ }
+    if (document.getElementById('job-audit-content')) openHistory(jobId);
+    if (typeof mode !== 'undefined' && mode === 'dashboard') loadCeoDash(false);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 function jhIsIssueEntry(a) {
   return !!a && (a.action === 'job.issue_stock' || (a.action === 'job.process_from_ctp' && /offcut/i.test(a.summary || '')));
@@ -15919,7 +15990,7 @@ async function reverseJobHistory(jobId, auditId) {
 // "2nd paper changed from 0 to 3 packets" - no "->" or "|".
 function jhActionLabel(action) {
   const k = String(action || '');
-  const map = { 'job.create': 'Created', 'job.update': 'Edited', 'job.station': 'Station', 'job.issue_stock': 'Paper issued', 'job.paper_reversed': 'Issue reversed',
+  const map = { 'job.create': 'Created', 'job.update': 'Edited', 'job.station': 'Station', 'job.issue_stock': 'Paper issued', 'job.paper_reversed': 'Issue reversed', 'job.paper_to_offcut': 'Sent to offcut',
     'job.process_to_ctp': 'Sent to CTP', 'job.process_from_ctp': 'CTP done', 'job.delete': 'Archived', 'job.restore': 'Restored' };
   if (map[k]) return map[k];
   const t = k.replace(/^job\./, '').replace(/[._]+/g, ' ').trim();
@@ -15979,7 +16050,7 @@ function renderAuditFeed(rows, opts) {
     const offcut = jhIsOffcutEntry(a, job);
     // New entries already name the paper in their text; older ones get it here.
     const showPaper = papers.length && !(a.metadata && Array.isArray(a.metadata.items) && a.metadata.items.length);
-    return `${showPaper ? `<div style="font-size:12px;color:var(--text);margin-top:2px;">Paper: <b>${esc(papers.join(' + '))}</b></div>` : ''}
+    return `${showPaper ? `<div style="font-size:12px;color:var(--text);margin-top:2px;">Paper: <b>${esc(papers.join(' + '))}</b></div>` : ''}${jhToOffcutBtns(jobId, a, job)}
       <div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open in the ${offcut ? 'Offcut Consumption' : 'Stock Out'} report &rarr;</div>`;
   };
   const groups = [];
@@ -33245,6 +33316,7 @@ function jobForm(j={}, opts) {
                keep working, and the freed column widens Quantity of Packets. -->
           <input type="hidden" id="f-size" value="${v(j.size)}">
           <div style="font-size:11px;color:var(--text2);margin-top:2px;min-height:14px;"><span class="stock-hint" id="stock-hint"></span></div>
+          <div id="offcut-avail-paper"></div>
           <label style="display:inline-flex;align-items:center;gap:5px;margin-top:4px;cursor:pointer;font-size:11px;color:var(--text2);"
                  title="Split the job across a 2nd paper source — usually offcut, but any inventory item works. Both papers go to Pending Stock on CTP forward.">
             <input type="checkbox" id="f-use-second-paper"
@@ -33254,7 +33326,7 @@ function jobForm(j={}, opts) {
             <span>+ Add 2nd paper (offcut / additional)</span>
           </label>
         </td>
-        <td colspan="1"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="25x36" oninput="renderCutPreview()"></td>
+        <td colspan="1"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="25x36" oninput="renderCutPreview(); updateOffcutAvail()"><div id="offcut-avail-cut"></div></td>
         ${(() => {
           // Sheets Qty + Quantity of Packets both render as "primary + secondary"
           // when a 2nd paper is set. STORED values stay the TOTAL (sheets,
@@ -36585,7 +36657,44 @@ function collectParticulars() {
 // Live "Available: X packets · Need: Y packets" hint next to the paper picker.
 // Uses packets (not sheets) so it stays clear when a cut is applied — e.g.
 // 2,800 working sheets at 1/4 cut = 700 raw sheets = 7 packets from stock.
+// Offcut available (owner, 2026-11-17): offcut in stock of the same paper type, the size either way round (16x20 =
+// 20x16) and gsm within 50 - next to the paper (its sheet size) and the cutting size. Tap it for the list.
+function offcutSizeKey(sz) {
+  const m = String(sz || '').toLowerCase().replace(/\s+/g, '').match(/^(\d+(?:\.\d+)?)[x×*](\d+(?:\.\d+)?)/);
+  return m ? [+m[1], +m[2]].sort((a, b) => a - b).join('x') : '';
+}
+function offcutMatches(type, size, gsm) {
+  const want = offcutSizeKey(size), t = String(type || '').trim().toLowerCase(), g = parseFloat(gsm);
+  if (!want || !t) return [];
+  return (inventoryAll || []).filter(i => i && i.is_offcut && !i.deleted_at && (+i.current_balance || 0) > 0
+    && String(i.paper_type || '').trim().toLowerCase() === t && offcutSizeKey(i.size) === want
+    && (!Number.isFinite(g) || !(parseFloat(i.gsm) > 0) || Math.abs(parseFloat(i.gsm) - g) <= 50));
+}
+function offcutAvailHtml(list, slot) {
+  if (!list.length) return '';
+  const pk = list.reduce((a, i) => { const k = isReamPaper(i.paper_type) ? 'reams' : 'pkts'; a[k] += (+i.current_balance || 0) / packetSize(i.paper_type); return a; }, { pkts: 0, reams: 0 });
+  const tot = [pk.pkts ? +pk.pkts.toFixed(2) + ' pkts' : '', pk.reams ? +pk.reams.toFixed(2) + ' reams' : ''].filter(Boolean).join(' + ');
+  const rows = list.map(i => `<div>${esc([i.paper_type, i.size, i.gsm ? i.gsm + 'gsm' : ''].filter(Boolean).join(' '))}${i.brand ? ' · ' + esc(i.brand) : ''} - <b>${+((+i.current_balance || 0) / packetSize(i.paper_type)).toFixed(2)} ${isReamPaper(i.paper_type) ? 'reams' : 'pkts'}</b></div>`).join('');
+  return `<span class="offcut-avail" onclick="event.stopPropagation(); const d = document.getElementById('offcut-avail-list-${slot}'); if (d) d.style.display = d.style.display === 'none' ? 'block' : 'none';" title="Offcut of this paper is in stock - tap for the list">&#9432; Offcut available · ${tot}</span>
+    <div class="offcut-avail-list" id="offcut-avail-list-${slot}" style="display:none;">${rows}</div>`;
+}
+function updateOffcutAvail() {
+  const pEl = document.getElementById('offcut-avail-paper'), cEl = document.getElementById('offcut-avail-cut');
+  if (!pEl && !cEl) return;
+  const hidden = document.getElementById('f-inventory-item');
+  const it = hidden && hidden.value ? inventoryAll.find(x => x.id === parseInt(hidden.value, 10)) : null;
+  // The paper: its own sheet size (only when it is fresh paper - an offcut paper is offcut already).
+  if (pEl) pEl.innerHTML = it && !it.is_offcut ? offcutAvailHtml(offcutMatches(it.paper_type, it.size, it.gsm), 'paper') : '';
+  // The cutting size ("21x17" or "21x17 / 270"): the paper's type, the gsm typed there or the paper's.
+  if (cEl) {
+    const raw = String((document.getElementById('f-cutting-size') || {}).value || '');
+    const g = (raw.split('/')[1] || '').trim();
+    const sameAsPaper = it && offcutSizeKey(raw) === offcutSizeKey(it.size);
+    cEl.innerHTML = it && !sameAsPaper ? offcutAvailHtml(offcutMatches(it.paper_type, raw, g || it.gsm), 'cut') : '';
+  }
+}
 function updateStockHint() {
+  updateOffcutAvail();
   const hidden = document.getElementById('f-inventory-item');
   const hint = document.getElementById('stock-hint');
   if (!hidden || !hint) return;
@@ -43743,6 +43852,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_extra_packets',   type: 'action' },
   { key: 'job_btn_over_issue',      type: 'action' },
   { key: 'job_btn_over_issue_ignore', type: 'action' },
+  { key: 'job_btn_paper_to_offcut', type: 'action' },
   { key: 'job_btn_record_delivery', type: 'action' },
   { key: 'job_btn_delivery_details', type: 'button' },
   { key: 'job_btn_operator_entry',  type: 'action' },

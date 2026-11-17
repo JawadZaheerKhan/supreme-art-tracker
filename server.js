@@ -496,7 +496,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_record_delivery', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -560,6 +560,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   job_btn_extra_packets:   { label: '+ Request extra packets — on a running job, sent to the store keeper', levels: { admin: 'yes' } },
   job_btn_over_issue:      { label: 'Over-issued stock — Use in job / Add to Offcut / Send Back', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_over_issue_ignore: { label: 'Over-issued stock — Ignore (clears it, no stock moves)', levels: {} },
+  job_btn_paper_to_offcut: { label: 'Old paper — Sent to offcut (job History / Dashboard)', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // Filling the Record Delivery form is separated from pressing the button, so
   // finance can enter the invoicing detail on a shipment the PM then records.
@@ -5184,13 +5185,21 @@ app.get('/api/jobs/:id/paper-reversals', requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!(id > 0)) return res.json([]);
     res.json(await sql`
-      SELECT r.id, r.created_at, r.user_email, r.actor_name, r.change, r.reverses_tx_id, o.created_at AS issued_at,
+      SELECT 'reversal' AS kind, r.id, r.created_at, r.user_email, r.actor_name, r.change, r.reverses_tx_id, o.created_at AS issued_at,
              i.paper_type, i.size, i.gsm, i.brand, COALESCE(i.is_offcut, false) AS offcut
         FROM inventory_transactions r
         JOIN inventory_transactions o ON o.id = r.reverses_tx_id
         LEFT JOIN inventory_items i ON i.id = r.item_id
        WHERE o.job_id = ${id}
-       ORDER BY r.created_at`);
+      UNION ALL
+      SELECT 'offcut' AS kind, r.id, r.created_at, r.user_email, r.actor_name, r.change, r.paired_tx_id AS reverses_tx_id, o.created_at AS issued_at,
+             i.paper_type, i.size, i.gsm, i.brand, COALESCE(i.is_offcut, false) AS offcut
+        FROM inventory_transactions r
+        JOIN inventory_transactions o ON o.id = r.paired_tx_id
+        LEFT JOIN inventory_items i ON i.id = r.item_id
+       WHERE o.job_id = ${id} AND r.reason = 'job-offcut' AND r.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions x WHERE x.reverses_tx_id = r.id)
+       ORDER BY created_at`);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.post('/api/reports/job-issued', requireAuth, async (req, res) => {
@@ -5249,6 +5258,22 @@ app.get('/api/reports/paper-trace', requireAuth, async (req, res) => {
          AND t.reverses_tx_id IS NULL
          AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
        GROUP BY t.job_id, i.paper_type, i.size, i.gsm, COALESCE(i.is_offcut, false)`;
+    // Sent to offcut from these jobs' issues (owner, 2026-11-17), per paper of the issue.
+    const rets = await sql`
+      SELECT o.job_id, i.paper_type, i.size, i.gsm::text AS gsm, COALESCE(i.is_offcut, false) AS offcut,
+             SUM(r.change)::float AS ret_total,
+             SUM(CASE WHEN COALESCE(i.is_offcut, false) = false AND o.created_at >= ${startIso}::timestamptz AND o.created_at < ${endIso}::timestamptz THEN r.change ELSE 0 END)::float AS ret_period
+        FROM inventory_transactions r
+        JOIN inventory_transactions o ON o.id = r.paired_tx_id
+        LEFT JOIN inventory_items i ON i.id = o.item_id
+       WHERE r.reason = 'job-offcut' AND r.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions x WHERE x.reverses_tx_id = r.id)
+         AND o.job_id IN (SELECT DISTINCT job_id FROM inventory_transactions WHERE job_id IS NOT NULL AND reason = 'job-consumed'
+                            AND created_at >= ${startIso}::timestamptz AND created_at < ${endIso}::timestamptz)
+       GROUP BY o.job_id, i.paper_type, i.size, i.gsm, COALESCE(i.is_offcut, false)`;
+    const rk = r => [r.job_id, r.paper_type, r.size, r.gsm, r.offcut ? 1 : 0].join('|');
+    const retBy = new Map(rets.map(r => [rk(r), r]));
+    for (const r of rows) { const x = retBy.get(rk(r)); r.s_ret_total = x ? +x.ret_total || 0 : 0; r.s_ret_period = x ? +x.ret_period || 0 : 0; }
     const jIds = [...new Set(rows.map(r => r.job_id))];
     const jInfo = new Map((jIds.length ? await sql`SELECT id, name, client, deleted_at FROM jobs WHERE id = ANY(${jIds})` : []).map(j => [j.id, j]));
     const jobs = rows.map(r => { const j = jInfo.get(r.job_id); return { ...r, name: j ? j.name : '', client: j ? j.client : '', deleted: !j || !!j.deleted_at }; });
@@ -5297,7 +5322,11 @@ app.get('/api/reports/stale-paper-issues', requireAuth, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const rows = await sql`
-      SELECT t.id, t.job_id, j.name AS job_name, -t.change AS sheets, t.created_at, t.challan_no,
+      SELECT * FROM (
+      SELECT t.id, t.job_id, j.name AS job_name,
+             -t.change - COALESCE((SELECT SUM(o.change) FROM inventory_transactions o WHERE o.paired_tx_id = t.id AND o.reason = 'job-offcut'
+                AND o.reverses_tx_id IS NULL AND NOT EXISTS (SELECT 1 FROM inventory_transactions r2 WHERE r2.reverses_tx_id = o.id)), 0) AS sheets,
+             t.created_at, t.challan_no,
              i.paper_type, i.size, i.gsm, i.brand, COALESCE(i.is_offcut, false) AS offcut,
              ci.paper_type AS card_type, ci.size AS card_size, ci.gsm AS card_gsm, COALESCE(ci.is_offcut, false) AS card_offcut
         FROM inventory_transactions t
@@ -5313,7 +5342,8 @@ app.get('/api/reports/stale-paper-issues', requireAuth, async (req, res) => {
                            CASE WHEN (j.particulars->'third_paper'->>'inventory_item_id') ~ '^[0-9]+$' THEN (j.particulars->'third_paper'->>'inventory_item_id')::int END)
               AND COALESCE(c.paper_type, '') = COALESCE(i.paper_type, '') AND COALESCE(c.size, '') = COALESCE(i.size, '')
               AND COALESCE(c.gsm::text, '') = COALESCE(i.gsm::text, '') AND COALESCE(c.is_offcut, false) = COALESCE(i.is_offcut, false))
-       ORDER BY t.created_at DESC`;
+      ) x WHERE x.sheets > 0   -- all of it sent to offcut (owner, 2026-11-17): settled
+       ORDER BY x.created_at DESC`;
     res.json(rows);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -9609,6 +9639,38 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requirePermission('inv_b
 //                extra is never raised again.
 // The source item's original deduction stays untouched, so the inventory
 // report keeps recording the extra issuance exactly as it did before.
+// Old paper sent to offcut (owner, 2026-11-17): the paper was changed on the card after it was issued, and instead of
+// reversing that issue its packets went to offcut. A real stock move: into offcut stock (same paper, size, gsm, brand -
+// an issue that was offcut already goes back to its own offcut item), linked to the job and to that issue (paired).
+app.post('/api/jobs/:id/paper-to-offcut', requirePermission('job_btn_paper_to_offcut'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10), txId = parseInt(req.body && req.body.tx_id, 10);
+    const [tx] = await sql`SELECT * FROM inventory_transactions WHERE id = ${txId}`;
+    if (!tx || Number(tx.job_id) !== id || tx.reason !== 'job-consumed' || !(tx.change < 0) || tx.reverses_tx_id) return res.status(400).json({ error: 'That is not a paper issue of this job.' });
+    if ((await sql`SELECT 1 FROM inventory_transactions WHERE reverses_tx_id = ${txId} LIMIT 1`).length) return res.status(400).json({ error: 'This issue was reversed - there is nothing to send to offcut.' });
+    const [src] = await sql`SELECT * FROM inventory_items WHERE id = ${tx.item_id}`;
+    if (!src) return res.status(400).json({ error: 'The paper of this issue is not in Inventory any more.' });
+    const [{ sent }] = await sql`
+      SELECT COALESCE(SUM(o.change), 0)::float AS sent FROM inventory_transactions o
+       WHERE o.paired_tx_id = ${txId} AND o.reason = 'job-offcut' AND o.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = o.id)`;
+    const ps = packetSize(src.paper_type), unit = isReamPaperSrv(src.paper_type) ? 'reams' : 'packets';
+    const left = Math.max(0, -tx.change - sent);
+    const asked = req.body && req.body.packets != null && String(req.body.packets).trim() !== '' ? Math.round(Number(req.body.packets) * ps) : left;
+    if (!(asked > 0)) return res.status(400).json({ error: 'Enter how many ' + unit + ' went to offcut.' });
+    if (asked > left) return res.status(400).json({ error: `Only ${+(left / ps).toFixed(2)} ${unit} of this issue are left to send.` });
+    const off = src.is_offcut ? src : await findOrCreateOffcutItem(sql, src, src.size || '');
+    const paper = [src.paper_type, src.size, src.gsm ? src.gsm + 'gsm' : ''].filter(Boolean).join(' ') + (src.brand ? ' · ' + src.brand : '');
+    const amount = `${+(asked / ps).toFixed(2)} ${unit} (${asked.toLocaleString()} sheets)`;
+    const newTx = await applyInventoryChange(sql, { itemId: off.id, change: asked, reason: 'job-offcut', jobId: id, pairedTxId: txId, user: req.user,
+      notes: `Job E-${id}: ${amount} of the old paper ${paper} (no longer on the job card) sent to offcut` });
+    await logAudit(sql, req, { action: 'job.paper_to_offcut', entityType: 'job', entityId: id,
+      summary: `Old paper sent to offcut: ${amount} of ${paper}`, metadata: { tx_id: txId, offcut_item_id: off.id, offcut_tx_id: newTx || null, sheets: asked } });
+    res.json({ ok: true, sheets: asked, left: left - asked, offcut_item_id: off.id });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 app.post('/api/jobs/:id/over-issue/decide', requireAnyBtn(['job_btn_over_issue', 'job_btn_over_issue_ignore']), async (req, res) => {   // its own row (owner, 2026-10-26)
   try {
     await dbReady;
@@ -13662,7 +13724,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res
           AND t.reverses_tx_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
           -- One issue undone: only the offcut written with it (same moment).
-          AND (${!jobPartial} OR ABS(EXTRACT(EPOCH FROM (t.created_at - ${tx.created_at}::timestamptz))) <= 10)
+          AND (${!jobPartial} OR ABS(EXTRACT(EPOCH FROM (t.created_at - ${tx.created_at}::timestamptz))) <= 10 OR t.paired_tx_id = ${tx.id})
         ORDER BY t.id ASC
       `;
       for (const orow of pairedOffcuts) {
