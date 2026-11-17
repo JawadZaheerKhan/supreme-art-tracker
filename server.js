@@ -8472,7 +8472,9 @@ app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
     // Only jobs off a printing or die cutting / embellishment machine (owner, 2026-11-16).
     const machines = (await stationMachineList(sql)).filter(isQaMachine);
     const byM = new Map(machines.map(m => [String(m.name).trim().toLowerCase(), m]));
-    const jobs = await sql`SELECT id, name, client, log FROM jobs WHERE deleted_at IS NULL AND updated_at > NOW() - INTERVAL '3 days'`;
+    // A job already Delivered is never waiting (owner, 2026-11-17: E-1426, printed days before, was only marked done
+    // on Printing today and run through to Delivered in minutes - it showed as waiting for line clearance).
+    const jobs = await sql`SELECT id, name, client, log FROM jobs WHERE deleted_at IS NULL AND updated_at > NOW() - INTERVAL '3 days' AND COALESCE(stage_index, 0) < 7`;
     const lcs = await sql`SELECT machine, machine_code, prev_job FROM line_clearance WHERE deleted_at IS NULL AND entry_date >= ${yday}`;
     // A QA entry with this job as its Previous Job takes it off (owner, 2026-11-13) - the machine matched by
     // its name or by its code, so a renamed / re-typed machine still counts.
