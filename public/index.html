@@ -20851,7 +20851,10 @@ function jrMilRows(opts) {
     const shipperNote = (ent && ent.shipper_note) || '', looseNote = (ent && ent.loose_note) || '';
     const typedCartons = (shipperNote || looseNote) ? [...shipperLines(shipperNote), ...shipperLines(looseNote)].reduce((a, l) => a + l.cartons, 0) : null;
     const cartonsMismatch = typedCartons !== null && Math.abs(typedCartons - packedCartons) > 1e-9;
-    out.push({ gName, groupId: ent ? ent.id : null, product, code, client, milQty, ready, inProcess, shipped, shipper, short, jobCount: gJobs.length, shipperText, looseText, packedCartons, shipperNote, looseNote, typedCartons, cartonsMismatch });
+    // Old Shipped (owner, 2026-11-17): shipped before the app, typed on the report - in Shipped Qty for every date.
+    const oldShipped = ent ? (parseFloat(String(ent.old_shipped ?? '').replace(/[^0-9.-]/g, '')) || 0) : 0;
+    const shippedAll = shipped + oldShipped;
+    out.push({ gName, groupId: ent ? ent.id : null, product, code, client, milQty, ready, inProcess, shipped, oldShipped, shippedAll, shipper, short, jobCount: gJobs.length, shipperText, looseText, packedCartons, shipperNote, looseNote, typedCartons, cartonsMismatch });
   }
   return out.sort((a, b) => String(a.product).localeCompare(String(b.product)));
 }
@@ -20900,7 +20903,7 @@ function renderJrMil() {
   if (!rows.length) { el.innerHTML = '<div class="empty">No MIL products match these filters.</div>'; return; }
   const th  = 'style="text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;"';
   const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;"';
-  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, inProcess: a.inProcess + r.inProcess, shipped: a.shipped + r.shipped, shipper: a.shipper + r.shipper, packed: a.packed + r.packedCartons }), { milQty: 0, ready: 0, inProcess: 0, shipped: 0, shipper: 0, packed: 0 });
+  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, inProcess: a.inProcess + r.inProcess, shipped: a.shipped + r.shippedAll, oldShipped: a.oldShipped + r.oldShipped, shipper: a.shipper + r.shipper, packed: a.packed + r.packedCartons }), { milQty: 0, ready: 0, inProcess: 0, shipped: 0, oldShipped: 0, shipper: 0, packed: 0 });
   const canEdit = canEditMilGroup();
   const shortBg = 'background:rgba(220,38,38,0.12);';
   // Carton Shipper / Loose Carton Shipper: typed by hand (which sizes are on
@@ -20922,7 +20925,7 @@ function renderJrMil() {
   // Code and MIL Qty are the MIL group's own fields: typed here, saved on the
   // group (older name-only groups have no group record to save to).
   const cell = (r, i, field, shown, align) => (canEdit && r.groupId)
-    ? `<input type="text" class="sm-ref-input" value="${esc(shown)}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveMilGroupField(${i}, '${field}', this.value)" title="Edit and press Enter - saved on the MIL group" style="width:${field === 'po_qty' ? '90px' : '84px'};text-align:${align};">`
+    ? `<input type="text" class="sm-ref-input" value="${esc(shown)}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveMilGroupField(${i}, '${field}', this.value)" title="Edit and press Enter - saved on the MIL group" style="width:${field === 'po_qty' || field === 'old_shipped' ? '90px' : '84px'};text-align:${align};">`
     : (esc(shown) || '<span style="color:var(--text3)">—</span>');
   const body = rows.map((r, i) => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;${r.short ? shortBg + 'box-shadow:inset 4px 0 0 #dc2626;' : ''}" onclick="jrOpenMilGroup(${i})" title="${r.short ? 'Ready + In Process is below the MIL Qty - ' : ''}Open this MIL product's tile in the Jobs tab">
       <td style="padding:7px 2px 7px 8px;text-align:right;font-size:11px;color:var(--text2);width:1%;white-space:nowrap;">${i + 1}</td>
@@ -20931,9 +20934,10 @@ function renderJrMil() {
       <td style="padding:7px 10px;text-align:right;">${cell(r, i, 'po_qty', r.milQty ? String(r.milQty) : '', 'right')}</td>
       <td style="padding:7px 10px;text-align:right;font-weight:600;color:${r.short ? '#b91c1c' : '#166534'};">${fmtN(r.ready)}</td>
       <td style="padding:7px 10px;text-align:right;color:#1e40af;">${fmtN(r.inProcess)}</td>
-      <td style="padding:7px 10px;text-align:right;">${r.shipped
-        ? `<span onclick="event.stopPropagation(); jrOpenMilShipments(${i})" title="See these shipments in the Jobs report (Delivered), up to ${esc(fmtDMY(asOf))}" style="color:#9a3412;font-weight:700;text-decoration:underline;text-underline-offset:2px;cursor:pointer;">${fmtN(r.shipped)}</span>`
-        : '0'}</td>
+      <td style="padding:7px 10px;text-align:right;" title="Shipped before the app - type it and press Enter">${cell(r, i, 'old_shipped', r.oldShipped ? String(r.oldShipped) : '', 'right')}</td>
+      <td style="padding:7px 10px;text-align:right;"${r.oldShipped ? ` title="${fmtN(r.shipped)} in the app + ${fmtN(r.oldShipped)} old"` : ''}>${r.shipped
+        ? `<span onclick="event.stopPropagation(); jrOpenMilShipments(${i})" title="See these shipments in the Jobs report (Delivered), up to ${esc(fmtDMY(asOf))}${r.oldShipped ? ' - plus ' + fmtN(r.oldShipped) + ' old shipped' : ''}" style="color:#9a3412;font-weight:700;text-decoration:underline;text-underline-offset:2px;cursor:pointer;">${fmtN(r.shippedAll)}</span>`
+        : fmtN(r.shippedAll)}</td>
       ${noteCell(r, i, 'shipper_note', r.shipperNote, r.shipperText)}
       ${noteCell(r, i, 'loose_note', r.looseNote, r.looseText)}
       <td style="padding:7px 10px;text-align:right;font-weight:600;${r.cartonsMismatch ? mmBg : ''}"${r.cartonsMismatch ? ` title="Typed cartons (${fmtN(r.typedCartons)}) don't match the cartons on hand (${fmtN(r.packedCartons)})"` : ''}>${fmtN(r.packedCartons)}</td>
@@ -20946,7 +20950,7 @@ function renderJrMil() {
     <div class="report-scroll-wrap report-scroll-wrap--fit">
       <table class="ss-table" style="width:auto;border-collapse:collapse;font-size:13px;">
         <thead><tr style="background:var(--bg2);">
-          <th style="text-align:right;padding:8px 2px 8px 8px;font-size:11px;font-weight:700;width:1%;">#</th><th style="text-align:left;padding:8px 10px 8px 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;">Product Code</th><th ${th}>Product Name</th><th ${thR}>MIL Qty</th><th ${thR}>Ready Qty</th><th ${thR}>In Process</th><th ${thR}>Shipped Qty</th><th ${th} title="Typed: the full cartons on hand, e.g. 1400x5 + 1500x10 (grey = the app's estimate)">Carton Shipper</th><th ${th} title="Typed: the loose cartons on hand, e.g. 200x2 (grey = the app's estimate)">Loose Carton Shipper</th><th ${thR} title="Automatic: cartons packed at the Station less the shipments' cartons">Total Cartons</th><th ${thR} title="Cartons on the shipments, up to the date">Shipped Cartons</th>
+          <th style="text-align:right;padding:8px 2px 8px 8px;font-size:11px;font-weight:700;width:1%;">#</th><th style="text-align:left;padding:8px 10px 8px 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;">Product Code</th><th ${th}>Product Name</th><th ${thR}>MIL Qty</th><th ${thR}>Ready Qty</th><th ${thR}>In Process</th><th ${thR} title="Shipped before the app, typed here - added into Shipped Qty">Old Shipped</th><th ${thR} title="Shipped in the app up to the date + Old Shipped">Shipped Qty</th><th ${th} title="Typed: the full cartons on hand, e.g. 1400x5 + 1500x10 (grey = the app's estimate)">Carton Shipper</th><th ${th} title="Typed: the loose cartons on hand, e.g. 200x2 (grey = the app's estimate)">Loose Carton Shipper</th><th ${thR} title="Automatic: cartons packed at the Station less the shipments' cartons">Total Cartons</th><th ${thR} title="Cartons on the shipments, up to the date">Shipped Cartons</th>
         </tr></thead>
         <tbody>${body}</tbody>
         <tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
@@ -20954,6 +20958,7 @@ function renderJrMil() {
           <td style="padding:8px 10px;text-align:right;">${fmtN(t.milQty)}</td>
           <td style="padding:8px 10px;text-align:right;color:#166534;">${fmtN(t.ready)}</td>
           <td style="padding:8px 10px;text-align:right;color:#1e40af;">${fmtN(t.inProcess)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmtN(t.oldShipped)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmtN(t.shipped)}</td>
           <td></td><td></td>
           <td style="padding:8px 10px;text-align:right;">${fmtN(t.packed)}</td>
@@ -20967,9 +20972,9 @@ async function saveMilGroupField(i, field, value) {
   const r = jrMilRowsCache[i];
   if (!r || !r.groupId) return;
   let v = String(value || '').trim();
-  if (field === 'po_qty') {
+  if (field === 'po_qty' || field === 'old_shipped') {
     v = v.replace(/,/g, '');
-    if (v !== '' && !(Number.isFinite(Number(v)) && Number(v) >= 0)) { notify('MIL Qty must be a number'); renderJrMil(); return; }
+    if (v !== '' && !(Number.isFinite(Number(v)) && Number(v) >= 0)) { notify((field === 'po_qty' ? 'MIL Qty' : 'Old Shipped') + ' must be a number'); renderJrMil(); return; }
   }
   if (field === 'shipper_note' || field === 'loose_note') {
     const parts = v.split('+').map(s => s.trim()).filter(Boolean);
@@ -20981,7 +20986,7 @@ async function saveMilGroupField(i, field, value) {
     const updated = await api('PATCH', `/api/stock-groups/${r.groupId}`, { [field]: v === '' ? null : v });
     const ix = (stockGroups || []).findIndex(g => g && g.id === r.groupId);
     if (ix >= 0 && updated) stockGroups[ix] = { ...stockGroups[ix], ...updated };
-    notify({ jobcode: 'Code saved', po_qty: 'MIL Qty saved', shipper_note: 'Carton Shipper saved', loose_note: 'Loose Carton Shipper saved' }[field] || 'Saved');
+    notify({ jobcode: 'Code saved', po_qty: 'MIL Qty saved', old_shipped: 'Old Shipped saved', shipper_note: 'Carton Shipper saved', loose_note: 'Loose Carton Shipper saved' }[field] || 'Saved');
   } catch (e) { notify('Error: ' + e.message); }
   renderJrMil();
 }
@@ -21045,7 +21050,7 @@ function printJrMil() {
   const tdL = 'style="border:1px solid #000;padding:4px;"';
   const tdR = 'style="border:1px solid #000;padding:4px;text-align:right;"';
   const f = n => (+n || 0).toLocaleString();
-  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, inProcess: a.inProcess + r.inProcess, shipped: a.shipped + r.shipped, shipper: a.shipper + r.shipper, packed: a.packed + r.packedCartons }), { milQty: 0, ready: 0, inProcess: 0, shipped: 0, shipper: 0, packed: 0 });
+  const t = rows.reduce((a, r) => ({ milQty: a.milQty + r.milQty, ready: a.ready + r.ready, inProcess: a.inProcess + r.inProcess, shipped: a.shipped + r.shippedAll, oldShipped: a.oldShipped + r.oldShipped, shipper: a.shipper + r.shipper, packed: a.packed + r.packedCartons }), { milQty: 0, ready: 0, inProcess: 0, shipped: 0, oldShipped: 0, shipper: 0, packed: 0 });
   const html = `
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
@@ -21059,7 +21064,7 @@ function printJrMil() {
         <tr style="background:#f7f1ea;">
           <th ${tdL}>Product Code</th><th ${tdL}>Product Name</th><th ${tdR}>MIL Qty</th><th ${tdR}>Ready Qty</th><th ${tdR}>In Process</th><th ${tdR}>Shipped Qty</th><th ${tdL}>Carton Shipper</th><th ${tdL}>Loose Carton Shipper</th><th ${tdR}>Total Cartons</th><th ${tdR}>Shipped Cartons</th>
         </tr>
-        ${rows.map(r => `<tr${r.short ? ' style="background:#fde2e2;"' : ''}><td ${tdL}>${esc(r.code)}</td><td ${tdL}>${esc(r.product)}</td><td ${tdR}>${f(r.milQty)}</td><td ${tdR}>${f(r.ready)}</td><td ${tdR}>${f(r.inProcess)}</td><td ${tdR}>${f(r.shipped)}</td><td ${tdL}>${esc(r.shipperNote || r.shipperText) || '—'}</td><td ${tdL}>${esc(r.looseNote || r.looseText) || '—'}</td><td ${tdR}>${f(r.packedCartons)}</td><td ${tdR}>${f(r.shipper)}</td></tr>`).join('')}
+        ${rows.map(r => `<tr${r.short ? ' style="background:#fde2e2;"' : ''}><td ${tdL}>${esc(r.code)}</td><td ${tdL}>${esc(r.product)}</td><td ${tdR}>${f(r.milQty)}</td><td ${tdR}>${f(r.ready)}</td><td ${tdR}>${f(r.inProcess)}</td><td ${tdR}>${f(r.shippedAll)}</td><td ${tdL}>${esc(r.shipperNote || r.shipperText) || '—'}</td><td ${tdL}>${esc(r.looseNote || r.looseText) || '—'}</td><td ${tdR}>${f(r.packedCartons)}</td><td ${tdR}>${f(r.shipper)}</td></tr>`).join('')}
         <tr style="background:#f7f1ea;font-weight:bold;"><td ${tdL} colspan="2" align="right">Totals</td><td ${tdR}>${f(t.milQty)}</td><td ${tdR}>${f(t.ready)}</td><td ${tdR}>${f(t.inProcess)}</td><td ${tdR}>${f(t.shipped)}</td><td ${tdL}></td><td ${tdL}></td><td ${tdR}>${f(t.packed)}</td><td ${tdR}>${f(t.shipper)}</td></tr>
       </table>
     </div>`;
@@ -21080,7 +21085,7 @@ async function exportJrMil() {
   const asOf = jrMilAsOf();
   const header = ['Product Code', 'Product Name', 'MIL Qty', 'Ready Qty', 'In Process', 'Shipped Qty', 'Carton Shipper', 'Loose Carton Shipper', 'Total Cartons', 'Shipped Cartons', 'Below MIL'];
   const aoa = reportExcelAoa(header);
-  for (const r of rows) aoa.push([r.code, r.product, r.milQty, r.ready, r.inProcess, r.shipped, r.shipperNote || r.shipperText, r.looseNote || r.looseText, r.packedCartons, r.shipper, r.short ? 'YES' : '']);
+  for (const r of rows) aoa.push([r.code, r.product, r.milQty, r.ready, r.inProcess, r.shippedAll, r.shipperNote || r.shipperText, r.looseNote || r.looseText, r.packedCartons, r.shipper, r.short ? 'YES' : '']);
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   applyReportExcelHeading(ws, header, {
     title: 'MIL PRODUCTS REPORT',

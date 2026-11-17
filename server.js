@@ -466,7 +466,8 @@ function getDb() {
 // Bumped again for the Access Register row inv_btn_print_sticker (split off inv_btn_batches, 2026-11-11).
 // Bumped again for Edit / Hidden buttons - View on them becomes Hidden (Print: Edit), 2026-11-11.
 // Bumped again for QA Line Clearance (operators.kind, line_clearance, QC / QA access columns), 2026-11-11.
-const SCHEMA_VERSION = 'v2026-11-11-machine-id';   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+// Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
+const SCHEMA_VERSION = 'v2026-11-17-old-shipped';   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1077,6 +1078,8 @@ async function initDb() {
     // 1500x10") - which sizes ship isn't recorded anywhere (2026-10-13).
     await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS shipper_note TEXT`;
     await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS loose_note TEXT`;
+    // MIL Products report: cartons shipped before the app, typed by hand - added to Shipped Qty (owner, 2026-11-17).
+    await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS old_shipped NUMERIC`;
     await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
@@ -11778,6 +11781,12 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
     const clientVisible = 'client_visible' in body ? !!body.client_visible : cur.client_visible;
     const shipperNote   = 'shipper_note' in body ? (String(body.shipper_note || '').trim().slice(0, 200) || null) : (cur.shipper_note ?? null);
     const looseNote     = 'loose_note' in body ? (String(body.loose_note || '').trim().slice(0, 200) || null) : (cur.loose_note ?? null);
+    let oldShipped = cur.old_shipped ?? null;
+    if ('old_shipped' in body) {
+      const raw = String(body.old_shipped ?? '').replace(/,/g, '').trim();
+      oldShipped = raw === '' ? null : Number(raw);
+      if (oldShipped !== null && (!Number.isFinite(oldShipped) || oldShipped < 0)) return res.status(400).json({ error: 'Old Shipped must be a number.' });
+    }
     // Sanitize secondary_paper on the template — issued_sheets is a
     // per-sub-job runtime counter, must not live on the group's
     // template (otherwise duplicating from group would leak stale
@@ -11799,6 +11808,7 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
              client_visible = ${clientVisible},
              shipper_note = ${shipperNote},
              loose_note = ${looseNote},
+             old_shipped = ${oldShipped},
              updated_at = NOW()
        WHERE id = ${id}
        RETURNING *
@@ -11822,6 +11832,7 @@ app.patch('/api/stock-groups/:id', requirePermission('job_btn_edit'), async (req
     if (String(cur.jobcode || '') !== String(jobcode || '')) groupChanges.push(`Code "${cur.jobcode || ''}" -> "${jobcode || ''}"`);
     if (String(cur.po_qty || '') !== String(poQty || '')) groupChanges.push(`MIL Qty "${cur.po_qty || ''}" -> "${poQty || ''}"`);
     if (String(cur.shipper_note || '') !== String(shipperNote || '')) groupChanges.push(`Carton Shipper "${cur.shipper_note || ''}" -> "${shipperNote || ''}"`);
+    if (String(cur.old_shipped ?? '') !== String(oldShipped ?? '')) groupChanges.push(`Old Shipped "${cur.old_shipped ?? ''}" -> "${oldShipped ?? ''}"`);
     if (String(cur.loose_note || '') !== String(looseNote || '')) groupChanges.push(`Loose Carton Shipper "${cur.loose_note || ''}" -> "${looseNote || ''}"`);
     await logAudit(sql, req, {
       action: 'group.update', entityType: 'group', entityId: id,
