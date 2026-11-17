@@ -20472,8 +20472,11 @@ function renderJobsReport() {
     if (!rows.find(r => r.id === id)) jobsReportSel.delete(id);
   }
   if (!rows.length) {
+    // A MIL product with no shipments in the app yet: its old shipment and the button still show.
+    const old0 = jrMilOldShipment();
+    const oldHtml = old0 ? `<div style="margin-top:8px;">${old0.qty ? `<div style="font-size:13px;color:#b91c1c;font-weight:700;margin-bottom:6px;">Old shipment: ${(+old0.qty).toLocaleString()} cartons</div>` : ''}${old0.canEdit ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="jrEditMilOldShipment()">&#9998; Old Shipment${old0.qty ? ': ' + (+old0.qty).toLocaleString() : ''}</button>` : ''}</div>` : '';
     el.innerHTML = `<div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
-      ${reportEmptyHtml('jobs', `No ${jrModeWord()} jobs match these filters.`)}`;
+      ${reportEmptyHtml('jobs', `No ${jrModeWord()} jobs match these filters.`)}${oldHtml}`;
     return;
   }
   const fmt = n => !n && n !== 0 ? '' : (Number.isInteger(+n) ? (+n).toLocaleString() : (+n).toFixed(2));
@@ -20632,6 +20635,23 @@ function renderJobsReport() {
   const thR = 'style="text-align:right;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text);font-weight:700;"';
   const allVisSel  = rows.length && rows.every(r => jobsReportSel.has(r.id));
   const someVisSel = !allVisSel && rows.some(r => jobsReportSel.has(r.id));
+  const old = jrMilOldShipment();
+  const oldQty = old && old.qty ? old.qty : 0;
+  const oldRow = oldQty ? `<tr style="border-bottom:1px solid var(--border);background:#fef2f2;" title="Old shipment - shipped before the app, typed with the Old Shipment button. Counted in the MIL reports only.">
+      <td class="bulk-td"></td>
+      <td style="padding:8px 10px;font-weight:800;color:#b91c1c;white-space:nowrap;">Old</td>
+      <td style="padding:8px 10px;">${esc(old.product)}</td>
+      <td style="padding:8px 10px;">&mdash;</td>
+      <td style="padding:8px 10px;font-size:11.5px;color:#b91c1c;font-weight:700;">Old shipment</td>
+      <td colspan="4"></td>
+      ${milMode ? '<td></td>' : ''}
+      <td style="padding:8px 10px;text-align:right;">${fmt(oldQty)}</td>
+      <td></td>
+      <td style="padding:8px 10px;text-align:right;">${fmt(oldQty)}</td>
+      <td colspan="11"></td>
+    </tr>` : '';
+  const oldBtn = old && old.canEdit ? `<div style="margin-top:8px;"><button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="jrEditMilOldShipment()" title="Shipped before the app - shows here as the 1st shipment, counted in the MIL reports only">&#9998; Old Shipment${oldQty ? ': ' + fmt(oldQty) : ''}</button></div>` : '';
+  const shipN = rows.length + (oldQty ? 1 : 0);
   el.innerHTML = `
     <div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
     ${reportFilterChipsHtml('jobs')}
@@ -20666,16 +20686,16 @@ function renderJobsReport() {
           <th ${th}>${jrColHeaderHtml('plates', 'Plates')}</th>
         </tr>
       </thead>
-      <tbody>${tbody}</tbody>
+      <tbody>${oldRow}${tbody}</tbody>
       <tfoot>
         <tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
           <td></td>
-          <td style="padding:8px 10px;white-space:nowrap;">${jobCount} job${jobCount===1?'':'s'}${jobsReportState.mode !== 'delivered' ? '' : ` &middot; ${rows.length} shipment${rows.length===1?'':'s'}`}</td>
+          <td style="padding:8px 10px;white-space:nowrap;">${jobCount} job${jobCount===1?'':'s'}${jobsReportState.mode !== 'delivered' ? '' : ` &middot; ${shipN} shipment${shipN===1?'':'s'}`}</td>
           <td colspan="7" style="padding:8px 10px;text-align:right;color:var(--text2);">Total</td>
           ${milMode ? `<td style="padding:8px 10px;text-align:right;">${fmt(totals.milQty)}</td>` : ''}
-          <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.poQty + oldQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.cartonQty)}</td>
-          <td style="padding:8px 10px;text-align:right;">${fmt(totals.deliveredQty)}</td>
+          <td style="padding:8px 10px;text-align:right;">${fmt(totals.deliveredQty + oldQty)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmt(totals.wastage)}</td>
           <td style="padding:8px 10px;text-align:right;white-space:nowrap;" title="Black: still on the shelf now. Green: the shipped Ready figures shown on the rows, added up.">${fmt(totals.readyQty)}${totals.readyShipped > 0 ? ` <span style="color:#166534;font-weight:700;">(${fmt(totals.readyShipped)} shipped)</span>` : ''}</td>
           <td style="padding:8px 10px;text-align:right;">${[totals.packets ? fmt(totals.packets) + (totals.sheetsCount ? ' pkts' : '') : '', totals.sheetsCount ? `${fmt(totals.sheetsCount)} sheets (${fmt(totals.sheetsPackets)} pkts)` : ''].filter(Boolean).join(' + ')}</td>
@@ -20684,7 +20704,7 @@ function renderJobsReport() {
         </tr>
       </tfoot>
     </table>
-    </div>`;
+    </div>${oldBtn}`;
   const headChk = document.getElementById('jr-bulk-all');
   if (headChk) headChk.indeterminate = someVisSel;
   renderJobsReportBulkBar();
@@ -20760,6 +20780,32 @@ async function exportJobsReport() {
 // then holds nothing. Today it matches the group tile's READY chip.
 // Row -> that MIL product's jobs (Jobs, Created); Shipped -> its deliveries
 // up to that date (Jobs, Delivered); a purple bar comes back here.
+// A MIL product's old shipment (shipped before the app) - only on its own shipments (Jobs report, Delivered,
+// one MIL product). { product, qty, groupId, canEdit } or null.
+function jrMilOldShipment() {
+  const st = jobsReportState;
+  if (!st.milGroup || st.mode !== 'delivered') return null;
+  const gj = (jobs || []).find(j => j && j.stock_group_name === st.milGroup && j.group_job_id);
+  const ent = gj ? stockGroupById(gj.group_job_id) : null;
+  if (!ent) return null;
+  const qty = parseFloat(String(ent.old_shipped ?? '').replace(/[^0-9.\-]/g, '')) || 0;
+  return { product: ent.product || st.milGroup, qty, groupId: ent.id, canEdit: canEditMilGroup() };
+}
+async function jrEditMilOldShipment() {
+  const old = jrMilOldShipment();
+  if (!old || !old.canEdit) return;
+  const v = await promptDialog({ title: 'Old Shipment', message: `Cartons of ${old.product} shipped before the app. It shows here as the 1st shipment and counts in the MIL reports only. Empty = none.`, defaultValue: old.qty ? String(old.qty) : '', placeholder: 'e.g. 25000', confirmText: 'Save' });
+  if (v === null) return;
+  const t = String(v).replace(/,/g, '').trim();
+  if (t !== '' && !(Number.isFinite(Number(t)) && Number(t) >= 0)) { notify('Old Shipment must be a number'); return; }
+  try {
+    const updated = await api('PATCH', `/api/stock-groups/${old.groupId}`, { old_shipped: t === '' ? null : t });
+    const ix = (stockGroups || []).findIndex(g => g && g.id === old.groupId);
+    if (ix >= 0 && updated) stockGroups[ix] = { ...stockGroups[ix], ...updated };
+    notify(t === '' ? 'Old Shipment removed' : 'Old Shipment saved');
+  } catch (e) { notify('Error: ' + e.message); return; }
+  renderJobsReport();
+}
 const milRptState = { asOf: '', q: '', client: '' };
 function jrMilAsOf() { return milRptState.asOf || localDateISO(); }
 function jrMilEntryIso(d) {
@@ -20934,9 +20980,8 @@ function renderJrMil() {
       <td style="padding:7px 10px;text-align:right;">${cell(r, i, 'po_qty', r.milQty ? String(r.milQty) : '', 'right')}</td>
       <td style="padding:7px 10px;text-align:right;font-weight:600;color:${r.short ? '#b91c1c' : '#166534'};">${fmtN(r.ready)}</td>
       <td style="padding:7px 10px;text-align:right;color:#1e40af;">${fmtN(r.inProcess)}</td>
-      <td style="padding:7px 10px;text-align:right;" title="Shipped before the app - type it and press Enter">${cell(r, i, 'old_shipped', r.oldShipped ? String(r.oldShipped) : '', 'right')}</td>
-      <td style="padding:7px 10px;text-align:right;"${r.oldShipped ? ` title="${fmtN(r.shipped)} in the app + ${fmtN(r.oldShipped)} old"` : ''}>${r.shipped
-        ? `<span onclick="event.stopPropagation(); jrOpenMilShipments(${i})" title="See these shipments in the Jobs report (Delivered), up to ${esc(fmtDMY(asOf))}${r.oldShipped ? ' - plus ' + fmtN(r.oldShipped) + ' old shipped' : ''}" style="color:#9a3412;font-weight:700;text-decoration:underline;text-underline-offset:2px;cursor:pointer;">${fmtN(r.shippedAll)}</span>`
+      <td style="padding:7px 10px;text-align:right;"${r.oldShipped ? ` title="${fmtN(r.shipped)} in the app + ${fmtN(r.oldShipped)} old shipment"` : ''}>${(r.shippedAll || canEditMilGroup())
+        ? `<span onclick="event.stopPropagation(); jrOpenMilShipments(${i})" title="See these shipments in the Jobs report (Delivered), up to ${esc(fmtDMY(asOf))}${r.oldShipped ? ' - with ' + fmtN(r.oldShipped) + ' old shipment' : ''} - the Old Shipment button is there" style="color:#9a3412;font-weight:700;text-decoration:underline;text-underline-offset:2px;cursor:pointer;">${fmtN(r.shippedAll)}</span>`
         : fmtN(r.shippedAll)}</td>
       ${noteCell(r, i, 'shipper_note', r.shipperNote, r.shipperText)}
       ${noteCell(r, i, 'loose_note', r.looseNote, r.looseText)}
@@ -20950,7 +20995,7 @@ function renderJrMil() {
     <div class="report-scroll-wrap report-scroll-wrap--fit">
       <table class="ss-table" style="width:auto;border-collapse:collapse;font-size:13px;">
         <thead><tr style="background:var(--bg2);">
-          <th style="text-align:right;padding:8px 2px 8px 8px;font-size:11px;font-weight:700;width:1%;">#</th><th style="text-align:left;padding:8px 10px 8px 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;">Product Code</th><th ${th}>Product Name</th><th ${thR}>MIL Qty</th><th ${thR}>Ready Qty</th><th ${thR}>In Process</th><th ${thR} title="Shipped before the app, typed here - added into Shipped Qty">Old Shipped</th><th ${thR} title="Shipped in the app up to the date + Old Shipped">Shipped Qty</th><th ${th} title="Typed: the full cartons on hand, e.g. 1400x5 + 1500x10 (grey = the app's estimate)">Carton Shipper</th><th ${th} title="Typed: the loose cartons on hand, e.g. 200x2 (grey = the app's estimate)">Loose Carton Shipper</th><th ${thR} title="Automatic: cartons packed at the Station less the shipments' cartons">Total Cartons</th><th ${thR} title="Cartons on the shipments, up to the date">Shipped Cartons</th>
+          <th style="text-align:right;padding:8px 2px 8px 8px;font-size:11px;font-weight:700;width:1%;">#</th><th style="text-align:left;padding:8px 10px 8px 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;">Product Code</th><th ${th}>Product Name</th><th ${thR}>MIL Qty</th><th ${thR}>Ready Qty</th><th ${thR}>In Process</th><th ${thR} title="Shipped in the app up to the date + Old Shipped">Shipped Qty</th><th ${th} title="Typed: the full cartons on hand, e.g. 1400x5 + 1500x10 (grey = the app's estimate)">Carton Shipper</th><th ${th} title="Typed: the loose cartons on hand, e.g. 200x2 (grey = the app's estimate)">Loose Carton Shipper</th><th ${thR} title="Automatic: cartons packed at the Station less the shipments' cartons">Total Cartons</th><th ${thR} title="Cartons on the shipments, up to the date">Shipped Cartons</th>
         </tr></thead>
         <tbody>${body}</tbody>
         <tfoot><tr style="background:var(--bg2);font-weight:700;border-top:2px solid var(--border);">
@@ -20958,7 +21003,6 @@ function renderJrMil() {
           <td style="padding:8px 10px;text-align:right;">${fmtN(t.milQty)}</td>
           <td style="padding:8px 10px;text-align:right;color:#166534;">${fmtN(t.ready)}</td>
           <td style="padding:8px 10px;text-align:right;color:#1e40af;">${fmtN(t.inProcess)}</td>
-          <td style="padding:8px 10px;text-align:right;">${fmtN(t.oldShipped)}</td>
           <td style="padding:8px 10px;text-align:right;">${fmtN(t.shipped)}</td>
           <td></td><td></td>
           <td style="padding:8px 10px;text-align:right;">${fmtN(t.packed)}</td>
