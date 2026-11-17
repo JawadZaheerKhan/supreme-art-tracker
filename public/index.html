@@ -20920,10 +20920,12 @@ function jrMilRows(opts) {
     // Old Shipped (owner, 2026-11-17): shipped before the app, typed on the report - in Shipped Qty for every date.
     const oldShipped = ent ? (parseFloat(String(ent.old_shipped ?? '').replace(/[^0-9.-]/g, '')) || 0) : 0;
     const shippedAll = shipped + oldShipped;
-    // Row colour: red = nothing ever shipped, yellow = nothing shipped this month.
-    const noOrders = shippedAll <= 0, noMonth = !noOrders && shippedMonth <= 0;
+    // Row colour (owner, 2026-11-17): red = on hold / blocked (Remarks say "hold" or "block"), yellow = no
+    // delivery yet (the old shipment counts as one).
     const remarks = (ent && ent.remarks) || '';
-    out.push({ gName, groupId: ent ? ent.id : null, product, code, client, milQty, ready, inProcess, shipped, oldShipped, shippedAll, shippedMonth, noOrders, noMonth, remarks, shipper, short, jobCount: gJobs.length, shipperText, looseText, packedCartons, shipperNote, looseNote, typedCartons, cartonsMismatch });
+    const onHold = /\b(hold|block|blocked)\b/i.test(remarks);
+    const noOrders = shippedAll <= 0;
+    out.push({ gName, groupId: ent ? ent.id : null, product, code, client, milQty, ready, inProcess, shipped, oldShipped, shippedAll, shippedMonth, noOrders, onHold, remarks, shipper, short, jobCount: gJobs.length, shipperText, looseText, packedCartons, shipperNote, looseNote, typedCartons, cartonsMismatch });
   }
   return out.sort((a, b) => String(a.product).localeCompare(String(b.product)));
 }
@@ -20996,9 +20998,9 @@ function renderJrMil() {
   const cell = (r, i, field, shown, align) => (canEdit && r.groupId)
     ? `<input type="text" class="sm-ref-input" value="${esc(shown)}" placeholder="—" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter')this.blur()" onchange="event.stopPropagation(); saveMilGroupField(${i}, '${field}', this.value)" title="Edit and press Enter - saved on the MIL group" style="width:${field === 'po_qty' || field === 'old_shipped' ? '90px' : '84px'};text-align:${align};">`
     : (esc(shown) || '<span style="color:var(--text3)">—</span>');
-  const noMonthBg = 'background:#fef9c3;';
-  const rowTip = r => [r.noOrders ? 'No shipment yet' : r.noMonth ? 'No delivery this month' : '', r.short ? 'Ready + In Process is below the MIL Qty' : ''].filter(Boolean).join(' - ');
-  const body = rows.map((r, i) => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;${r.noOrders ? shortBg : r.noMonth ? noMonthBg : ''}" onclick="jrOpenMilGroup(${i})" title="${rowTip(r) ? rowTip(r) + ' - ' : ''}Open this MIL product's tile in the Jobs tab">
+  const noOrdersBg = 'background:#fef9c3;';
+  const rowTip = r => [r.onHold ? 'On hold / blocked (Remarks)' : r.noOrders ? 'No delivery yet' : '', r.short ? 'Ready + In Process is below the MIL Qty' : ''].filter(Boolean).join(' - ');
+  const body = rows.map((r, i) => `<tr class="row-hover-red cv-summary-row" style="border-bottom:1px solid var(--border);cursor:pointer;${r.onHold ? shortBg : r.noOrders ? noOrdersBg : ''}" onclick="jrOpenMilGroup(${i})" title="${rowTip(r) ? rowTip(r) + ' - ' : ''}Open this MIL product's tile in the Jobs tab">
       <td style="padding:7px 2px 7px 8px;text-align:right;font-size:11px;color:var(--text2);width:1%;white-space:nowrap;">${i + 1}</td>
       <td style="padding:7px 10px 7px 6px;">${cell(r, i, 'jobcode', r.code, 'left')}</td>
       <td style="padding:7px 10px;font-weight:700;"><div style="min-width:130px;max-width:220px;">${esc(r.product)}</div><div style="font-size:11px;color:#7c3aed;font-weight:600;" title="${esc(r.client)}">${r.jobCount} job${r.jobCount === 1 ? '' : 's'}</div></td>
@@ -21016,8 +21018,8 @@ function renderJrMil() {
     </tr>`).join('');
   el.innerHTML = `
     <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${rows.length} MIL product${rows.length === 1 ? '' : 's'} · Ready (on the shelf), the cartons on hand (Carton Shipper / Loose / Total, after the shipments) and Shipped (up to the day) as on <b>${esc(fmtDMY(asOf))}</b>${asOf === localDateISO() ? ' (today)' : ''}. Click a row for its tile in the Jobs tab, a Shipped figure for its deliveries.
-      <span style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;"><span style="display:inline-block;width:11px;height:11px;border-radius:3px;${shortBg}border:1px solid rgba(220,38,38,0.45);"></span>Red = no shipment yet</span>
-      <span style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;"><span style="display:inline-block;width:11px;height:11px;border-radius:3px;${noMonthBg}border:1px solid #eab308;"></span>Yellow = no delivery in ${esc(new Date(asOf + 'T12:00:00').toLocaleString('en-GB', { month: 'long' }))}</span>
+      <span style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;"><span style="display:inline-block;width:11px;height:11px;border-radius:3px;${shortBg}border:1px solid rgba(220,38,38,0.45);"></span>Red = on hold / blocked (write "hold" or "block" in Remarks)</span>
+      <span style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;"><span style="display:inline-block;width:11px;height:11px;border-radius:3px;${noOrdersBg}border:1px solid #eab308;"></span>Yellow = no delivery yet</span>
       <span style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;"><span style="display:inline-block;width:11px;height:11px;border-radius:3px;${mmBg}"></span>Amber = typed cartons don't match Total Cartons</span></div>
     <div class="report-scroll-wrap report-scroll-wrap--fit">
       <table class="ss-table" style="width:auto;border-collapse:collapse;font-size:13px;">
@@ -21130,13 +21132,13 @@ function printJrMil() {
         title: 'MIL PRODUCTS REPORT',
         scope: [milRptState.client || 'All companies', `${rows.length} MIL product${rows.length === 1 ? '' : 's'}`, milRptState.q ? 'Search: ' + milRptState.q : ''].filter(Boolean).join(' · '),
         dateText: `Ready & Shipped as on: ${fmtDMY(asOf)}`,
-        note: `Generated: ${fmtDMYT12(new Date())} · red rows: no shipment yet · yellow rows: no delivery this month`,
+        note: `Generated: ${fmtDMYT12(new Date())} · red rows: on hold / blocked · yellow rows: no delivery yet`,
       })}</div>
       <table style="width:100%;font-size:8pt;border:1px solid #000;border-collapse:collapse;">
         <tr style="background:#f7f1ea;">
           <th ${tdL}>Product Code</th><th ${tdL}>Product Name</th><th ${tdR}>MIL Qty</th><th ${tdR}>Ready Qty</th><th ${tdR}>In Process</th><th ${tdR}>Shipped Qty</th><th ${tdL}>Carton Shipper</th><th ${tdL}>Loose Carton Shipper</th><th ${tdR}>Total Cartons</th><th ${tdR}>Shipped Cartons</th><th ${tdL}>Remarks</th>
         </tr>
-        ${rows.map(r => `<tr${r.noOrders ? ' style="background:#fde2e2;"' : r.noMonth ? ' style="background:#fef9c3;"' : ''}><td ${tdL}>${esc(r.code)}</td><td ${tdL}>${esc(r.product)}</td><td ${tdR}>${f(r.milQty)}</td><td ${tdR}>${f(r.ready)}</td><td ${tdR}>${f(r.inProcess)}</td><td ${tdR}>${f(r.shippedAll)}</td><td ${tdL}>${esc(r.shipperNote || r.shipperText) || '—'}</td><td ${tdL}>${esc(r.looseNote || r.looseText) || '—'}</td><td ${tdR}>${f(r.packedCartons)}</td><td ${tdR}>${f(r.shipper)}</td><td ${tdL}>${esc(r.remarks)}</td></tr>`).join('')}
+        ${rows.map(r => `<tr${r.onHold ? ' style="background:#fde2e2;"' : r.noOrders ? ' style="background:#fef9c3;"' : ''}><td ${tdL}>${esc(r.code)}</td><td ${tdL}>${esc(r.product)}</td><td ${tdR}>${f(r.milQty)}</td><td ${tdR}>${f(r.ready)}</td><td ${tdR}>${f(r.inProcess)}</td><td ${tdR}>${f(r.shippedAll)}</td><td ${tdL}>${esc(r.shipperNote || r.shipperText) || '—'}</td><td ${tdL}>${esc(r.looseNote || r.looseText) || '—'}</td><td ${tdR}>${f(r.packedCartons)}</td><td ${tdR}>${f(r.shipper)}</td><td ${tdL}>${esc(r.remarks)}</td></tr>`).join('')}
         <tr style="background:#f7f1ea;font-weight:bold;"><td ${tdL} colspan="2" align="right">Totals</td><td ${tdR}>${f(t.milQty)}</td><td ${tdR}>${f(t.ready)}</td><td ${tdR}>${f(t.inProcess)}</td><td ${tdR}>${f(t.shipped)}</td><td ${tdL}></td><td ${tdL}></td><td ${tdR}>${f(t.packed)}</td><td ${tdR}>${f(t.shipper)}</td><td ${tdL}></td></tr>
       </table>
     </div>`;
@@ -21155,9 +21157,9 @@ async function exportJrMil() {
   const rows = jrMilRows();
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const asOf = jrMilAsOf();
-  const header = ['Product Code', 'Product Name', 'MIL Qty', 'Ready Qty', 'In Process', 'Shipped Qty', 'Carton Shipper', 'Loose Carton Shipper', 'Total Cartons', 'Shipped Cartons', 'Below MIL', 'Shipments', 'Remarks'];
+  const header = ['Product Code', 'Product Name', 'MIL Qty', 'Ready Qty', 'In Process', 'Shipped Qty', 'Carton Shipper', 'Loose Carton Shipper', 'Total Cartons', 'Shipped Cartons', 'Below MIL', 'Status', 'Remarks'];
   const aoa = reportExcelAoa(header);
-  for (const r of rows) aoa.push([r.code, r.product, r.milQty, r.ready, r.inProcess, r.shippedAll, r.shipperNote || r.shipperText, r.looseNote || r.looseText, r.packedCartons, r.shipper, r.short ? 'YES' : '', r.noOrders ? 'None yet' : r.noMonth ? 'None this month' : '', r.remarks]);
+  for (const r of rows) aoa.push([r.code, r.product, r.milQty, r.ready, r.inProcess, r.shippedAll, r.shipperNote || r.shipperText, r.looseNote || r.looseText, r.packedCartons, r.shipper, r.short ? 'YES' : '', r.onHold ? 'On hold' : r.noOrders ? 'No delivery yet' : '', r.remarks]);
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   applyReportExcelHeading(ws, header, {
     title: 'MIL PRODUCTS REPORT',
