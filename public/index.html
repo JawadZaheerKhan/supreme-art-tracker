@@ -1735,15 +1735,20 @@
   /* Create Mil Job toolbar button — same pill shape as the Shade Cards
      toggle so it feels part of the toolbar, red palette to stand out as
      a create action. */
-  #create-group-btn {
-    font-weight: 600; font-size: 14px;
-    padding: 8px 16px; border-radius: 7px;
-    font-family: var(--font); cursor: pointer;
-    display: inline-flex; align-items: center; gap: 6px;
-    background: rgba(237,233,254,.78); color: #6d28d9; border: 1.5px solid rgba(167,139,250,.72);
-    transition: background 0.12s, border-color 0.12s;
+  /* MIL split button (owner, 2026-11-17): left = MIL-only filter toggle, right = Create Mil Job (dark purple). */
+  .mil-split { display: inline-flex; align-items: stretch; border: 1.5px solid #6d28d9; border-radius: 7px; overflow: hidden; }
+  #mil-filter-toggle, #create-group-btn {
+    font-weight: 600; font-size: 12.5px; padding: 5px 10px; font-family: var(--font); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 0; white-space: nowrap;
+    transition: background 0.12s, color 0.12s;
   }
-  #create-group-btn:hover { background: #ddd6fe; border-color: #a78bfa; }
+  #mil-filter-toggle { background: #f5f3ff; color: #6d28d9; }
+  #mil-filter-toggle:hover { background: #ede9fe; }
+  #mil-filter-toggle.is-on { background: #c4b5fd; color: #3b0764; box-shadow: inset 0 0 0 2px #7c3aed; }
+  .mil-filter-n { background: #7c3aed; color: #fff; border-radius: 10px; padding: 0 6px; font-size: 11px; font-weight: 800; }
+  .mil-filter-n:empty { display: none; }
+  #create-group-btn { background: #5b21b6; color: #fff; border-left: 1.5px solid #6d28d9; }
+  #create-group-btn:hover { background: #4c1d95; }
   /* Offcut Issuance shortcut (owner, 2026-11-17) - offcut blue, next to Over-issued. */
   #offcut-issue-btn { font-weight: 600; font-size: 14px; padding: 8px 16px; border-radius: 7px; font-family: var(--font); cursor: pointer;
     display: inline-flex; align-items: center; gap: 6px; background: #cffafe; color: #0e7490; border: 1.5px solid #67e8f9; }
@@ -3752,7 +3757,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   /* Buttons: smaller everywhere; the big page buttons too. */
   body:not([data-mode="station"]) .btn { padding: 6px 11px; font-size: 12.5px; }
   body:not([data-mode="station"]) .btn-sm { padding: 3px 8px; font-size: 11px; }
-  body:not([data-mode="station"]) :is(#jobs-new-btn, #create-group-btn, #inv-new-btn, #inv-offcut-btn) { padding: 6px 11px !important; font-size: 12.5px !important; }
+  body:not([data-mode="station"]) :is(#jobs-new-btn, #inv-new-btn, #inv-offcut-btn) { padding: 6px 11px !important; font-size: 12.5px !important; }
   body:not([data-mode="station"]) :is(#shade-card-toggle, #over-issue-alert, #company-settings-btn, #inv-pending-toggle) { padding: 5px 10px !important; font-size: 12px !important; }
   body:not([data-mode="station"]) .whole-toggle { font-size: 12px; }
   /* Filters and search: shorter. */
@@ -3904,9 +3909,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   <div class="jobs-hero-row">
     <div class="stats-row" id="stats-row"></div>
     <div class="jobs-hero-actions">
-      <button id="create-group-btn" class="ceo-hide whole-toggle" onclick="playActionToggle(this); openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
-        <span class="whole-toggle-text">&#128230; Create Mil Job</span>
-      </button>
+      <span class="mil-split"><button id="mil-filter-toggle" onclick="toggleMilFilter()" title="Show only MIL jobs - click again to show all"><span>&#128230; MIL</span> <span id="mil-filter-n" class="mil-filter-n"></span></button><button id="create-group-btn" class="ceo-hide" onclick="openCreateGroupPicker()" title="Create Mil Job — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">+ Create</button></span>
       <button class="btn btn-primary" id="jobs-new-btn" style="display:none;" onclick="openAdd()">+ New Job</button>
     </div>
   </div>
@@ -4973,6 +4976,7 @@ let filterCode = '';   // Item Code box (the job card's Code), owner 2026-10-08
 let filterBatch = '';  // Batch No. box: the job card's Batch No. or any delivery's (owner, 2026-11-10)
 // Shade-card filter — '' (all) | 'only' (shade cards only) | 'hide' (production only)
 let filterShadeCard = '';
+let filterMil = false;   // MIL split button's left half (owner, 2026-11-17): only MIL jobs
 let filterGroup = '';
 let filterDateRange = '';
 let filterDateFrom = '';
@@ -9901,6 +9905,7 @@ function jobPassesFilters(j) {
   }
   if (filterShadeCard === 'only' && !j.is_shade_card) return false;
   if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
+  if (filterMil && !(j.stock_group_name || j.group_job_id)) return false;
   if (filterMachine && j.machine !== filterMachine) return false;
   if (filterGroup && j.stock_group_name !== filterGroup) return false;
   if (!inDateRange(j)) return false;
@@ -10206,6 +10211,7 @@ function renderJobs() {
     b.classList.toggle('active', b.dataset.jv === jobsViewMode));
   renderNewJobsBulkBar();
   renderShadeCardToggle();
+  renderMilFilterToggle();
   renderOverIssueAlert();
   renderWastageAdjBar();
   if (jobsViewMode === 'cards') renderJobsCards();
@@ -10226,6 +10232,16 @@ function renderShadeCardToggle() {
   btn.classList.toggle('is-on', filterShadeCard === 'only');
 }
 
+// MIL filter half: on = filled, with how many MIL products there are.
+function renderMilFilterToggle() {
+  const btn = document.getElementById('mil-filter-toggle');
+  if (!btn) return;
+  const n = new Set((jobs || []).filter(j => j && !j.deleted_at && j.stock_group_name).map(j => j.stock_group_name)).size;
+  const c = document.getElementById('mil-filter-n');
+  if (c) c.textContent = n ? String(n) : '';
+  btn.classList.toggle('is-on', !!filterMil);
+}
+function toggleMilFilter() { filterMil = !filterMil; renderJobs(); }
 function playActionToggle(btn) {
   if (!btn) return;
   btn.classList.remove('toggle-motion-click');
@@ -11964,6 +11980,7 @@ function goToOverIssuedJob(id) {
   closeModal();
   jobsMilFocus = null; jobsJobFocus = null;
   filterShadeCard = '';
+  filterMil = false;
   filterText = String(id);
   const box = document.getElementById('search-input');
   if (box) box.value = String(id);
