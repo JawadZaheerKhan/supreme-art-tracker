@@ -1744,6 +1744,11 @@
     transition: background 0.12s, border-color 0.12s;
   }
   #create-group-btn:hover { background: #ddd6fe; border-color: #a78bfa; }
+  /* Offcut Issuance shortcut (owner, 2026-11-17) - offcut blue, the same pill as Create Mil Job. */
+  #offcut-issue-btn { font-weight: 600; font-size: 14px; padding: 8px 16px; border-radius: 7px; font-family: var(--font); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; background: #cffafe; color: #0e7490; border: 1.5px solid #67e8f9; }
+  #offcut-issue-btn:hover { background: #a5f3fc; border-color: #22d3ee; }
+  .offcut-issue-n { background: #0891b2; color: #fff; border-radius: 10px; padding: 0 7px; font-size: 12px; font-weight: 800; }
   /* Over-issued warning (red) - next to Create Mil Job (owner, 2026-10-24). */
   #over-issue-alert {
     font-weight: 600; font-size: 14px;
@@ -3899,6 +3904,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   <div class="jobs-hero-row">
     <div class="stats-row" id="stats-row"></div>
     <div class="jobs-hero-actions">
+      <button id="offcut-issue-btn" class="ceo-hide" style="display:none;" data-acc="inv_btn_offcut_issuance" onclick="openOffcutIssueList()" title="Jobs waiting for offcut paper - issue it from here">&#9986; Offcut Issuance <span id="offcut-issue-n" class="offcut-issue-n" style="display:none;"></span></button>
       <button id="create-group-btn" class="ceo-hide whole-toggle" onclick="playActionToggle(this); openCreateGroupPicker()" title="Start a new Job Group — pick the seed job and the group inherits every field from it. Sub jobs are duplicated from the group tile.">
         <span class="whole-toggle-text">&#128230; Create Mil Job</span>
       </button>
@@ -10101,6 +10107,7 @@ if (isPreviewEnv()) {
 
 const isMilJobRow = j => !!(j && (j.stock_group_name || j.group_job_id));
 function renderStats() {
+  try { updateOffcutIssueBtn(); } catch (e) { /* the button is a shortcut - never break the figures */ }
   const s = {
     total: jobs.length,
     newJobs: jobs.filter(isNewJob).length,
@@ -10627,7 +10634,6 @@ function renderJobRowCompact(j, opts) {
             ${partialDelv && seeBtn('job_btn_stage_moves') ? `<button class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="finalizeAsDelivered(${j.id})" title="Close this job as Delivered without shipping the remaining cartons.">&rarr; Finalize as Delivered</button>` : ''}
             ${canReopenDelivery(j) && seeBtn('job_btn_stage_moves') ? `<button class="btn btn-sm" style="background:#f59e0b;border-color:#d97706;color:#431407;font-weight:700;" onclick="undoFinalizeDelivery(${j.id})" title="Send this job back to Partially Delivered so the remaining / Ready cartons can be shipped.">&#8617; Back to Partial Delivery</button>` : ''}
             ${processWithoutPaperBtnHtml(j)}
-            ${offcutIssueShortcutHtml(j)}
             <button class="btn btn-sm ${(isNew || isCtp) ? '' : 'btn-primary'}" onclick="openEdit(${j.id})" title="Open the job card to view or edit its details. Stage advances by clicking the stage pills above.">Edit / View</button>
             <button class="btn btn-sm" onclick="openHistory(${j.id})">History</button>
             ${!_finalizedJobIds.has(j.id) ? `<button class="btn btn-sm ceo-hide" onclick="openDuplicateJob(${j.id})" title="Make a new job card pre-filled with this job's data — useful for repeat orders.">&#128203; Duplicate</button>` : ''}
@@ -10729,20 +10735,62 @@ function jobStockNeedSheets(j) {
   if (fresh > 0) return fresh;
   return parseFloat(j.sheets) || 0;
 }
-// Issue offcut from the Jobs tab (owner, 2026-11-17): a job with offcut paper still to issue - its paper, or a 2nd / 3rd
-// paper that is offcut - gets the offcut Issue button right on its tile (the same issue as Inventory's Pending Stock).
-function offcutIssueShortcutHtml(j) {
-  if (!j || !canIssueOffcutStock() || !seeBtn('inv_btn_offcut_issuance') || _finalizedJobIds.has(j.id)) return '';
-  const btns = [];
-  const mainIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
-  const mainOwed = j.issuance_status === 'pending' || (typeof partialPendingSheets === 'function' && partialPendingSheets(j) > 0);
-  if (mainIt && mainIt.is_offcut && mainOwed && jobStockNeedSheets(j) > 0) btns.push(['', 'Issue offcut']);
-  for (const [key, src, ord] of [['secondary_paper', 'secondary', '2nd'], ['third_paper', 'third', '3rd']]) {
-    const ref = (j.particulars || {})[key];
-    const it = ref && ref.inventory_item_id ? inventoryAll.find(x => x.id === Number(ref.inventory_item_id)) : null;
-    if (it && it.is_offcut && typeof secondaryPendingSheets === 'function' && secondaryPendingSheets(j, key) > 0) btns.push([src, `Issue offcut (${ord} paper)`]);
+// Offcut issuance shortcut (owner, 2026-11-17): every job waiting for offcut paper - its paper, or a 2nd / 3rd paper
+// that is offcut - with what it still needs. The Jobs tab's "Offcut Issuance" button opens them, each with its Issue.
+function offcutIssueQueue() {
+  const out = [];
+  for (const j of (jobs || [])) {
+    if (!j || j.deleted_at || _finalizedJobIds.has(j.id)) continue;
+    const mainIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+    const owed = j.issuance_status === 'pending' || (typeof partialPendingSheets === 'function' && partialPendingSheets(j) > 0);
+    if (mainIt && mainIt.is_offcut && owed) { const owedSheets = jobStockNeedSheets(j); if (owedSheets > 0) out.push({ j, src: '', ord: '', it: mainIt, need: owedSheets }); }
+    for (const [key, src, ord] of [['secondary_paper', 'secondary', '2nd'], ['third_paper', 'third', '3rd']]) {
+      const ref = (j.particulars || {})[key];
+      const it = ref && ref.inventory_item_id ? inventoryAll.find(x => x.id === Number(ref.inventory_item_id)) : null;
+      const need = it && it.is_offcut && typeof secondaryPendingSheets === 'function' ? secondaryPendingSheets(j, key) : 0;
+      if (need > 0) out.push({ j, src, ord, it, need });
+    }
   }
-  return btns.map(([src, label]) => `<button class="btn btn-sm ceo-hide" style="${OFFCUT_BTN_STYLE}" data-acc="inv_btn_offcut_issuance" onclick="issueStock(${j.id}${src ? `, '${src}'` : ''})" title="Issue this job's offcut paper">&#9986; ${label}</button>`).join('');
+  return out.sort((x, y) => y.j.id - x.j.id);
+}
+function canUseOffcutShortcut() { return canIssueOffcutStock() && seeBtn('inv_btn_offcut_issuance'); }
+function updateOffcutIssueBtn() {
+  const b = document.getElementById('offcut-issue-btn');
+  if (!b) return;
+  if (!canUseOffcutShortcut()) { b.style.display = 'none'; return; }
+  b.style.display = '';
+  const n = offcutIssueQueue().length;
+  const c = document.getElementById('offcut-issue-n');
+  if (c) { c.textContent = n; c.style.display = n ? '' : 'none'; }
+}
+function openOffcutIssueList() {
+  const q = offcutIssueQueue();
+  const fmtP = v => Number.isInteger(v) ? String(v) : String(+v.toFixed(2));
+  const rows = q.map(x => {
+    const ps = packetSize(x.it.paper_type), unit = packetUnitLabel(x.it.paper_type).toLowerCase();
+    const have = paperGroupMembers(x.it).reduce((a, i) => a + (+i.current_balance || 0), 0);
+    const enough = have >= x.need;
+    return `<tr>
+      <td style="padding:7px 8px;border-bottom:1px solid var(--border);"><a onclick="closeModal(); openEdit(${x.j.id})" style="font-weight:700;cursor:pointer;text-decoration:underline;">E-${x.j.id}</a> ${esc(x.j.name || '')}<div style="font-size:11px;color:var(--text2);">${esc(x.j.client || '')}</div></td>
+      <td style="padding:7px 8px;border-bottom:1px solid var(--border);">${x.ord ? `<b>${x.ord} paper</b> · ` : ''}${esc([x.it.paper_type, x.it.size, x.it.gsm ? x.it.gsm + 'gsm' : ''].filter(Boolean).join(' '))}${x.it.brand ? ' · ' + esc(x.it.brand) : ''}</td>
+      <td style="padding:7px 8px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;font-weight:700;">${fmtP(x.need / ps)} ${unit}</td>
+      <td style="padding:7px 8px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;color:${enough ? '#166534' : '#b91c1c'};">${fmtP(have / ps)} ${unit}</td>
+      <td style="padding:7px 8px;border-bottom:1px solid var(--border);text-align:right;"><button class="btn btn-sm" style="${OFFCUT_BTN_STYLE}" data-acc="inv_btn_offcut_issuance" onclick="closeModal(); issueStock(${x.j.id}${x.src ? `, '${x.src}'` : ''})">&#9986; Issue</button></td>
+    </tr>`;
+  }).join('');
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h2>&#9986; Offcut Issuance</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">Jobs waiting for offcut paper - their paper, or a 2nd / 3rd paper that is offcut. Issue it right from here.</div>
+    ${q.length ? `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:.03em;">
+        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid var(--border);">Job</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid var(--border);">Offcut</th>
+        <th style="text-align:right;padding:6px 8px;border-bottom:2px solid var(--border);">Needs</th>
+        <th style="text-align:right;padding:6px 8px;border-bottom:2px solid var(--border);">In stock</th>
+        <th style="border-bottom:2px solid var(--border);"></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : '<div class="empty">No job is waiting for offcut paper.</div>'}
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div>
+  </div>`);
 }
 function cardIssueStockBtn(j) {
   const invIt   = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
@@ -11185,7 +11233,6 @@ function renderJobCard(j, opts) {
     ${clientPreview ? '' : wastageAdjBanner(j.id)}
     ${clientPreview ? '' : `<div class="tile-actions">
       ${processWithoutPaperBtnHtml(j)}
-      ${offcutIssueShortcutHtml(j)}
       ${primary}
       ${updateBtn}
       ${more}
