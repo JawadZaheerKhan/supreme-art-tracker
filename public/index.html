@@ -20491,7 +20491,7 @@ function renderJobsReport() {
   if (!rows.length) {
     // A MIL product with no shipments in the app yet: its old shipment and the button still show.
     const old0 = jrMilOldShipment();
-    const oldHtml = old0 ? `<div style="margin-top:8px;">${old0.qty ? `<div style="font-size:13px;color:#b91c1c;font-weight:700;margin-bottom:6px;">Old shipment: ${(+old0.qty).toLocaleString()} cartons</div>` : ''}${old0.canEdit ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="jrEditMilOldShipment()">&#9998; Old Shipment${old0.qty ? ': ' + (+old0.qty).toLocaleString() : ''}</button>` : ''}</div>` : '';
+    const oldHtml = old0 ? `<div style="margin-top:8px;">${old0.list.map((q, k) => `<div style="font-size:13px;color:#b91c1c;font-weight:700;margin-bottom:4px;${old0.canEdit ? 'cursor:pointer;' : ''}"${old0.canEdit ? ` onclick="jrEditMilOldShipment(${k})" title="Click to change or remove it"` : ''}>Old shipment${old0.list.length > 1 ? ' ' + (k + 1) : ''}: ${(+q).toLocaleString()} cartons${old0.canEdit ? ' &#9998;' : ''}</div>`).join('')}${old0.canEdit ? `<button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;margin-top:4px;" onclick="jrEditMilOldShipment()">+ Old Shipment</button>` : ''}</div>` : '';
     el.innerHTML = `<div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
       ${reportEmptyHtml('jobs', `No ${jrModeWord()} jobs match these filters.`)}${oldHtml}`;
     return;
@@ -20654,21 +20654,22 @@ function renderJobsReport() {
   const someVisSel = !allVisSel && rows.some(r => jobsReportSel.has(r.id));
   const old = jrMilOldShipment();
   const oldQty = old && old.qty ? old.qty : 0;
-  const oldRow = oldQty ? `<tr style="border-bottom:1px solid var(--border);background:#fef2f2;" title="Old shipment - shipped before the app, typed with the Old Shipment button. Counted in the MIL reports only.">
+  const oldList = old ? old.list : [];
+  const oldRow = oldList.map((q, k) => `<tr style="border-bottom:1px solid var(--border);background:#fef2f2;${old.canEdit ? 'cursor:pointer;' : ''}"${old.canEdit ? ` onclick="jrEditMilOldShipment(${k})"` : ''} title="Old shipment - shipped before the app. Counted in the MIL reports only.${old.canEdit ? ' Click to change or remove it.' : ''}">
       <td class="bulk-td"></td>
-      <td style="padding:8px 10px;font-weight:800;color:#b91c1c;white-space:nowrap;">Old</td>
+      <td style="padding:8px 10px;font-weight:800;color:#b91c1c;white-space:nowrap;">Old${oldList.length > 1 ? ' ' + (k + 1) : ''}${old.canEdit ? ' &#9998;' : ''}</td>
       <td style="padding:8px 10px;">${esc(old.product)}</td>
       <td style="padding:8px 10px;">&mdash;</td>
       <td style="padding:8px 10px;font-size:11.5px;color:#b91c1c;font-weight:700;">Old shipment</td>
       <td colspan="4"></td>
       ${milMode ? '<td></td>' : ''}
-      <td style="padding:8px 10px;text-align:right;">${fmt(oldQty)}</td>
+      <td style="padding:8px 10px;text-align:right;">${fmt(q)}</td>
       <td></td>
-      <td style="padding:8px 10px;text-align:right;">${fmt(oldQty)}</td>
+      <td style="padding:8px 10px;text-align:right;">${fmt(q)}</td>
       <td colspan="11"></td>
-    </tr>` : '';
-  const oldBtn = old && old.canEdit ? `<div style="margin-top:8px;"><button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="jrEditMilOldShipment()" title="Shipped before the app - shows here as the 1st shipment, counted in the MIL reports only">&#9998; Old Shipment${oldQty ? ': ' + fmt(oldQty) : ''}</button></div>` : '';
-  const shipN = rows.length + (oldQty ? 1 : 0);
+    </tr>`).join('');
+  const oldBtn = old && old.canEdit ? `<div style="margin-top:8px;"><button class="btn btn-sm" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:700;" onclick="jrEditMilOldShipment()" title="Add a shipment from before the app - shows here before the app's shipments, counted in the MIL reports only">+ Old Shipment</button>${oldList.length ? ` <span style="font-size:12px;color:#b91c1c;font-weight:700;margin-left:6px;">${oldList.length} old shipment${oldList.length === 1 ? '' : 's'} · ${fmt(oldQty)} cartons - click one to change or remove it</span>` : ''}</div>` : '';
+  const shipN = rows.length + oldList.length;
   el.innerHTML = `
     <div id="jr-bulk-bar" class="bulk-actions" style="display:none;"></div>
     ${reportFilterChipsHtml('jobs')}
@@ -20797,29 +20798,43 @@ async function exportJobsReport() {
 // then holds nothing. Today it matches the group tile's READY chip.
 // Row -> that MIL product's jobs (Jobs, Created); Shipped -> its deliveries
 // up to that date (Jobs, Delivered); a purple bar comes back here.
-// A MIL product's old shipment (shipped before the app) - only on its own shipments (Jobs report, Delivered,
-// one MIL product). { product, qty, groupId, canEdit } or null.
+// A MIL product's old shipments (shipped before the app, owner 2026-11-17: more than one) - [qty, ...] in order;
+// a product saved before the list existed has its one old_shipped figure.
+function milOldShipmentList(ent) {
+  if (!ent) return [];
+  if (Array.isArray(ent.old_shipments)) return ent.old_shipments.map(x => +(x && x.qty) || 0).filter(q => q > 0);
+  const one = parseFloat(String(ent.old_shipped ?? '').replace(/[^0-9.\-]/g, '')) || 0;
+  return one > 0 ? [one] : [];
+}
+// Only on a MIL product's own shipments (Jobs report, Delivered, one MIL product). { product, list, qty, groupId, canEdit } or null.
 function jrMilOldShipment() {
   const st = jobsReportState;
   if (!st.milGroup || st.mode !== 'delivered') return null;
   const gj = (jobs || []).find(j => j && j.stock_group_name === st.milGroup && j.group_job_id);
   const ent = gj ? stockGroupById(gj.group_job_id) : null;
   if (!ent) return null;
-  const qty = parseFloat(String(ent.old_shipped ?? '').replace(/[^0-9.\-]/g, '')) || 0;
-  return { product: ent.product || st.milGroup, qty, groupId: ent.id, canEdit: canEditMilGroup() };
+  const list = milOldShipmentList(ent);
+  return { product: ent.product || st.milGroup, list, qty: list.reduce((a, q) => a + q, 0), groupId: ent.id, canEdit: canEditMilGroup() };
 }
-async function jrEditMilOldShipment() {
+// ix = which one to change (empty = remove it); no ix = add a new one.
+async function jrEditMilOldShipment(ix) {
   const old = jrMilOldShipment();
   if (!old || !old.canEdit) return;
-  const v = await promptDialog({ title: 'Old Shipment', message: `Cartons of ${old.product} shipped before the app. It shows here as the 1st shipment and counts in the MIL reports only. Empty = none.`, defaultValue: old.qty ? String(old.qty) : '', placeholder: 'e.g. 25000', confirmText: 'Save' });
+  const editing = Number.isInteger(ix) && ix >= 0 && ix < old.list.length;
+  const v = await promptDialog({ title: editing ? `Old Shipment ${ix + 1}` : 'Add Old Shipment',
+    message: editing ? `Cartons of ${old.product} in this old shipment. Empty = remove it.` : `Cartons of ${old.product} shipped before the app. It shows here before the app's shipments and counts in the MIL reports only.`,
+    defaultValue: editing ? String(old.list[ix]) : '', placeholder: 'e.g. 25000', confirmText: 'Save' });
   if (v === null) return;
   const t = String(v).replace(/,/g, '').trim();
-  if (t !== '' && !(Number.isFinite(Number(t)) && Number(t) >= 0)) { notify('Old Shipment must be a number'); return; }
+  if (t !== '' && !(Number.isFinite(Number(t)) && Number(t) > 0)) { notify('Old Shipment must be a number above 0'); return; }
+  const list = old.list.slice();
+  if (editing) { if (t === '') list.splice(ix, 1); else list[ix] = Number(t); }
+  else { if (t === '') return; list.push(Number(t)); }
   try {
-    const updated = await api('PATCH', `/api/stock-groups/${old.groupId}`, { old_shipped: t === '' ? null : t });
-    const ix = (stockGroups || []).findIndex(g => g && g.id === old.groupId);
-    if (ix >= 0 && updated) stockGroups[ix] = { ...stockGroups[ix], ...updated };
-    notify(t === '' ? 'Old Shipment removed' : 'Old Shipment saved');
+    const updated = await api('PATCH', `/api/stock-groups/${old.groupId}`, { old_shipments: list.map(q => ({ qty: q })) });
+    const gi = (stockGroups || []).findIndex(g => g && g.id === old.groupId);
+    if (gi >= 0 && updated) stockGroups[gi] = { ...stockGroups[gi], ...updated };
+    notify(editing && t === '' ? 'Old Shipment removed' : 'Old Shipment saved');
   } catch (e) { notify('Error: ' + e.message); return; }
   renderJobsReport();
 }
@@ -20918,7 +20933,7 @@ function jrMilRows(opts) {
     const typedCartons = (shipperNote || looseNote) ? [...shipperLines(shipperNote), ...shipperLines(looseNote)].reduce((a, l) => a + l.cartons, 0) : null;
     const cartonsMismatch = typedCartons !== null && Math.abs(typedCartons - packedCartons) > 1e-9;
     // Old Shipped (owner, 2026-11-17): shipped before the app, typed on the report - in Shipped Qty for every date.
-    const oldShipped = ent ? (parseFloat(String(ent.old_shipped ?? '').replace(/[^0-9.-]/g, '')) || 0) : 0;
+    const oldShipped = milOldShipmentList(ent).reduce((a, q) => a + q, 0);
     const shippedAll = shipped + oldShipped;
     // Row colour (owner, 2026-11-17): red = on hold / blocked (Remarks say "hold" or "block"), yellow = no
     // delivery yet (the old shipment counts as one).
