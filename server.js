@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-18-pm-check';   // + jobs.pm_check   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-18-pm-checked-report';   // + jobs.pm_check, + rpt_pm_checked row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -658,7 +658,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   // deleted and never-used job numbers, which is an audit question, not a
   // production one. Starts matching the Jobs Report so nobody loses access on
   // upgrade; tighten it from the Access Register if it should be narrower.
-  rpt_job_number_register:         { label: 'Job Number Register — every job card number and what became of it', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
+  rpt_pm_checked:                  { label: 'PM Checked report — every job the PM checked at Ready, green once delivered', levels: { admin: 'view', ceo: 'view', production_manager: 'view' } },
+  rpt_job_number_register:         { label:'Job Number Register — every job card number and what became of it', levels: { admin: 'view', ceo: 'view', production_manager: 'view', finance: 'view' } },
   // Reuse is a job-CREATION power (the next card takes the spent number),
   // so it needs this row AND the New Job row — either alone is not enough.
   rpt_job_number_reuse:            { label: 'Job Number Register — Reuse button (create the next job card on a spent, never-used number; also needs New Job)', levels: { admin: 'yes', production_manager: 'yes' } },

@@ -67,6 +67,16 @@
   #app-date .ad-day  { font-size: 11px; letter-spacing: 0.18em; opacity: 0.85; }
   #app-date .ad-date { font-size: 13px; letter-spacing: 0.04em; margin-top: 2px; }
   body.role-operator #app-date { display: none; }
+  /* A slim row above the Jobs figures; on a wide screen (side margin free) a column under the date. */
+  #ready-noti { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; align-items: center; max-width: 1100px; margin: 6px auto 0; padding: 0 16px; box-sizing: border-box; }
+  @media (min-width: 1640px) { #ready-noti { position: fixed; top: 116px; right: 24px; z-index: 39; width: 230px; margin: 0; padding: 0; flex-direction: column; flex-wrap: nowrap; align-items: stretch; max-height: 45vh; overflow-y: auto; } }
+  body:not([data-mode="jobs"]) #ready-noti, body.role-operator #ready-noti, body.role-client #ready-noti { display: none !important; }
+  .rn-head { font-size: 10.5px; font-weight: 800; color: #166534; text-transform: uppercase; letter-spacing: .04em; text-align: right; }
+  .rn-item { text-align: left; background: #dcfce7; border: 1px solid #22c55e; border-left: 4px solid #16a34a; border-radius: 7px; padding: 4px 8px; font-size: 12px; color: #14532d; cursor: pointer; font-family: inherit; line-height: 1.25; box-shadow: 0 2px 6px rgba(22,101,52,.12); }
+  .rn-item:hover { background: #bbf7d0; }
+  .rn-item small { display: block; font-size: 10.5px; color: #166534; opacity: .85; }
+  .rn-more { align-self: flex-end; background: none; border: 0; color: #166534; font-weight: 800; font-size: 11.5px; cursor: pointer; text-decoration: underline; font-family: inherit; }
+  @media (max-width: 1639px) { .rn-item { max-width: 280px; } .rn-head { text-align: left; } }
   .topbar-brand { display: flex; align-items: center; gap: 10px; color: #fff; animation: fadeIn 0.3s ease-out; margin-left: 16px; }   /* room for #calc-launcher */
   /* Same white-on-transparent processed mark used on the hero banner
      (see buildWhiteLogo()) — no circle/background needed, it composites
@@ -3948,6 +3958,8 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
      topbar / Logout button. Updates on render and quietly self-refreshes
      so it tracks midnight without a page reload. -->
 <div id="app-date" aria-hidden="true"></div>
+<!-- Ready notices (owner, 2026-11-18): jobs forwarded to Ready to Deliver, until the PM checks them. -->
+<div id="ready-noti" style="display:none;"></div>
 
 <div class="main" id="jobs-mode">
   <div id="jobs-return-bar" style="display:none;"></div>
@@ -4130,7 +4142,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <div class="report-card-title">Line Clearance</div>
         <div class="report-card-desc">QA's line clearance log for every machine - previous job, new job, the check points and Line Cleared. Printable per machine like the paper log.</div>
       </button>
-      <button class="report-card sm-hide" data-rpt="rpt_jobs_report|rpt_mil_products|rpt_production_report" onclick="openJobsReportPage()">
+      <button class="report-card sm-hide" data-rpt="rpt_jobs_report|rpt_mil_products|rpt_pm_checked|rpt_production_report" onclick="openJobsReportPage()">
         <div class="report-card-icon">&#128196;</div>
         <div class="report-card-title">Jobs Report</div>
         <div class="report-card-desc">Tabular log of every delivered job — date, company, PO number, quantities, packets consumed, paper, machine, coatings. With print + Excel export.</div>
@@ -4216,6 +4228,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <button class="rsb-item rsb-item-mil" data-rpt="rpt_mil_products" data-rt="mil-products" onclick="setReportsTab('mil-products')">
           <span class="rsb-icon">&#128230;</span> MIL Products
         </button>
+        <button class="rsb-item" data-rpt="rpt_pm_checked" data-rt="pm-checked" onclick="setReportsTab('pm-checked')">
+          <span class="rsb-icon" style="color:#e10600;">&#10004;</span> PM Checked
+        </button>
         <button class="rsb-item" data-rpt="rpt_production_report" data-rt="prod-report" onclick="setReportsTab('prod-report')">
           <span class="rsb-icon">&#128202;</span> Production Report
         </button>
@@ -4226,6 +4241,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <main class="reports-content">
         <div id="rt-jobs-report" class="rt-pane"></div>
         <div id="rt-mil-products" class="rt-pane" style="display:none;"></div>
+        <div id="rt-pm-checked" class="rt-pane" style="display:none;"></div>
         <div id="rt-prod-report" class="rt-pane" style="display:none;"></div>
         <div id="rt-job-numbers" class="rt-pane" style="display:none;"></div>
       </main>
@@ -10203,8 +10219,28 @@ if (isPreviewEnv()) {
 }
 
 const isMilJobRow = j => !!(j && (j.stock_group_name || j.group_job_id));
+// Ready notices (owner, 2026-11-18): a job forwarded to Ready to Deliver (from today on) shows under the date in
+// green - job no., name, company - until the PM checks it or it leaves Ready.
+const READY_NOTI_SINCE = Date.parse('2026-11-18T00:00:00+05:00');
+function readyNotiAt(j) { const t = Date.parse((j && j.stages && j.stages[6] && j.stages[6].at) || ''); return isFinite(t) ? t : 0; }
+function readyNotiJobs() {
+  return (jobs || []).filter(j => j && !j.deleted_at && isStorage(j) && !isPmChecked(j) && readyNotiAt(j) >= READY_NOTI_SINCE)
+    .sort((a, b) => readyNotiAt(b) - readyNotiAt(a));
+}
+function renderReadyNoti() {
+  const el = document.getElementById('ready-noti');
+  if (!el) return;
+  const list = seeBtn('job_btn_pm_check') ? readyNotiJobs() : [];
+  if (!list.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const MAX = 4;
+  el.style.display = '';
+  el.innerHTML = `<div class="rn-head">&#10004; Ready &middot; PM to check (${list.length})</div>`
+    + list.slice(0, MAX).map(j => `<button type="button" class="rn-item" onclick="openEdit(${j.id})" title="Reached Ready to Deliver ${esc(fmtDMYT12(new Date(readyNotiAt(j))))} - open the job card"><b>E-${j.id}</b> ${esc(j.name || '')}<small>${esc(j.client || '')}</small></button>`).join('')
+    + (list.length > MAX ? `<button type="button" class="rn-more" onclick="setMode('jobs'); setView('storage');">+${list.length - MAX} more &rsaquo;</button>` : '');
+}
 function renderStats() {
   try { updateOffcutIssueBtn(); } catch (e) { /* the button is a shortcut - never break the figures */ }
+  try { renderReadyNoti(); } catch (e) { /* a notice - never break the figures */ }
   const s = {
     total: jobs.length,
     newJobs: jobs.filter(isNewJob).length,
@@ -20943,6 +20979,55 @@ async function jrDeleteMilOldShipment(ix) {
   renderJobsReport();
 }
 const OLD_SHIP_DEL_BTN = (k) => `<button type="button" class="btn btn-sm" style="padding:1px 8px;font-size:11px;font-weight:700;background:#fff;border-color:#dc2626;color:#dc2626;margin-left:8px;" onclick="event.stopPropagation(); jrDeleteMilOldShipment(${k})" title="Delete this old shipment">&#10006; Delete</button>`;
+// PM Checked report (owner, 2026-11-18): every job the PM checked (PM Check tick, by hand or from the station),
+// newest check first; the row turns green once the job is delivered after the check (partly or fully).
+const pmcState = { q: '', show: 'all' };
+function pmcSet(k, v) { pmcState[k] = v; renderPmCheckedReport(); }
+function pmcRows() {
+  const num = v => parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')) || 0;
+  return (jobs || []).filter(j => j && !j.deleted_at && j.pm_check && j.pm_check.at).map(j => {
+    const c = j.pm_check, del = totalDeliveredCartons(j) || 0;
+    const nDel = Array.isArray(j.deliveries) ? j.deliveries.length : 0;
+    const delivered = isDone(j) || nDel > (+c.n || 0) || del > (+c.del || 0);
+    const mf = j.stock_group_name ? milTileShipmentFacts(j) : null;
+    let wastage = 0; try { wastage = +jobShipmentFigures(j).jobWastageAll || 0; } catch (e) { wastage = 0; }
+    return { j, c, delivered, po: mf ? mf.qtyLine : (j.qty || ''), poNum: mf ? 0 : num(j.qty), uc: num(j.cartonqty), del, wastage };
+  });
+}
+function renderPmCheckedReport() {
+  const pane = document.getElementById('rt-pm-checked');
+  if (!pane) return;
+  const q = pmcState.q.trim().toLowerCase();
+  const all = pmcRows();
+  const rows = all.filter(r => (pmcState.show === 'all' || (pmcState.show === 'delivered') === r.delivered)
+    && (!q || [r.j.id, 'e-' + r.j.id, r.j.name, r.j.client].some(v => String(v || '').toLowerCase().includes(q))))
+    .sort((a, b) => String(b.c.at).localeCompare(String(a.c.at)));
+  const fmt = n => n ? (+n).toLocaleString() : '';
+  const nDel = all.filter(r => r.delivered).length;
+  const btn = (k, l) => `<button type="button" class="${pmcState.show === k ? 'is-on' : ''}" onclick="pmcSet('show', '${k}')">${l}</button>`;
+  const tot = rows.reduce((a, r) => ({ po: a.po + r.poNum, uc: a.uc + r.uc, del: a.del + r.del, w: a.w + r.wastage }), { po: 0, uc: 0, del: 0, w: 0 });
+  const td = 'padding:8px 10px;border-bottom:1px solid var(--border);';
+  const tdR = td + 'text-align:right;white-space:nowrap;';
+  const th = 'padding:8px 10px;text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;background:var(--bg2);white-space:nowrap;';
+  pane.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:10px;">
+      <div><div class="dash-flbl">Show</div><div class="lc-sortby">${btn('all', 'All')}${btn('open', 'Not delivered')}${btn('delivered', 'Delivered')}</div></div>
+      <div style="flex:1;min-width:220px;max-width:380px;"><div class="dash-flbl">Search</div><input class="filter" type="search" style="width:100%;" placeholder="Job no., name, company..." value="${esc(pmcState.q)}" oninput="pmcState.q = this.value; clearTimeout(window._pmcT); window._pmcT = setTimeout(renderPmCheckedReport, 250);"></div>
+      <div style="margin-left:auto;font-size:12px;color:var(--text2);"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#bbf7d0;border:1px solid #22c55e;vertical-align:-2px;"></span> Green = delivered after the check</div>
+    </div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${all.length} job${all.length === 1 ? '' : 's'} checked by the PM &middot; <b style="color:#166534;">${nDel} delivered</b> &middot; <b style="color:#e10600;">${all.length - nDel} not delivered yet</b></div>
+    ${rows.length ? `<div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13.5px;">
+      <thead><tr><th style="${th}">Job No.</th><th style="${th}">Job Name</th><th style="${th}">Company</th><th style="${th}text-align:right;">PO Qty</th><th style="${th}text-align:right;">Printed UC Qty</th><th style="${th}text-align:right;">Delivered UC Qty</th><th style="${th}text-align:right;">Wastage</th></tr></thead>
+      <tbody>${rows.map(r => `<tr style="${r.delivered ? 'background:#dcfce7;' : ''}cursor:pointer;" onclick="openEdit(${r.j.id})" title="Checked ${esc(fmtDMYT12(r.c.at))}${r.c.by ? ' by ' + esc(r.c.by) : ''}${r.c.via === 'station' ? ' (Ready qty saved at the station)' : ''} - click to open the job card">
+        <td style="${td}white-space:nowrap;"><b style="color:${r.delivered ? '#166534' : '#e10600'};">&#10004; E-${r.j.id}</b><div style="font-size:10.5px;color:var(--text2);">${esc(fmtDMY(r.c.at))}</div></td>
+        <td style="${td}font-weight:600;">${esc(r.j.name || '')}</td>
+        <td style="${td}">${esc(r.j.client || '')}</td>
+        <td style="${tdR}">${r.poNum ? fmt(r.poNum) : esc(String(r.po || ''))}</td>
+        <td style="${tdR}">${fmt(r.uc)}</td>
+        <td style="${tdR}font-weight:${r.del ? 700 : 400};">${fmt(r.del)}</td>
+        <td style="${tdR}">${fmt(r.wastage)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr style="font-weight:700;background:var(--bg2);"><td style="${td}" colspan="3">${rows.length} job${rows.length === 1 ? '' : 's'}</td><td style="${tdR}">${fmt(tot.po)}</td><td style="${tdR}">${fmt(tot.uc)}</td><td style="${tdR}">${fmt(tot.del)}</td><td style="${tdR}">${fmt(tot.w)}</td></tr></tfoot>
+    </table></div>` : `<div class="empty" style="padding:28px;text-align:center;">${all.length ? 'No checked jobs match these filters.' : 'No job has been checked by the PM yet.'}</div>`}`;
+}
 const milRptState = { asOf: '', q: '', client: '' };
 function jrMilAsOf() { return milRptState.asOf || localDateISO(); }
 function jrMilEntryIso(d) {
@@ -27268,7 +27353,7 @@ function setReportsTab(name) {
   if (_item && getComputedStyle(_item).display === 'none') return;
   document.querySelectorAll('.rsb-item').forEach(b => b.classList.toggle('active', b.dataset.rt === name));
   requestAnimationFrame(syncReportsFlowIndicators);
-  const inlinePanes = ['cost-report', 'line-clearance', 'sale-report', 'party-ledger', 'aging-report', 'chart-accounts', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'mil-products', 'jobs-report', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'trash-papers', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
+  const inlinePanes = ['cost-report', 'line-clearance', 'sale-report', 'party-ledger', 'aging-report', 'chart-accounts', 'stock-in', 'stock-out', 'manual-consumption', 'offcut-consumption', 'summary', 'inventory-report', 'mil-products', 'jobs-report', 'pm-checked', 'prod-report', 'job-numbers', 'trash-jobs', 'trash-imports', 'trash-transactions', 'trash-papers', 'dp-printing', 'dp-die', 'dp-coatings', 'dp-breaking', 'dp-pasting', 'dp-sorting'];
   inlinePanes.forEach(p => {
     const el = document.getElementById('rt-' + p);
     if (el) el.style.display = p === name ? 'block' : 'none';
@@ -27288,6 +27373,7 @@ function setReportsTab(name) {
   if (name === 'jobs-report')     openJobsReport();
   if (name === 'mil-products')    openMilProductsReport();
   if (name === 'prod-report')     openProductionReport();
+  if (name === 'pm-checked')      renderPmCheckedReport();
   if (name === 'job-numbers')     openJobNumbers();
   if (name === 'trash-jobs')         loadTrashAndRender('jobs');
   if (name === 'trash-imports')      loadTrashAndRender('imports');
@@ -44223,6 +44309,7 @@ const ACC_REPORTS_TAB_ROWS = [
   { key: 'rpt_jobs_report',                 type: 'tab' },
   { key: 'rpt_mil_products',                type: 'tab' },
   { key: 'rpt_production_report',           type: 'tab' },
+  { key: 'rpt_pm_checked',                  type: 'tab' },
   { key: 'rpt_job_number_register',         type: 'tab' },
   { key: 'rpt_job_number_reuse',            type: 'action' },
   { key: 'rpt_daily_production_report',     type: 'tab' },
