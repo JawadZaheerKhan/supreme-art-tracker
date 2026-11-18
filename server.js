@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-18-pm-checked-report';   // + jobs.pm_check, + rpt_pm_checked row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-18-job-warnings';   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -499,7 +499,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check','job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -565,7 +565,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   job_btn_over_issue_ignore: { label: 'Over-issued stock — Ignore (clears it, no stock moves)', levels: {} },
   job_btn_paper_to_offcut: { label: 'Old paper — Sent to offcut (job History / Dashboard)', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_pm_check:        { label: 'PM Check — the red tick on Ready / Partial Ready jobs (checked by the PM)', levels: { admin: 'yes', production_manager: 'yes' } },
-  job_btn_record_delivery: { label:'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  job_btn_warning_ignore:  { label: 'Job warning — Ignore (the red warning signs on a job tile)', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // Filling the Record Delivery form is separated from pressing the button, so
   // finance can enter the invoicing detail on a shipment the PM then records.
   // What is typed saves itself into the job's delivery_draft; only the button
@@ -1091,6 +1092,9 @@ async function initDb() {
     // PM Check (owner, 2026-11-18): { at, by, via, n, del } - n / del = the job's delivery count and cartons
     // when it was checked; a delivery after that (partial or full) clears it.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS pm_check JSONB`;
+    // Job warnings (owner, 2026-11-18): { rule: { sig, at, by } } - a warning ignored for the figures it had (sig);
+    // it comes back if those figures change.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS warn_ignored JSONB`;
     await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
@@ -15217,6 +15221,26 @@ app.post('/api/jobs/:id/pm-check', requirePermission('job_btn_pm_check'), async 
     const val = on ? pmCheckValue(job, req.user.name || 'App user', 'job') : null;
     const updated = await sql`UPDATE jobs SET pm_check = ${val ? JSON.stringify(val) : null} WHERE id = ${id} RETURNING *`;
     await logAudit(sql, req, { action: 'job.pm_check', entityType: 'job', entityId: id, summary: `Job E-${id} ${on ? 'checked' : 'unchecked'} (PM Check)` });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Job warnings - Ignore (owner, 2026-11-18): hides one warning on a job for the figures it had then.
+app.post('/api/jobs/:id/warning-ignore', requirePermission('job_btn_warning_ignore'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rule = String((req.body && req.body.rule) || '');
+    if (!/^[a-z_]{2,24}$/.test(rule)) return res.status(400).json({ error: 'Unknown warning' });
+    const sig = String((req.body && req.body.sig) ?? '').slice(0, 200);
+    const label = String((req.body && req.body.label) || rule).slice(0, 200);
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const ign = (rows[0].warn_ignored && typeof rows[0].warn_ignored === 'object') ? { ...rows[0].warn_ignored } : {};
+    ign[rule] = { sig, at: new Date().toISOString(), by: req.user.name || 'App user' };
+    const updated = await sql`UPDATE jobs SET warn_ignored = ${JSON.stringify(ign)} WHERE id = ${id} RETURNING *`;
+    await logAudit(sql, req, { action: 'job.warning_ignored', entityType: 'job', entityId: id, summary: `Job E-${id}: warning ignored - ${label}` });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });

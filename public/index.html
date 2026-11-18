@@ -1791,6 +1791,22 @@
     #jobs-filter-row-1 > .filter { flex: 1 1 auto; min-width: 0; width: auto !important; }
   }
   #over-issue-alert { background: #fee2e2; color: #b91c1c; border: 1.5px solid #f87171; font-weight: 700; }
+  /* Smaller (owner, 2026-11-18) - with the new Low Issuance one. */
+  #offcut-issue-btn, #over-issue-alert, #shade-card-toggle, #low-issue-btn { padding: 4px 10px !important; font-size: 12.5px !important; border-radius: 6px !important; }
+  #low-issue-btn { font-weight: 700; font-family: var(--font); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; background: #fef3c7; color: #92400e; border: 1.5px solid #f59e0b; }
+  #low-issue-btn:hover { background: #fde68a; }
+  #low-issue-btn.is-on { background: #f59e0b; color: #fff; }
+  #low-issue-btn.is-on .offcut-issue-n { background: #fff; color: #b45309; }
+  #low-issue-btn .offcut-issue-n { background: #d97706; }
+  /* Under the tile's buttons: Low issuance chip + warning signs (owner, 2026-11-18). */
+  .job-chips { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; align-items: center; margin-top: 4px; }
+  .li-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; background: #fef3c7; border: 1px solid #f59e0b; color: #78350f; font-size: 11px; font-weight: 700; white-space: nowrap; cursor: help; }
+  .jw-chip { display: inline-flex; flex-direction: column; align-items: center; gap: 0; padding: 2px 4px 1px; border-radius: 6px; background: #fff; border: 1.5px solid #ff1a1a; cursor: pointer; font-family: inherit; line-height: 1; box-shadow: 0 0 0 2px rgba(255,26,26,.12); }
+  .jw-chip:hover { background: #fee2e2; }
+  .jw-chip svg { display: block; }
+  .jw-chip span { font-size: 8.5px; font-weight: 900; color: #e10600; letter-spacing: .02em; margin-top: 1px; }
+  @keyframes jwPulse { 0%, 100% { box-shadow: 0 0 0 2px rgba(255,26,26,.12); } 50% { box-shadow: 0 0 0 4px rgba(255,26,26,.28); } }
+  .jw-chip { animation: jwPulse 2.2s ease-in-out infinite; }
   #over-issue-alert:hover { background: #fecaca; border-color: #ef4444; }
   /* Stock Group tile — purple accent top-border to distinguish from job cards */
   .group-card { border-top: 4px solid #7c3aed !important; }
@@ -3999,6 +4015,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <span id="date-custom" style="display:none;gap:6px;align-items:center;"><input type="date" id="date-from" class="filter" onchange="setDateCustom()" style="padding:6px;"><span style="color:var(--text2);font-size:12px;">to</span><input type="date" id="date-to" class="filter" onchange="setDateCustom()" style="padding:6px;"></span>
       <div class="jobs-filter-right">
       <button id="offcut-issue-btn" class="ceo-hide" style="display:none;" data-acc="inv_btn_offcut_issuance" onclick="openOffcutIssueList()" title="Jobs waiting for offcut paper - issue it from here">&#9986; Offcut Issuance <span id="offcut-issue-n" class="offcut-issue-n" style="display:none;"></span></button>
+      <button id="low-issue-btn" style="display:none;" onclick="toggleLowIssueFilter()" title="Jobs still short of paper (low issuance) - click to show only them">&#9888; Low Issuance <span id="low-issue-n" class="offcut-issue-n"></span></button>
       <button id="over-issue-alert" class="whole-toggle" style="display:none;" onclick="openOverIssuedList()" title="Jobs with over-issued paper waiting for a decision - click to pick one and go to it">
         <span class="whole-toggle-text">&#9888; <span id="over-issue-alert-label">Over-issued</span></span>
       </button>
@@ -5039,6 +5056,7 @@ let filterCode = '';   // Item Code box (the job card's Code), owner 2026-10-08
 let filterBatch = '';  // Batch No. box: the job card's Batch No. or any delivery's (owner, 2026-11-10)
 // Shade-card filter — '' (all) | 'only' (shade cards only) | 'hide' (production only)
 let filterShadeCard = '';
+let filterLowIssue = false;   // Low Issuance button (owner, 2026-11-18)
 let filterPmChecked = false;   // Ready tile's Checked toggle (owner, 2026-11-18): only PM-checked jobs
 let filterMil = false;   // MIL split button's left half (owner, 2026-11-17): only MIL jobs
 let filterGroup = '';
@@ -6397,6 +6415,98 @@ function partialIssueBannerHtml(j) {
   return `<div class="partial-issue-banner" style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:12px;color:#78350f;margin:6px 0;">
     <div style="font-weight:700;">&#9888; Low issuance &mdash; still needs <b>${pktsStr} ${unit}</b> (${remaining.toLocaleString()} sheets). Store keeper can Issue More from Pending Stock.</div>
   </div>`;
+}
+// Low issuance as a small chip under the tile's buttons (owner, 2026-11-18) - the full text on hover.
+function lowIssueSheets(j) { try { return (typeof partialPendingSheets === 'function' ? partialPendingSheets(j) : 0) || 0; } catch (e) { return 0; } }
+function lowIssueChipHtml(j) {
+  const remaining = lowIssueSheets(j);
+  if (!(remaining > 0)) return '';
+  const invIt = j.inventory_item_id ? inventoryAll.find(i => i.id === j.inventory_item_id) : null;
+  const ps = invIt ? packetSize(invIt.paper_type) : 100;
+  const unit = invIt ? packetUnitLabel(invIt.paper_type).toLowerCase() : 'packets';
+  const pkts = ps ? +(remaining / ps).toFixed(2) : 0;
+  return `<span class="li-chip" title="Low issuance - still needs ${pkts} ${unit} (${remaining.toLocaleString()} sheets). Store keeper can Issue More from Pending Stock.">&#9888; Low issuance &middot; ${pkts} ${unit}</span>`;
+}
+// Job warnings (owner, 2026-11-18): six checks, each its own small red sign; click = the reason + Ignore.
+// Jobs still running, and delivered ones for 30 days after delivery. Not shade cards or Finalized jobs.
+const JW_SVG = '<svg viewBox="0 0 24 22" width="17" height="15" aria-hidden="true"><path d="M12 1.6 L22.8 20.4 H1.2 Z" fill="#fff" stroke="#e10600" stroke-width="2.6" stroke-linejoin="round"/><rect x="10.8" y="7" width="2.4" height="7.6" rx="1.2" fill="#111"/><circle cx="12" cy="17.4" r="1.45" fill="#111"/></svg>';
+function jobWarnInScope(j) {
+  if (!j || j.deleted_at || j.is_shade_card || (typeof _finalizedJobIds !== 'undefined' && _finalizedJobIds.has(j.id))) return false;
+  if ((j.stage_index || 0) >= STAGES.length - 1) {
+    const at = Date.parse((j.stages && j.stages[STAGES.length - 1] && j.stages[STAGES.length - 1].at) || '');
+    return isFinite(at) && Date.now() - at < 30 * 864e5;
+  }
+  return true;
+}
+function jobWarnings(j, withIgnored) {
+  if (!jobWarnInScope(j)) return [];
+  const num = v => parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')) || 0;
+  const f = n => (+(+n).toFixed(2)).toLocaleString();
+  const si = j.stage_index || 0;
+  const po = num(j.qty), uc = num(j.cartonqty), sheets = num(j.sheets);
+  const ready = readyCartonsTotal(j) || 0;
+  const mil = !!(j.stock_group_name || j.group_job_id);
+  const out = [];
+  // 1 - Printed UC below the PO qty (not MIL sub jobs - their PO is the group's)
+  if (!mil && po > 0 && uc > 0 && uc < po) out.push({ key: 'uc_po', tag: 'UC<PO', title: 'Printed UC less than PO',
+    text: `Printed UC is ${f(uc)}, PO qty is ${f(po)}. That is ${f(po - uc)} short.`, sig: uc + '|' + po });
+  // 2 - wastage in minus
+  let w = null; try { w = jobShipmentFigures(j).jobWastageAll; } catch (e) { w = null; }
+  if (w !== null && isFinite(w) && w < 0) out.push({ key: 'neg_waste', tag: 'WASTE', title: 'Wastage in minus',
+    text: `Wastage is ${f(w)} (in minus). Ready or delivered is more than printed.`, sig: String(Math.round(w)) });
+  // 3 - printing entry below the job's sheets
+  const printed = stageDoneQty(j, 1);
+  if (si > 1 && printed > 0 && sheets > 0 && printed < sheets) out.push({ key: 'print_sheets', tag: 'SHEETS', title: 'Printed sheets less than job sheets',
+    text: `Printing entered ${f(printed)} sheets. The job has ${f(sheets)} sheets.`, sig: printed + '|' + sheets });
+  // 4 - Ready to Delivery Qty empty once the job is at Ready
+  if (si >= 6 && !(ready > 0)) out.push({ key: 'ready_empty', tag: 'READY', title: 'Ready qty empty',
+    text: 'Ready to Delivery Qty is empty on the job card.', sig: '0' });
+  // 5 - Ready more than printed UC
+  if (ready > 0 && uc > 0 && ready > uc) out.push({ key: 'ready_uc', tag: 'R>UC', title: 'Ready more than printed UC',
+    text: `Ready qty is ${f(ready)}, more than printed UC ${f(uc)}.`, sig: ready + '|' + uc });
+  // 6 - a stage the job went past with no operator entry (a stage skipped on purpose doesn't count)
+  const missing = [1, 2, 3, 4, 5].filter(st => si > st
+    && !(st === 2 && !(Array.isArray(j.coatings) && j.coatings.length))   // no coating on the job - nothing to enter
+    && !/^skipped/i.test(String((j.stages && j.stages[st] && j.stages[st].notes) || ''))
+    && !(stageDoneQty(j, st) > 0)).map(st => STAGES[st]);
+  if (missing.length) out.push({ key: 'no_entry', tag: 'ENTRY', title: 'Operator entry missing',
+    text: `No operator entry for ${missing.join(', ')}.`, sig: missing.join(',') });
+  if (withIgnored) return out;
+  const ign = (j.warn_ignored && typeof j.warn_ignored === 'object') ? j.warn_ignored : {};
+  return out.filter(x => !(ign[x.key] && String(ign[x.key].sig) === String(x.sig)));
+}
+function jobChipsHtml(j) {
+  const warns = jobWarnings(j);
+  const chips = lowIssueChipHtml(j) + warns.map(x => `<button type="button" class="jw-chip" onclick="event.stopPropagation(); openJobWarning(${j.id}, '${x.key}')" title="${esc(x.title)} - click for the reason">${JW_SVG}<span>${esc(x.tag)}</span></button>`).join('');
+  return chips ? `<div class="job-chips">${chips}</div>` : '';
+}
+function openJobWarning(id, key) {
+  const j = (jobs || []).find(x => x && x.id === id);
+  const x = j && jobWarnings(j).find(w => w.key === key);
+  if (!x) return;
+  const canIgnore = isSuperAdmin() || hasPerm('job_btn_warning_ignore');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">${JW_SVG.replace('width="17" height="15"', 'width="34" height="30"')}<div><div style="font-weight:800;color:#e10600;font-size:15px;">${esc(x.title)}</div><div style="font-size:12px;color:var(--text2);">E-${j.id} &middot; ${esc(j.name || '')}</div></div></div>
+    <div style="font-size:14px;line-height:1.45;padding:8px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;">${esc(x.text)}</div>
+    <div class="modal-actions">
+      ${seeBtn('job_btn_warning_ignore') ? `<button class="btn" data-acc="job_btn_warning_ignore" ${canIgnore ? '' : 'disabled'} onclick="ignoreJobWarning(${j.id}, '${x.key}')" title="Hide this warning on this job - it comes back if the figures change">Ignore</button>` : ''}
+      <button class="btn" onclick="closeModal(); openEdit(${j.id})">Open job card</button>
+      <button class="btn btn-primary" onclick="closeModal()">OK</button>
+    </div>
+  </div>`);
+}
+async function ignoreJobWarning(id, key) {
+  const j = (jobs || []).find(x => x && x.id === id);
+  const x = j && jobWarnings(j).find(w => w.key === key);
+  if (!x) { closeModal(); return; }
+  try {
+    const upd = await api('POST', `/api/jobs/${id}/warning-ignore`, { rule: key, sig: x.sig, label: x.title + ': ' + x.text });
+    const i = jobs.findIndex(y => y && y.id === id);
+    if (i >= 0 && upd) jobs[i] = { ...jobs[i], ...upd };
+    notify('Warning ignored');
+  } catch (e) { notify('Error: ' + e.message); return; }
+  closeModal();
+  renderJobs();
 }
 // A top-up's paper (owner, 2026-10-31): t.paper names the 2nd / 3rd paper; none = the main paper.
 const TOPUP_ORD = { secondary_paper: '2nd', third_paper: '3rd' };
@@ -10006,6 +10116,7 @@ function jobPassesFilters(j) {
   if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
   if (filterMil && !(j.stock_group_name || j.group_job_id)) return false;
   if (filterPmChecked && !isPmChecked(j)) return false;
+  if (filterLowIssue && !(lowIssueSheets(j) > 0)) return false;
   if (filterMachine && j.machine !== filterMachine) return false;
   if (filterGroup && j.stock_group_name !== filterGroup) return false;
   if (!inDateRange(j)) return false;
@@ -10333,6 +10444,7 @@ function renderJobs() {
   renderNewJobsBulkBar();
   renderShadeCardToggle();
   renderMilFilterToggle();
+  renderLowIssueBtn();
   renderOverIssueAlert();
   renderWastageAdjBar();
   if (jobsViewMode === 'cards') renderJobsCards();
@@ -10363,6 +10475,19 @@ function renderMilFilterToggle() {
   btn.classList.toggle('is-on', !!filterMil);
 }
 function toggleMilFilter() { filterMil = !filterMil; renderJobs(); }
+function renderLowIssueBtn() {
+  const btn = document.getElementById('low-issue-btn');
+  if (!btn) return;
+  const n = (jobs || []).filter(j => j && !j.deleted_at && lowIssueSheets(j) > 0).length;
+  if (!n && filterLowIssue) filterLowIssue = false;
+  btn.style.display = n ? '' : 'none';
+  const c = document.getElementById('low-issue-n'); if (c) c.textContent = n || '';
+  btn.classList.toggle('is-on', !!filterLowIssue);
+}
+function toggleLowIssueFilter() {
+  filterLowIssue = !filterLowIssue;
+  if (filterLowIssue && view !== 'all') setView('all'); else renderJobs();
+}
 function playActionToggle(btn) {
   if (!btn) return;
   btn.classList.remove('toggle-motion-click');
@@ -10793,6 +10918,7 @@ function renderJobRowCompact(j, opts) {
             ${(done && canWastageAdjust() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
             ${(_finalizedJobIds.has(j.id) && canWastageAdjust() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
+          ${isGroupTile ? '' : jobChipsHtml(j)}
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
             <div class="job-day-stats" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
               ${d !== '—' ? `<div style="line-height:1.15;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Day</div><div style="font-size:15px;font-weight:700;color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};">${esc(d)}</div></div>` : ''}
@@ -10802,7 +10928,6 @@ function renderJobRowCompact(j, opts) {
         </div>
       </div>
       ${overIssueBannerHtml(j)}
-      ${partialIssueBannerHtml(j)}
       <div class="job-pipe-row" style="display:flex;align-items:center;gap:10px;">
         <div class="pipeline" style="flex:1 1 auto;min-width:0;">${pipeline}</div>
         ${(seeBtn('job_btn_record_delivery') && !done && canDeliverNow(j)) ? `<div class="tile-record-delivery" style="flex:0 0 auto;display:flex;gap:8px;align-items:center;">
@@ -11375,7 +11500,7 @@ function renderJobCard(j, opts) {
       : `<div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>`}
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
     ${clientPreview ? '' : overIssueBannerHtml(j)}
-    ${clientPreview ? '' : partialIssueBannerHtml(j)}
+    ${clientPreview || isGroupTile ? '' : jobChipsHtml(j)}
     ${clientDeliveriesBreakdown(j, clientPreview)}
     ${clientPreview ? '' : wastageAdjBanner(j.id)}
     ${clientPreview ? '' : `<div class="tile-actions">
@@ -44388,6 +44513,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_paper_to_offcut', type: 'action' },
   { key: 'job_btn_record_delivery', type: 'action' },
   { key: 'job_btn_pm_check', type: 'action' },
+  { key: 'job_btn_warning_ignore', type: 'action' },
   { key: 'job_btn_delivery_details', type: 'button' },
   { key: 'job_btn_operator_entry',  type: 'action' },
   { key: 'job_btn_particulars',     type: 'edit-view' },
