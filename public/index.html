@@ -1736,6 +1736,15 @@
      toggle so it feels part of the toolbar, red palette to stand out as
      a create action. */
   /* MIL split button (owner, 2026-11-17): left = MIL-only filter toggle, right = Create Mil Job (dark purple). */
+  /* PM Check (owner, 2026-11-18) */
+  .pm-check { display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px 2px 6px; border: 1.5px solid #ff1a1a; border-radius: 999px; font-size: 11px; font-weight: 800; color: #e10600; background: #fff; cursor: pointer; white-space: nowrap; user-select: none; line-height: 1.4; }
+  .pm-check input { width: 15px; height: 15px; margin: 0; accent-color: #ff1a1a; cursor: pointer; }
+  .pm-check input:disabled { cursor: default; }
+  .pm-check.is-on { background: #ff1a1a; border-color: #ff1a1a; color: #fff; }
+  .pm-check.is-on input { accent-color: #b30000; }
+  .job-card.pm-checked, .job-tile.pm-checked { background: #ffe1e1 !important; border-color: #ff1a1a !important; box-shadow: inset 5px 0 0 #ff1a1a, 0 0 0 1px #ff1a1a; }
+  .pm-chk-toggle { display: inline-flex; align-items: center; gap: 4px; margin-top: 3px; padding: 1px 8px; border: 1.5px solid #ff1a1a; border-radius: 999px; background: #fff; color: #e10600; font-size: 11.5px; font-weight: 800; cursor: pointer; white-space: nowrap; font-family: inherit; }
+  .pm-chk-toggle.is-on { background: #ff1a1a; color: #fff; }
   .mil-split { display: inline-flex; align-items: stretch; border: 1.5px solid #6d28d9; border-radius: 7px; overflow: hidden; }
   #mil-filter-toggle, #create-group-btn {
     font-weight: 600; font-size: 12.5px; padding: 5px 10px; font-family: var(--font); cursor: pointer;
@@ -4981,6 +4990,7 @@ let filterCode = '';   // Item Code box (the job card's Code), owner 2026-10-08
 let filterBatch = '';  // Batch No. box: the job card's Batch No. or any delivery's (owner, 2026-11-10)
 // Shade-card filter — '' (all) | 'only' (shade cards only) | 'hide' (production only)
 let filterShadeCard = '';
+let filterPmChecked = false;   // Ready tile's Checked toggle (owner, 2026-11-18): only PM-checked jobs
 let filterMil = false;   // MIL split button's left half (owner, 2026-11-17): only MIL jobs
 let filterGroup = '';
 let filterDateRange = '';
@@ -5257,6 +5267,41 @@ function earlyReadyTotal(j) {
 // was ever entered (the job went out without that step), the quantity actually delivered.
 function wastageGoodQty(j) {
   return earlyReadyTotal(j) || totalDeliveredCartons(j) || 0;
+}
+// PM Check (owner, 2026-11-18) - see pmCheckValue on the server. Box on Ready / Partial Ready jobs; checked
+// while no delivery came after the check (a partial or full delivery clears it).
+function pmCheckEligible(j) {
+  return !!j && !j.deleted_at && !isDone(j) && !isPartialDelivery(j) && (isStorage(j) || isPartialReady(j));
+}
+function isPmChecked(j) {
+  if (!pmCheckEligible(j)) return false;
+  const c = j.pm_check;
+  if (!c || !c.at) return false;
+  const n = Array.isArray(j.deliveries) ? j.deliveries.length : 0;
+  return n <= (+c.n || 0) && totalDeliveredCartons(j) <= (+c.del || 0);
+}
+function canPmCheck() { return isSuperAdmin() || hasPerm('job_btn_pm_check'); }
+function pmCheckBoxHtml(j) {
+  if (!pmCheckEligible(j) || !seeBtn('job_btn_pm_check')) return '';
+  const on = isPmChecked(j), can = canPmCheck(), c = j.pm_check || {};
+  const tip = on
+    ? `Checked by the PM${c.by ? ' - ' + c.by : ''}${c.at ? ' · ' + fmtDMYT12(c.at) : ''}${c.via === 'station' ? ' (Ready qty saved at the station)' : ''}${can ? ' - click to uncheck' : ''}`
+    : (can ? 'PM: tick when you have checked this job' : 'Not checked by the PM yet');
+  return `<label class="pm-check${on ? ' is-on' : ''}" data-acc="job_btn_pm_check" title="${esc(tip)}" onclick="event.stopPropagation()"><input type="checkbox" ${on ? 'checked' : ''} ${can ? '' : 'disabled'} onchange="togglePmCheck(${j.id}, this.checked)">PM &#10003;</label>`;
+}
+async function togglePmCheck(id, on) {
+  try {
+    const upd = await api('POST', `/api/jobs/${id}/pm-check`, { checked: !!on });
+    const i = (jobs || []).findIndex(x => x && x.id === id);
+    if (i >= 0 && upd) jobs[i] = { ...jobs[i], ...upd };
+    notify(on ? `E-${id} checked` : `E-${id} unchecked`);
+  } catch (e) { notify('Error: ' + e.message); }
+  renderStats(); renderJobs();
+}
+function togglePmCheckedFilter() {
+  filterPmChecked = !filterPmChecked;
+  renderStats();
+  if (filterPmChecked && view !== 'all') setView('all'); else renderJobs();
 }
 function isPartialReady(j) {
   if (!j) return false;
@@ -9911,6 +9956,7 @@ function jobPassesFilters(j) {
   if (filterShadeCard === 'only' && !j.is_shade_card) return false;
   if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
   if (filterMil && !(j.stock_group_name || j.group_job_id)) return false;
+  if (filterPmChecked && !isPmChecked(j)) return false;
   if (filterMachine && j.machine !== filterMachine) return false;
   if (filterGroup && j.stock_group_name !== filterGroup) return false;
   if (!inDateRange(j)) return false;
@@ -10133,10 +10179,13 @@ function renderStats() {
     pending: jobs.filter(j => j.issuance_status === 'pending').length,
     active: jobs.filter(j=>!isNewJob(j)&&!isCtpQueue(j)&&j.issuance_status !== 'pending'&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
     // Ready to Deliver: normal jobs and MIL jobs apart (owner, 2026-11-16).
-    storage: jobs.filter(j => isStorage(j) && !isMilJobRow(j)).length,
-    storageQty: jobs.filter(j => isStorage(j) && !isMilJobRow(j)).reduce((a, j) => a + readyCartonsTotal(j), 0),
-    milStorage: jobs.filter(j => isStorage(j) && isMilJobRow(j)).length,
-    milStorageQty: jobs.filter(j => isStorage(j) && isMilJobRow(j)).reduce((a, j) => a + readyCartonsTotal(j), 0),
+    // PM-checked jobs (Ready or Partial Ready) show on their own red line (owner, 2026-11-18).
+    storage: jobs.filter(j => isStorage(j) && !isMilJobRow(j) && !isPmChecked(j)).length,
+    storageQty: jobs.filter(j => isStorage(j) && !isMilJobRow(j) && !isPmChecked(j)).reduce((a, j) => a + readyCartonsTotal(j), 0),
+    milStorage: jobs.filter(j => isStorage(j) && isMilJobRow(j) && !isPmChecked(j)).length,
+    milStorageQty: jobs.filter(j => isStorage(j) && isMilJobRow(j) && !isPmChecked(j)).reduce((a, j) => a + readyCartonsTotal(j), 0),
+    checked: jobs.filter(isPmChecked).length,
+    checkedQty: jobs.filter(isPmChecked).reduce((a, j) => a + earlyReadyTotal(j), 0),
     done: jobs.filter(isDone).length,
     blocked: jobs.filter(isBlocked).length
   };
@@ -10151,7 +10200,7 @@ function renderStats() {
   document.getElementById('stats-row').innerHTML = [
     stat('Pending Stock',          s.pending, s.pending>0?'stock-warn':''),
     stat('In Progress',            s.active),
-    stat('Ready to Deliver',        `${s.storage} · ${s.storageQty.toLocaleString()}${s.milStorage ? `<div style="font-size:12px;font-weight:700;color:#7c3aed;margin-top:2px;white-space:nowrap;">MIL ${s.milStorage} · ${s.milStorageQty.toLocaleString()}</div>` : ''}`),
+    stat('Ready to Deliver',        `${s.storage} · ${s.storageQty.toLocaleString()}${s.milStorage ? `<div style="font-size:12px;font-weight:700;color:#7c3aed;margin-top:2px;white-space:nowrap;">MIL ${s.milStorage} · ${s.milStorageQty.toLocaleString()}</div>` : ''}<div><button type="button" class="pm-chk-toggle${filterPmChecked ? ' is-on' : ''}" onclick="togglePmCheckedFilter()" title="${filterPmChecked ? 'Showing only the jobs the PM checked - click to show all' : 'Jobs the PM checked (Ready / Partial Ready) - click to show only them'}">&#10003; Checked ${s.checked} · ${s.checkedQty.toLocaleString()}</button></div>`),
     stat('Daily Printed UC Qty',  cartonsCell),
   ].join('');
 }
@@ -10398,7 +10447,7 @@ function renderJobsCompact() {
   // number: searching E-667 drew the group tile under, say, E-640, so the
   // job asked for never appeared and read as missing. A search overrides
   // the collapsing and shows the matched jobs as themselves.
-  const searching = jobsSearchActive();
+  const searching = jobsSearchActive() || filterPmChecked;
   jobsListDraw(el, elsewhere, filtered, j => {
     if (j.stock_group_name) {
       if (seenGroupsC.has(j.stock_group_name)) return '';
@@ -10622,7 +10671,7 @@ function renderJobRowCompact(j, opts) {
         ? `<label class="job-select" title="Select this job to delete"><input type="checkbox" onclick="event.stopPropagation()" onchange="toggleFinalizedJobSelect(${j.id}, this.checked)" ${selectedFinalizedJobIds.has(j.id) ? 'checked' : ''}></label>`
         : '';
     return `
-    <div ${isGroupTile ? '' : `id="cv-tile-${j.id}" `}class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${isGroupTile ? '' : ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`}>
+    <div ${isGroupTile ? '' : `id="cv-tile-${j.id}" `}class="job-card ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${!isGroupTile && isPmChecked(j)?'pm-checked':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${isGroupTile ? '' : ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`}>
       ${tileDeliveryRecordsHtml(j)}
       <div class="job-top">
         <div class="job-meta">
@@ -10634,6 +10683,7 @@ function renderJobRowCompact(j, opts) {
             </span>
             ${overDeliveredMarkHtml(j)}
             ${badge}
+            ${isGroupTile ? '' : pmCheckBoxHtml(j)}
             ${linkedJobBadgeHtml(j, false)}
             ${paperWaivedBadgeHtml(j)}
             ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -10708,7 +10758,7 @@ function renderJobsCards() {
     return;
   }
   const seenGroups = new Set();
-  const searching = jobsSearchActive();   // see renderJobsCompact
+  const searching = jobsSearchActive() || filterPmChecked;   // see renderJobsCompact
   el.innerHTML = elsewhere + filtered.map(j => {
     if (j.stock_group_name) {
       if (seenGroups.has(j.stock_group_name)) return '';
@@ -11230,7 +11280,7 @@ function renderJobCard(j, opts) {
     ? ` onclick="onJobTileClick(event, ${j.id})" style="cursor:pointer;${_finalizedJobIds.has(j.id)?'background:rgba(124,58,237,0.07);border-color:#ddd6fe;':''}" title="Click to open Job Card"`
     : clientTintStyle;
   return `
-  <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${tileAttr}>
+  <div id="cv-tile-${j.id}" class="job-tile ${pc} ${pending?'is-pending':''} ${done?'is-done':''} ${!clientPreview && !isGroupTile && isPmChecked(j)?'pm-checked':''} ${blocked?'is-blocked':''} ${clientPreview?'is-client-preview':''} ${(selectedNewJobIds.has(j.id)||selectedFinalizedJobIds.has(j.id))?'is-selected':''}"${tileAttr}>
     ${sideStats}
     ${clientTopRow}
     ${clientPreview ? '' : tileDeliveryRecordsHtml(j)}
@@ -11243,6 +11293,7 @@ function renderJobCard(j, opts) {
              ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
            </span>${overDeliveredMarkHtml(j)}`}
       ${badge}
+      ${clientPreview || isGroupTile ? '' : pmCheckBoxHtml(j)}
       ${clientPreview ? '' : linkedJobBadgeHtml(j, false)}
       ${clientPreview ? '' : paperWaivedBadgeHtml(j)}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -44040,6 +44091,7 @@ const ACC_JOBS_TAB_ROWS = [
   { key: 'job_btn_over_issue_ignore', type: 'action' },
   { key: 'job_btn_paper_to_offcut', type: 'action' },
   { key: 'job_btn_record_delivery', type: 'action' },
+  { key: 'job_btn_pm_check', type: 'action' },
   { key: 'job_btn_delivery_details', type: 'button' },
   { key: 'job_btn_operator_entry',  type: 'action' },
   { key: 'job_btn_particulars',     type: 'edit-view' },

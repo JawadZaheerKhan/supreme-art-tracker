@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-17-old-shipments';   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-18-pm-check';   // + jobs.pm_check   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -499,7 +499,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check','job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -564,7 +564,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   job_btn_over_issue:      { label: 'Over-issued stock — Use in job / Add to Offcut / Send Back', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_over_issue_ignore: { label: 'Over-issued stock — Ignore (clears it, no stock moves)', levels: {} },
   job_btn_paper_to_offcut: { label: 'Old paper — Sent to offcut (job History / Dashboard)', levels: { admin: 'yes', production_manager: 'yes' } },
-  job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
+  job_btn_pm_check:        { label: 'PM Check — the red tick on Ready / Partial Ready jobs (checked by the PM)', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_record_delivery: { label:'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // Filling the Record Delivery form is separated from pressing the button, so
   // finance can enter the invoicing detail on a shipment the PM then records.
   // What is typed saves itself into the job's delivery_draft; only the button
@@ -1086,6 +1087,9 @@ async function initDb() {
     await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS remarks TEXT`;
     // More than one old shipment (owner, 2026-11-17): [{ qty }] in order; old_shipped stays their total.
     await sql`ALTER TABLE stock_groups ADD COLUMN IF NOT EXISTS old_shipments JSONB`;
+    // PM Check (owner, 2026-11-18): { at, by, via, n, del } - n / del = the job's delivery count and cartons
+    // when it was checked; a delivery after that (partial or full) clears it.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS pm_check JSONB`;
     await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
@@ -15031,6 +15035,16 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
        WHERE id = ${id}
        RETURNING *
     `;
+    // The Ready to Deliver station (production office) saving the Ready to Delivery Qty ticks PM Check.
+    if (!viaJobCard && isPmCheckStation(machine) && Object.prototype.hasOwnProperty.call(particularsPatch, 'delivered_cartons_qty')
+        && updated[0] && (updated[0].stage_index || 0) < STAGES.length - 1
+        && readyQtyFromParticularsRow((updated[0].particulars || {}).delivered_cartons_qty) > 0) {
+      try {
+        const pc = pmCheckValue(updated[0], person.name || operator.name, 'station');
+        const r2 = await sql`UPDATE jobs SET pm_check = ${JSON.stringify(pc)} WHERE id = ${id} RETURNING *`;
+        if (r2[0]) updated[0] = r2[0];
+      } catch (e) { console.error('pm check', e); }
+    }
     const skippedCount = Math.max(0, stage_index - dbStage - 1);
     await logAudit(sql, req, {
       action: 'job.station',
@@ -15141,6 +15155,35 @@ app.post('/api/jobs/:id/manager-stage', requireStationUser, requirePermission('s
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// PM Check (owner, 2026-11-18): the red tick on a Ready / Partial Ready job - the PM checked it. Ticked by hand
+// on the job, or by itself when the Ready to Deliver station (production office - its only stage is Ready to
+// Deliver; QC covers every stage and does not tick it) or the manager PIN saves the Ready to Delivery Qty.
+// n / del = the job's deliveries when it was checked; any delivery after that (partial or full) clears it.
+function pmCheckValue(job, by, via) {
+  const list = Array.isArray(job && job.deliveries) ? job.deliveries : [];
+  return { at: new Date().toISOString(), by: String(by || '').slice(0, 120), via, n: list.length, del: sumDeliveryCartons(list) };
+}
+function isPmCheckStation(machine) {
+  const r = Array.isArray(machine && machine.roles) ? machine.roles : [];
+  return r.length === 1 && r[0] === 'storage';
+}
+app.post('/api/jobs/:id/pm-check', requirePermission('job_btn_pm_check'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const job = rows[0];
+    const on = req.body && req.body.checked === true;
+    if (on && (job.stage_index || 0) >= STAGES.length - 1) return res.status(400).json({ error: 'This job is already delivered.' });
+    const val = on ? pmCheckValue(job, req.user.name || 'App user', 'job') : null;
+    const updated = await sql`UPDATE jobs SET pm_check = ${val ? JSON.stringify(val) : null} WHERE id = ${id} RETURNING *`;
+    await logAudit(sql, req, { action: 'job.pm_check', entityType: 'job', entityId: id, summary: `Job E-${id} ${on ? 'checked' : 'unchecked'} (PM Check)` });
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // Manager: save ONLY the Machine field and the Particulars table from the
 // full job-card modal — every other field on that modal is locked client-
 // side, and this endpoint only ever writes these two columns (plus a log
@@ -15170,8 +15213,13 @@ app.post('/api/jobs/:id/manager-update', requireStationUser, requirePermission('
         time: businessStamp(),
       });
     }
+    // The manager saving a Ready to Delivery Qty ticks PM Check (see pmCheckValue).
+    const readyBefore = JSON.stringify((job.particulars || {}).delivered_cartons_qty || null);
+    const readyAfter = JSON.stringify(particulars.delivered_cartons_qty || null);
+    const pmTick = readyAfter !== readyBefore && readyQtyFromParticularsRow(particulars.delivered_cartons_qty) > 0 && (job.stage_index || 0) < STAGES.length - 1;
+    const pmCheck = pmTick ? JSON.stringify(pmCheckValue(job, `${v.operator.name} (Manager)`, 'station')) : (job.pm_check ? JSON.stringify(job.pm_check) : null);
     const updated = await sql`
-      UPDATE jobs SET machine=${machine || null}, particulars=${JSON.stringify(particulars)}, log=${JSON.stringify(log)}
+      UPDATE jobs SET machine=${machine || null}, particulars=${JSON.stringify(particulars)}, log=${JSON.stringify(log)}, pm_check=${pmCheck}
       WHERE id=${id} RETURNING *
     `;
     await logAudit(sql, req, { action: 'job.manager_update', entityType: 'job', entityId: id, summary: `Job E-${id} machine/particulars edited by manager ${v.operator.name}` });
