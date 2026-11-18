@@ -6430,22 +6430,24 @@ function lowIssueChipHtml(j) {
 // Job warnings (owner, 2026-11-18): six checks, each its own small red sign; click = the reason + Ignore.
 // Jobs still running, and delivered ones for 30 days after delivery. Not shade cards or Finalized jobs.
 const JW_SVG = '<svg viewBox="0 0 24 22" width="17" height="15" aria-hidden="true"><path d="M12 1.6 L22.8 20.4 H1.2 Z" fill="#fff" stroke="#e10600" stroke-width="2.6" stroke-linejoin="round"/><rect x="10.8" y="7" width="2.4" height="7.6" rx="1.2" fill="#111"/><circle cx="12" cy="17.4" r="1.45" fill="#111"/></svg>';
+// Only jobs created from 19 Nov 2026 - not the old data (owner, 2026-11-18). Not shade cards or Finalized jobs.
+const JOB_WARN_SINCE = Date.parse('2026-11-19T00:00:00+05:00');
 function jobWarnInScope(j) {
   if (!j || j.deleted_at || j.is_shade_card || (typeof _finalizedJobIds !== 'undefined' && _finalizedJobIds.has(j.id))) return false;
-  if ((j.stage_index || 0) >= STAGES.length - 1) {
-    const at = Date.parse((j.stages && j.stages[STAGES.length - 1] && j.stages[STAGES.length - 1].at) || '');
-    return isFinite(at) && Date.now() - at < 30 * 864e5;
-  }
-  return true;
+  const c = Date.parse(j.created_at || '');
+  return isFinite(c) && c >= JOB_WARN_SINCE;
 }
-function jobWarnings(j, withIgnored) {
+// The warnings the job's figures show right now.
+function jobWarnDetect(j) {
   if (!jobWarnInScope(j)) return [];
   const num = v => parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')) || 0;
+  const rowSum = r => !r ? 0 : (Array.isArray(r.entries) && r.entries.length ? r.entries.reduce((x, e) => x + num(e && e.qty), 0) : String(r.quantity || '').split('|').reduce((x, v) => x + num(v), 0));
   const f = n => (+(+n).toFixed(2)).toLocaleString();
   const si = j.stage_index || 0;
   const po = num(j.qty), uc = num(j.cartonqty), sheets = num(j.sheets);
   const ready = readyCartonsTotal(j) || 0;
   const mil = !!(j.stock_group_name || j.group_job_id);
+  const isLabel = (typeof saleReportTabFor === 'function' ? saleReportTabFor(j) : '') === 'labels';
   const out = [];
   // 1 - Printed UC below the PO qty (not MIL sub jobs - their PO is the group's)
   if (!mil && po > 0 && uc > 0 && uc < po) out.push({ key: 'uc_po', tag: 'UC<PO', title: 'Printed UC less than PO',
@@ -6454,26 +6456,67 @@ function jobWarnings(j, withIgnored) {
   let w = null; try { w = jobShipmentFigures(j).jobWastageAll; } catch (e) { w = null; }
   if (w !== null && isFinite(w) && w < 0) out.push({ key: 'neg_waste', tag: 'WASTE', title: 'Wastage in minus',
     text: `Wastage is ${f(w)} (in minus). Ready or delivered is more than printed.`, sig: String(Math.round(w)) });
-  // 3 - printing entry below the job's sheets
-  const printed = stageDoneQty(j, 1);
-  if (si > 1 && printed > 0 && sheets > 0 && printed < sheets) out.push({ key: 'print_sheets', tag: 'SHEETS', title: 'Printed sheets less than job sheets',
-    text: `Printing entered ${f(printed)} sheets. The job has ${f(sheets)} sheets.`, sig: printed + '|' + sheets });
+  // 3 - printed sheets + printed waste below the job's sheets
+  const printed = stageDoneQty(j, 1), pWaste = rowSum((j.particulars || {}).printed_waste_sheets);
+  if (si > 1 && printed > 0 && sheets > 0 && printed + pWaste < sheets) out.push({ key: 'print_sheets', tag: 'SHEETS', title: 'Printed sheets less than job sheets',
+    text: `Printing entered ${f(printed)} sheets + ${f(pWaste)} waste = ${f(printed + pWaste)}. The job has ${f(sheets)} sheets.`, sig: printed + '|' + pWaste + '|' + sheets });
   // 4 - Ready to Delivery Qty empty once the job is at Ready
   if (si >= 6 && !(ready > 0)) out.push({ key: 'ready_empty', tag: 'READY', title: 'Ready qty empty',
     text: 'Ready to Delivery Qty is empty on the job card.', sig: '0' });
   // 5 - Ready more than printed UC
   if (ready > 0 && uc > 0 && ready > uc) out.push({ key: 'ready_uc', tag: 'R>UC', title: 'Ready more than printed UC',
     text: `Ready qty is ${f(ready)}, more than printed UC ${f(uc)}.`, sig: ready + '|' + uc });
-  // 6 - a stage the job went past with no operator entry (a stage skipped on purpose doesn't count)
-  const missing = [1, 2, 3, 4, 5].filter(st => si > st
-    && !(st === 2 && !(Array.isArray(j.coatings) && j.coatings.length))   // no coating on the job - nothing to enter
-    && !/^skipped/i.test(String((j.stages && j.stages[st] && j.stages[st].notes) || ''))
-    && !(stageDoneQty(j, st) > 0)).map(st => STAGES[st]);
+  // 6 - a stage the job went past with no operator entry. Labels: printed / coated, then straight to Ready - no
+  // Die Cutting, Sorting or Pasting. Coatings: one entry for each coating on the job (none planned = nothing to enter).
+  // A stage skipped on purpose doesn't count.
+  const missing = [];
+  for (const st of [1, 2, 3, 4, 5]) {
+    if (!(si > st)) continue;
+    if (isLabel && st >= 3) continue;
+    if (/^skipped/i.test(String((j.stages && j.stages[st] && j.stages[st].notes) || ''))) continue;
+    if (st === 2) {
+      const planned = Array.isArray(j.coatings) ? j.coatings.filter(Boolean) : [];
+      if (!planned.length) continue;
+      let pend = planned;
+      try { pend = jobCoatingsState(j).pending; } catch (e) { pend = planned; }
+      if (pend.length) missing.push(pend.length === planned.length && planned.length === 1 ? STAGES[2] + ' (' + planned[0] + ')' : STAGES[2] + ' (' + pend.join(', ') + ')');
+      continue;
+    }
+    if (!(stageDoneQty(j, st) > 0)) missing.push(STAGES[st]);
+  }
   if (missing.length) out.push({ key: 'no_entry', tag: 'ENTRY', title: 'Operator entry missing',
     text: `No operator entry for ${missing.join(', ')}.`, sig: missing.join(',') });
-  if (withIgnored) return out;
+  return out;
+}
+// What the tile shows: today's warnings, plus any found before that nobody ignored yet - a sign stays until it is
+// ignored, even once the figures are put right (owner, 2026-11-18). Ignored = hidden for the figures it had.
+function jobWarnings(j) {
+  if (!jobWarnInScope(j)) return [];
   const ign = (j.warn_ignored && typeof j.warn_ignored === 'object') ? j.warn_ignored : {};
-  return out.filter(x => !(ign[x.key] && String(ign[x.key].sig) === String(x.sig)));
+  const raised = (j.warn_raised && typeof j.warn_raised === 'object') ? j.warn_raised : {};
+  const isIgn = (k, sig) => ign[k] && String(ign[k].sig) === String(sig);
+  const now = jobWarnDetect(j).filter(x => !isIgn(x.key, x.sig));
+  jobWarnSave(j, now, raised);
+  const out = now.map(x => ({ ...x, at: raised[x.key] && String(raised[x.key].sig) === String(x.sig) ? raised[x.key].at : null }));
+  for (const [k, r] of Object.entries(raised)) {
+    if (!r || out.some(x => x.key === k) || isIgn(k, r.sig)) continue;
+    out.push({ key: k, tag: r.tag || '!', title: r.title || 'Warning', text: r.text || '', sig: r.sig, at: r.at, fixed: true });
+  }
+  return out;
+}
+// Saves each new warning on the job once (it stays until ignored).
+const _jobWarnSent = new Set();
+function jobWarnSave(j, now, raised) {
+  const fresh = now.filter(x => !(raised[x.key] && String(raised[x.key].sig) === String(x.sig)) && !_jobWarnSent.has(j.id + ':' + x.key + ':' + x.sig));
+  if (!fresh.length) return;
+  fresh.forEach(x => _jobWarnSent.add(j.id + ':' + x.key + ':' + x.sig));
+  setTimeout(async () => {
+    try {
+      const r = await api('POST', `/api/jobs/${j.id}/warning-raise`, { warnings: fresh.map(x => ({ rule: x.key, sig: x.sig, tag: x.tag, title: x.title, text: x.text })) });
+      const i = (jobs || []).findIndex(y => y && y.id === j.id);
+      if (i >= 0 && r && r.warn_raised) jobs[i] = { ...jobs[i], warn_raised: r.warn_raised };   // no redraw - what shows is the same
+    } catch (e) { fresh.forEach(x => _jobWarnSent.delete(j.id + ':' + x.key + ':' + x.sig)); }
+  }, 0);
 }
 function jobChipsHtml(j) {
   const warns = jobWarnings(j);
@@ -6488,6 +6531,8 @@ function openJobWarning(id, key) {
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">${JW_SVG.replace('width="17" height="15"', 'width="34" height="30"')}<div><div style="font-weight:800;color:#e10600;font-size:15px;">${esc(x.title)}</div><div style="font-size:12px;color:var(--text2);">E-${j.id} &middot; ${esc(j.name || '')}</div></div></div>
     <div style="font-size:14px;line-height:1.45;padding:8px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;">${esc(x.text)}</div>
+    ${x.fixed ? '<div style="font-size:12.5px;color:#166534;font-weight:700;margin-top:6px;">&#10003; Looks fixed now - press Ignore to clear it.</div>' : ''}
+    ${x.at ? `<div style="font-size:11.5px;color:var(--text2);margin-top:4px;">Found on ${esc(fmtDMYT12(x.at))}</div>` : ''}
     <div class="modal-actions">
       ${seeBtn('job_btn_warning_ignore') ? `<button class="btn" data-acc="job_btn_warning_ignore" ${canIgnore ? '' : 'disabled'} onclick="ignoreJobWarning(${j.id}, '${x.key}')" title="Hide this warning on this job - it comes back if the figures change">Ignore</button>` : ''}
       <button class="btn" onclick="closeModal(); openEdit(${j.id})">Open job card</button>

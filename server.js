@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-18-job-warnings';   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-18-job-warnings-2';   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1095,6 +1095,9 @@ async function initDb() {
     // Job warnings (owner, 2026-11-18): { rule: { sig, at, by } } - a warning ignored for the figures it had (sig);
     // it comes back if those figures change.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS warn_ignored JSONB`;
+    // ...and the warnings found on a job ({ rule: { sig, tag, title, text, at } }) - a sign stays until it is ignored,
+    // even once the figures are put right (owner, 2026-11-18).
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS warn_raised JSONB`;
     await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
@@ -15225,6 +15228,33 @@ app.post('/api/jobs/:id/pm-check', requirePermission('job_btn_pm_check'), async 
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Job warnings - a sign found on a job is saved so it stays until ignored (owner, 2026-11-18). The page finds the
+// warnings (its rules) and sends each new one once.
+app.post('/api/jobs/:id/warning-raise', requirePermission('job_tab_access', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const list = (Array.isArray(req.body && req.body.warnings) ? req.body.warnings : []).slice(0, 10);
+    const rows = await sql`SELECT id, warn_raised, warn_ignored FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!rows.length) return res.status(404).json({ error: 'Job not found' });
+    const raised = (rows[0].warn_raised && typeof rows[0].warn_raised === 'object') ? { ...rows[0].warn_raised } : {};
+    const ign = (rows[0].warn_ignored && typeof rows[0].warn_ignored === 'object') ? rows[0].warn_ignored : {};
+    let changed = false;
+    for (const w of list) {
+      const rule = String((w && w.rule) || '');
+      if (!/^[a-z_]{2,24}$/.test(rule)) continue;
+      const sig = String((w && w.sig) ?? '').slice(0, 200);
+      if (ign[rule] && String(ign[rule].sig) === sig) continue;            // already ignored for these figures
+      if (raised[rule] && String(raised[rule].sig) === sig) continue;      // already saved
+      raised[rule] = { sig, tag: String(w.tag || '').slice(0, 12), title: String(w.title || '').slice(0, 80), text: String(w.text || '').slice(0, 300), at: new Date().toISOString() };
+      changed = true;
+    }
+    if (!changed) return res.json({ id, warn_raised: raised });
+    const updated = await sql`UPDATE jobs SET warn_raised = ${JSON.stringify(raised)} WHERE id = ${id} RETURNING id, warn_raised`;
+    res.json(updated[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 // Job warnings - Ignore (owner, 2026-11-18): hides one warning on a job for the figures it had then.
 app.post('/api/jobs/:id/warning-ignore', requirePermission('job_btn_warning_ignore'), async (req, res) => {
   try {
@@ -15239,7 +15269,9 @@ app.post('/api/jobs/:id/warning-ignore', requirePermission('job_btn_warning_igno
     if (!rows.length) return res.status(404).json({ error: 'Job not found' });
     const ign = (rows[0].warn_ignored && typeof rows[0].warn_ignored === 'object') ? { ...rows[0].warn_ignored } : {};
     ign[rule] = { sig, at: new Date().toISOString(), by: req.user.name || 'App user' };
-    const updated = await sql`UPDATE jobs SET warn_ignored = ${JSON.stringify(ign)} WHERE id = ${id} RETURNING *`;
+    const raised = (rows[0].warn_raised && typeof rows[0].warn_raised === 'object') ? { ...rows[0].warn_raised } : {};
+    delete raised[rule];
+    const updated = await sql`UPDATE jobs SET warn_ignored = ${JSON.stringify(ign)}, warn_raised = ${JSON.stringify(raised)} WHERE id = ${id} RETURNING *`;
     await logAudit(sql, req, { action: 'job.warning_ignored', entityType: 'job', entityId: id, summary: `Job E-${id}: warning ignored - ${label}` });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
