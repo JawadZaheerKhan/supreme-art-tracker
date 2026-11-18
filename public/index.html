@@ -2425,6 +2425,9 @@
   .lc-secpick-btn.is-on { border-color: #A32D2D; background: #A32D2D; color: #fff; }
   .lc-secpick-note { font-size: 12px; color: var(--text2); }
   .lc-cell-in { width: 7.5ch; padding: 1px 2px; border: 0; border-bottom: 1px dashed transparent; background: transparent; font: inherit; font-weight: 700; color: inherit; border-radius: 0; }
+  .lc-tap { cursor: pointer; }
+  .lc-tap:hover { outline: 2px solid #A32D2D; outline-offset: -2px; }
+  .lc-cell-in.lc-cell-rem { width: 100%; min-width: 14ch; font-weight: 500; }
   .lc-cell-in:hover { border-bottom-color: var(--border2); }
   .lc-cell-in:focus { outline: none; border-bottom: 2px solid #A32D2D; background: #fff7ed; }
   .lc-cell-in::placeholder { color: var(--text2); font-weight: 500; font-style: italic; }
@@ -27654,8 +27657,8 @@ function lcTableHtml(g, withLegend) {
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
   const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td style="white-space:nowrap;">${esc(hm12(e.entry_time))}</td><td style="white-space:nowrap;">${lcEntryTimeHtml(e)}</td>
     <td>${lcSecTagHtml(e, mixed)}${canEdit ? lcJobCellIn(e, 'prev') : lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${canEdit ? lcWasteIn(e) : lcWasteHtml(e)}</td><td>${canEdit ? lcJobCellIn(e, 'new') : lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
-    ${cols.map(col => { const [c, m] = lcColMark(e, col); return `<td class="${c}">${m}</td>`; }).join('')}
-    <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
+    ${cols.map(col => { const [c, m] = lcColMark(e, col); return canEdit && c !== 'lc-na' ? `<td class="${c} lc-tap" data-acc="rpt_line_clearance_edit" onclick="lcTogglePoint(${e.id}, ${col.n})" title="Click to ${c === 'lc-ok' ? 'untick' : 'tick'}">${m}</td>` : `<td class="${c}">${m}</td>`; }).join('')}
+    <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}${canEdit ? ' lc-tap' : ''}"${canEdit ? ` data-acc="rpt_line_clearance_edit" onclick="lcToggleQc(${e.id})" title="Click to mark ${e.qc_cleared ? 'not cleared' : 'cleared'} by QC"` : ''}>${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${canEdit ? lcRemarksIn(e) : esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
   return `<div class="lc-log">
     ${lcState.machine ? '' : `<div class="lc-machine">${esc(g.machine)}${(g.list.find(e => e.machine_code) || {}).machine_code ? ` <b style="font-size:12px;color:var(--text2);">${esc(g.list.find(e => e.machine_code).machine_code)}</b>` : ''} <span>${esc(secs.map(x => x.name).join(' · '))} &middot; ${g.list.length} entr${g.list.length === 1 ? 'y' : 'ies'}</span></div>`}
     ${withLegend ? lcLegendHtml(secs) : ''}
@@ -27748,6 +27751,25 @@ function lcWasteIn(e) {
   const v = e.waste == null || e.waste === '' ? '' : String(+(+e.waste).toFixed(2));
   return `<span style="white-space:nowrap;">${jc}<input class="lc-cell-in lc-cell-waste" inputmode="decimal" enterkeyhint="done" autocomplete="off" value="${esc(v)}" data-was="${esc(v)}" placeholder="waste"
       title="Waste QA counted - Enter or tap away saves" onkeydown="if (event.key === 'Enter') { event.preventDefault(); this.blur(); }" onchange="lcCellSave(${e.id}, 'waste', this)"></span>`;
+}
+// A tick / cross, and QC, change with one click; Remarks typed in place (owner, 2026-11-18).
+let lcTapBusy = false;
+async function lcTogglePoint(id, n) {
+  const e = (lcState.rows || []).find(r => r.id === id);
+  if (!e || lcTapBusy) return;
+  lcTapBusy = true;
+  try { await lcSaveRow(e, { points: { ...(e.points || {}), [n]: !(e.points || {})[n] } }); } finally { lcTapBusy = false; }
+}
+async function lcToggleQc(id) {
+  const e = (lcState.rows || []).find(r => r.id === id);
+  if (!e || lcTapBusy) return;
+  lcTapBusy = true;
+  try { await lcSaveRow(e, { qc_cleared: !e.qc_cleared }); } finally { lcTapBusy = false; }
+}
+function lcRemarksIn(e) {
+  const v = String(e.remarks || '');
+  return `<input class="lc-cell-in lc-cell-rem" enterkeyhint="done" autocomplete="off" maxlength="500" value="${esc(v)}" data-was="${esc(v)}" placeholder="+ remarks"
+      title="Type the remarks - Enter or tap away saves" onkeydown="if (event.key === 'Enter') { event.preventDefault(); this.blur(); }" onchange="lcCellSave(${e.id}, 'remarks', this)">`;
 }
 async function lcCellSave(id, key, el) {
   const e = (lcState.rows || []).find(r => r.id === id);
