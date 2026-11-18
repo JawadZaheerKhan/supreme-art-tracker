@@ -10232,11 +10232,9 @@ function renderReadyNoti() {
   if (!el) return;
   const list = seeBtn('job_btn_pm_check') ? readyNotiJobs() : [];
   if (!list.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
-  const MAX = 4;
   el.style.display = '';
   el.innerHTML = `<div class="rn-head">&#10004; Ready &middot; PM to check (${list.length})</div>`
-    + list.slice(0, MAX).map(j => `<button type="button" class="rn-item" onclick="openEdit(${j.id})" title="Reached Ready to Deliver ${esc(fmtDMYT12(new Date(readyNotiAt(j))))} - open the job card"><b>E-${j.id}</b> ${esc(j.name || '')}<small>${esc(j.client || '')}</small></button>`).join('')
-    + (list.length > MAX ? `<button type="button" class="rn-more" onclick="setMode('jobs'); setView('storage');">+${list.length - MAX} more &rsaquo;</button>` : '');
+    + list.map(j => `<button type="button" class="rn-item" onclick="openEdit(${j.id})" title="Reached Ready to Deliver ${esc(fmtDMYT12(new Date(readyNotiAt(j))))} - open the job card"><b>E-${j.id}</b> ${esc(j.name || '')}<small>${esc(j.client || '')}</small></button>`).join('');
 }
 function renderStats() {
   try { updateOffcutIssueBtn(); } catch (e) { /* the button is a shortcut - never break the figures */ }
@@ -17433,12 +17431,32 @@ function irBatchFilterApply() {
   closeModal();
   renderInventoryReport();
 }
+// The row's items (one per brand / supplier) in brand order: [{ id, brand, batches: [with stock] }].
+function irRowItems(r) {
+  const all = invReportState.batches || {};
+  return (r && Array.isArray(r.itemIds) ? r.itemIds : []).map(id => {
+    const it = (inventory || []).find(x => x.id === id) || (inventoryAll || []).find(x => x.id === id) || {};
+    return { id, brand: it.brand || '', batches: (all[id] || []).filter(b => b.left > 0).sort((a, b) => a.n - b.n) };
+  }).sort((a, b) => a.brand.localeCompare(b.brand));
+}
+// Brand column (owner, 2026-11-18): every brand in the row, one a line.
+function irBrandCellHtml(r) {
+  const brands = [...new Set(irRowItems(r).map(x => x.brand || '—'))];
+  return brands.length ? brands.map(b => `<div style="white-space:nowrap;line-height:1.35;">${esc(b)}</div>`).join('') : '&mdash;';
+}
+// Each brand has its own batches: one line a brand (named when the row has more than one).
 function irBatchCellHtml(r) {
-  const list = irRowBatches(r);
-  if (!list.length) return '<span style="color:var(--text3);">&mdash;</span>';
+  const items = irRowItems(r).filter(x => x.batches.length);
+  if (!items.length) return '<span style="color:var(--text3);">&mdash;</span>';
   const ps = packetSize(r.paperType) || 1;
   const pick = (invReportState.batchPick || []).map(Number);
-  return list.map(b => `<div style="white-space:nowrap;line-height:1.35;${pick.includes(b.n) ? 'background:#dcfce7;border-radius:4px;padding:0 3px;' : ''}" title="${esc(b.labels.join(', '))}"><b style="color:${b.n > 1 ? '#166534' : 'var(--text)'};">${ordinalN(b.n)}</b> ${fmtPkts(b.left / ps, { keepZero: true })}</div>`).join('');
+  const named = irRowItems(r).length > 1;
+  return items.map(x => `<div style="white-space:nowrap;line-height:1.35;">${named ? `<span style="color:var(--text2);font-size:11px;">${esc(x.brand || '—')}:</span> ` : ''}${x.batches.map(b => `<span style="${pick.includes(b.n) ? 'background:#dcfce7;border-radius:4px;padding:0 3px;' : ''}" title="${esc(b.label || '')}"><b style="color:${b.n > 1 ? '#166534' : 'var(--text)'};">${ordinalN(b.n)}</b> ${fmtPkts(b.left / ps, { keepZero: true })}</span>`).join(' &middot; ')}</div>`).join('');
+}
+function irBatchText(r) {
+  const ps = packetSize(r.paperType) || 1;
+  const items = irRowItems(r).filter(x => x.batches.length), named = irRowItems(r).length > 1;
+  return items.map(x => (named ? (x.brand || '—') + ': ' : '') + x.batches.map(b => ordinalN(b.n) + ' ' + (+(b.left / ps).toFixed(2))).join(', ')).join(' | ');
 }
 // Pending imports so the report can flag "this item has stock on the way"
 // in its own Import column. Fetched once per report open, independent of
@@ -17766,7 +17784,7 @@ function renderInventoryReport() {
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">GSM</th>
           ${offcutOnly ? '' : '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Fresh / Offcut</th>'}
           ${brandHead}${supplierHead}
-          ${noIW ? '' : '<th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Items</th>'}
+          ${noIW || showBrand ? '' : '<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;">Brand</th>'}
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Packets / Reams</th>
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Sheets</th>
           ${showBatches ? `<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;white-space:nowrap;">Batches <button type="button" onclick="event.stopPropagation(); irBatchFilterModal()" title="Filter by batch - e.g. papers with a 2nd or 3rd batch" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${batchOn ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${batchOn ? '#166534' : '#22c55e'};font-weight:${batchOn ? '900' : '700'};">&#9660;</button></th>` : ''}
@@ -17793,7 +17811,7 @@ function renderInventoryReport() {
             <td style="padding:6px 8px;text-align:right;">${esc(r.gsm) || '—'}</td>
             ${offcutOnly ? '' : `<td style="padding:6px 8px;">${r.isOffcut ? '<span style="color:#155e75;font-weight:600;">Offcut</span>' : 'Fresh'}</td>`}
             ${brandCell(r)}${supplierCell(r)}
-            ${noIW ? '' : `<td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.itemCount}</td>`}
+            ${noIW || showBrand ? '' : `<td style="padding:6px 8px;">${irBrandCellHtml(r)}</td>`}
             <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtPkts(r.packets, {keepZero:true})}</td>
             <td style="padding:6px 8px;text-align:right;">${r.sheets.toLocaleString()}</td>
             ${showBatches ? `<td style="padding:4px 8px;font-size:12px;">${irBatchCellHtml(r)}</td>` : ''}
@@ -17807,7 +17825,7 @@ function renderInventoryReport() {
       <tfoot>
         <tr style="background:var(--bg2);font-weight:600;">
           <td colspan="${totalSpan}" style="padding:8px;">Total</td>
-          ${noIW ? '' : `<td style="padding:8px;text-align:right;">${total.items}</td>`}
+          ${noIW || showBrand ? '' : '<td></td>'}
           <td style="padding:8px;text-align:right;">${fmtPkts(total.packets, {keepZero:true})}</td>
           <td style="padding:8px;text-align:right;">${total.sheets.toLocaleString()}</td>
           ${showBatches ? '<td></td>' : ''}
@@ -17838,7 +17856,7 @@ async function exportInventoryReport() {
   // Offcut button on: no Items / Weight (owner, 2026-10-21).
   const noIW = !!invReportState.offcutInStock;
   if (noIW) header.push('Packets / Reams', 'Sheets');
-  else header.push('Items', 'Packets / Reams', 'Sheets', 'Weight (kg)');
+  else { if (!showBrand) header.push('Brand'); header.push('Packets / Reams', 'Sheets', 'Weight (kg)'); }
   if (showConsumed) header.push('Consumed');
   const showImportX = invReportState.offcutMode !== 'offcut';
   if (showImportX) header.push('Import (pending)');
@@ -17849,11 +17867,11 @@ async function exportInventoryReport() {
     if (showBrand)    row.push(r.brand    || '');
     if (showSupplier) row.push(r.supplier || '');
     if (noIW) row.push(+(r.packets.toFixed(2)), r.sheets);
-    else row.push(r.itemCount, +(r.packets.toFixed(2)), r.sheets,
-             r.weightKg === null ? '' : +r.weightKg.toFixed(2));
+    else { if (!showBrand) row.push([...new Set(irRowItems(r).map(x => x.brand || '—'))].join(', ')); row.push(+(r.packets.toFixed(2)), r.sheets,
+             r.weightKg === null ? '' : +r.weightKg.toFixed(2)); }
     if (showConsumed) row.push(+(r.consumedPkts.toFixed(2)));
     if (showImportX) row.push(+(r.importPkts.toFixed(2)));
-    if (showBatchesX) { const ps = packetSize(r.paperType) || 1; row.push(irRowBatches(r).map(b => ordinalN(b.n) + ': ' + (+(b.left / ps).toFixed(2))).join(' | ')); }
+    if (showBatchesX) row.push(irBatchText(r));
     aoa.push(row);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
