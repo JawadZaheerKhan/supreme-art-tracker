@@ -17272,7 +17272,7 @@ function buildSummaryBuckets(from, to, granularity) {
 // (Legacy value 'consolidated' auto-migrates to 'ignore' at read time.)
 // offcutMode: '' = fresh + offcut, 'fresh' = fresh only, 'offcut' = offcut only (owner, 2026-10-13).
 // offcutInStock: the Offcut button - offcut items with stock only (owner, 2026-10-21).
-let invReportState = { period: 'all', groupBy: 'ignore', paperType: '', search: '', offcutMode: '', offcutInStock: false, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
+let invReportState = { batches: null, batchPick: [], period: 'all', groupBy: 'ignore', paperType: '', search: '', offcutMode: '', offcutInStock: false, from: '', to: '', stockLevel: '', lowPeriod: 30, consumption: {}, pendingImports: [] };
 // This report gets its own period picker instead of the shared
 // reportPeriodOptions list. A stock position is only ever "now" or "as at a
 // past date": Today / This Week / This Month described a movement window,
@@ -17374,6 +17374,71 @@ function openInventoryReport() {
   renderInventoryReport();
   refreshIRAsOfBalances().then(renderInventoryReport);    // rewind balances when a past range is selected
   loadIRPendingImports();
+  irLoadBatches();
+}
+// Batches (owner, 2026-11-18): every paper item's batches and what is left in each, for the Batches column.
+async function irLoadBatches() {
+  try { invReportState.batches = await api('GET', '/api/reports/item-batches'); }
+  catch (e) { invReportState.batches = null; return; }
+  renderInventoryReport();
+}
+// A row's batches with stock: [{ n, left (sheets), labels }] - its items' batches added up by number.
+function irRowBatches(r) {
+  const all = invReportState.batches;
+  if (!all || !r || !Array.isArray(r.itemIds)) return [];
+  const byN = new Map();
+  for (const id of r.itemIds) for (const b of (all[id] || [])) {
+    if (!(b.left > 0)) continue;
+    const e = byN.get(b.n) || { n: b.n, left: 0, labels: [] };
+    e.left += b.left; if (b.label && !e.labels.includes(b.label)) e.labels.push(b.label);
+    byN.set(b.n, e);
+  }
+  return [...byN.values()].sort((a, b) => a.n - b.n);
+}
+// Shown only with the live balance (All Time) - batches are today's stock.
+function irShowBatches() { return !!invReportState.batches && invReportState.period !== 'custom' && invReportState.offcutMode !== 'offcut' && !invReportState.offcutInStock; }
+function irBatchFilter(rows) {
+  const pick = (invReportState.batchPick || []).map(Number);
+  if (!pick.length || !irShowBatches()) return rows;
+  return rows.filter(r => irRowBatches(r).some(b => pick.includes(b.n)));
+}
+function irBatchFilterModal() {
+  const ns = new Set();
+  for (const r of buildInventoryReportRows()) for (const b of irRowBatches(r)) ns.add(b.n);
+  const options = [...ns].sort((a, b) => a - b).map(n => ordinalN(n) + ' batch');
+  const selected = (invReportState.batchPick || []).map(n => ordinalN(+n) + ' batch');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
+    <h2 style="margin:0 0 10px;font-size:16px;">Filter: Batches</h2>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Papers that still have stock in the batches you tick.</div>
+    ${options.length ? `
+      <input type="text" id="srcf-search" placeholder="Search batch..." oninput="srColFilterSearch(this.value)" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;margin-bottom:8px;font-size:13px;">
+      <div style="max-height:50vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;">
+        <label style="display:flex;align-items:center;gap:8px;padding:4px 0 6px;font-weight:700;border-bottom:1px solid var(--border);margin-bottom:4px;">
+          <input type="checkbox" id="srcf-all" ${selected.length === options.length ? 'checked' : ''} onchange="srColFilterToggleAll(this.checked)"> (Select All)
+        </label>
+        <div id="srcf-list">${options.map(o => _srcfRowHtml(o, selected.includes(o))).join('')}</div>
+        <div id="srcf-noresults" style="display:none;color:var(--text3);font-style:italic;padding:8px 0;">No matches.</div>
+      </div>` : `<div style="color:var(--text3);font-style:italic;padding:12px 0;">No batches with stock.</div>`}
+    <div class="modal-actions">
+      <button class="btn" onclick="invReportState.batchPick = []; closeModal(); renderInventoryReport();">Clear</button>
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="irBatchFilterApply()">Apply</button>
+    </div>
+  </div>`);
+}
+function irBatchFilterApply() {
+  const all = [...document.querySelectorAll('.srcf-opt')];
+  const checked = all.filter(el => el.checked).map(el => parseInt(el.value, 10)).filter(n => n > 0);
+  invReportState.batchPick = checked.length === all.length ? [] : checked;
+  closeModal();
+  renderInventoryReport();
+}
+function irBatchCellHtml(r) {
+  const list = irRowBatches(r);
+  if (!list.length) return '<span style="color:var(--text3);">&mdash;</span>';
+  const ps = packetSize(r.paperType) || 1;
+  const pick = (invReportState.batchPick || []).map(Number);
+  return list.map(b => `<div style="white-space:nowrap;line-height:1.35;${pick.includes(b.n) ? 'background:#dcfce7;border-radius:4px;padding:0 3px;' : ''}" title="${esc(b.labels.join(', '))}"><b style="color:${b.n > 1 ? '#166534' : 'var(--text)'};">${ordinalN(b.n)}</b> ${fmtPkts(b.left / ps, { keepZero: true })}</div>`).join('');
 }
 // Pending imports so the report can flag "this item has stock on the way"
 // in its own Import column. Fetched once per report open, independent of
@@ -17586,6 +17651,7 @@ function buildInventoryReportRows() {
       supplierCount: g.suppliers.size,
       itemCount:  1,                  // always 1 — see comment above
       rawRowCount: g.itemCount,        // kept for export/audit reference
+      itemIds:    g.itemIds,            // the Batches column (owner, 2026-11-18)
       packets:    g.totalSheets / ps,
       sheets:     g.totalSheets,
       weightKg:   wPerPack === null ? null : (g.totalSheets / ps) * wPerPack,
@@ -17631,15 +17697,17 @@ function irGsmColors(rows) {
   return gsmColor;
 }
 function renderInventoryReport() {
-  const rows = buildInventoryReportRows();
+  const rows = irBatchFilter(buildInventoryReportRows());
   invReportState._rows = rows;   // what a row click resolves against (see irOpenItem)
   const { groupBy } = invReportState;
   const el = document.getElementById('ir-content');
   if (!el) return;
   if (!rows.length) {
-    el.innerHTML = `<div class="empty" style="padding:40px;text-align:center;color:var(--text2);">No inventory items match this filter.</div>`;
+    el.innerHTML = `<div class="empty" style="padding:40px;text-align:center;color:var(--text2);">No inventory items match this filter.${(invReportState.batchPick || []).length ? ' <button class="btn btn-sm" onclick="invReportState.batchPick = []; renderInventoryReport();">Clear the batch filter</button>' : ''}</div>`;
     return;
   }
+  const showBatches = irShowBatches();
+  const batchOn = (invReportState.batchPick || []).length > 0;
   // Totals across all rows for the footer. Note: packets sums across paper
   // types — cards (100/pkt) and reams (500/ream) get added together, so the
   // figure is "total packing units" rather than a single physical unit. Fine
@@ -17701,6 +17769,7 @@ function renderInventoryReport() {
           ${noIW ? '' : '<th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Items</th>'}
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Packets / Reams</th>
           <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Sheets</th>
+          ${showBatches ? `<th style="text-align:left;padding:8px;color:var(--text);font-weight:700;white-space:nowrap;">Batches <button type="button" onclick="event.stopPropagation(); irBatchFilterModal()" title="Filter by batch - e.g. papers with a 2nd or 3rd batch" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${batchOn ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${batchOn ? '#166534' : '#22c55e'};font-weight:${batchOn ? '900' : '700'};">&#9660;</button></th>` : ''}
           ${noIW ? '' : '<th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Weight (kg)</th>'}
           ${consumedHead}
           ${importHead}
@@ -17727,6 +17796,7 @@ function renderInventoryReport() {
             ${noIW ? '' : `<td style="padding:6px 8px;text-align:right;color:var(--text2);">${r.itemCount}</td>`}
             <td style="padding:6px 8px;text-align:right;font-weight:600;">${fmtPkts(r.packets, {keepZero:true})}</td>
             <td style="padding:6px 8px;text-align:right;">${r.sheets.toLocaleString()}</td>
+            ${showBatches ? `<td style="padding:4px 8px;font-size:12px;">${irBatchCellHtml(r)}</td>` : ''}
             ${noIW ? '' : `<td style="padding:6px 8px;text-align:right;">${fmtKg(r.weightKg)}</td>`}
             ${consumedCell(r)}
             ${importCell(r, i)}
@@ -17740,6 +17810,7 @@ function renderInventoryReport() {
           ${noIW ? '' : `<td style="padding:8px;text-align:right;">${total.items}</td>`}
           <td style="padding:8px;text-align:right;">${fmtPkts(total.packets, {keepZero:true})}</td>
           <td style="padding:8px;text-align:right;">${total.sheets.toLocaleString()}</td>
+          ${showBatches ? '<td></td>' : ''}
           ${noIW ? '' : `<td style="padding:8px;text-align:right;">${fmtKg(total.weight)}</td>`}
           ${showConsumed ? `<td style="padding:8px;text-align:right;color:#A32D2D;">${fmtPkts(rows.reduce((a,r) => a + r.consumedPkts, 0))}</td>` : ''}
           ${showImport ? `<td style="padding:8px;text-align:right;">${importPill(rows.reduce((a,r) => a + r.importPkts, 0))}</td>` : ''}
@@ -17752,9 +17823,10 @@ function renderInventoryReport() {
 
 async function exportInventoryReport() {
   try { await ensureXlsx(); } catch (e) { notify(e.message); return; }
-  const rows = buildInventoryReportRows();
+  const rows = irBatchFilter(buildInventoryReportRows());
   if (!rows.length) { notify('Nothing to export — empty filter result.'); return; }
   const { groupBy } = invReportState;
+  const showBatchesX = irShowBatches();
   const showBrand    = groupBy === 'brand'    || groupBy === 'both';
   const showSupplier = groupBy === 'supplier' || groupBy === 'both';
   const showConsumed = invReportState.stockLevel === 'low' || invReportState.stockLevel === 'lowAll';
@@ -17770,6 +17842,7 @@ async function exportInventoryReport() {
   if (showConsumed) header.push('Consumed');
   const showImportX = invReportState.offcutMode !== 'offcut';
   if (showImportX) header.push('Import (pending)');
+  if (showBatchesX) header.push('Batches');
   const aoa = reportExcelAoa(header);
   for (const r of rows) {
     const row = [r.paperType, r.size, r.gsm, r.isOffcut ? 'Offcut' : 'Fresh'];
@@ -17780,6 +17853,7 @@ async function exportInventoryReport() {
              r.weightKg === null ? '' : +r.weightKg.toFixed(2));
     if (showConsumed) row.push(+(r.consumedPkts.toFixed(2)));
     if (showImportX) row.push(+(r.importPkts.toFixed(2)));
+    if (showBatchesX) { const ps = packetSize(r.paperType) || 1; row.push(irRowBatches(r).map(b => ordinalN(b.n) + ': ' + (+(b.left / ps).toFixed(2))).join(' | ')); }
     aoa.push(row);
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -17965,7 +18039,7 @@ async function printOffcutWithChallan() {
   } catch (e) { notify('Could not get a Challan No.: ' + e.message); }
 }
 function printInventoryReport(challanNo) {
-  const rows = buildInventoryReportRows();
+  const rows = irBatchFilter(buildInventoryReportRows());   // the batch filter too (owner, 2026-11-18)
   if (!rows.length) { notify('Nothing to print — empty filter result.'); return; }
   if (challanNo === undefined && invReportState.offcutMode === 'offcut') { askOffcutChallanThenPrint(); return; }
   const { groupBy, paperType } = invReportState;
@@ -19888,6 +19962,7 @@ function jrRowPassesColFilters(r) {
     } else if (!picks.includes(String(def.get(r) ?? '').trim())) return false;
   }
   for (const [f, def] of Object.entries(JR_COL_SEARCH_FIELDS)) {
+    if (Array.isArray(cs[f])) { if (cs[f].length && !cs[f].includes(String(def.get(r) ?? '').trim())) return false; continue; }
     const q = String(cs[f] || '').trim().toLowerCase();
     if (q && !searchMatch(def.get(r), q)) return false;
   }
@@ -19954,7 +20029,7 @@ function jrColSearchApply(field, forced) {
   const el = document.getElementById('srcs-input');
   const v = forced !== undefined ? forced : (el ? el.value : '');
   if (!jobsReportState.colSearch) jobsReportState.colSearch = {};
-  jobsReportState.colSearch[field] = String(v || '').trim();
+  jobsReportState.colSearch[field] = Array.isArray(v) ? v : String(v || '').trim();
   closeModal();
   renderJobsReport();
 }
@@ -21541,7 +21616,8 @@ function reportActiveFilters(kind) {
     if (Array.isArray(vals) && vals.length) out.push({ key: 'cf:' + f, label: (dropLabels[f] || f) + ': ' + short(vals) });
   }
   for (const [f, v] of Object.entries(st.colSearch || {})) {
-    if (String(v || '').trim()) out.push({ key: 'cs:' + f, label: ((searchLabels[f] || {}).label || f) + ' contains "' + v + '"' });
+    if (Array.isArray(v)) { if (v.length) out.push({ key: 'cs:' + f, label: ((searchLabels[f] || {}).label || f) + ': ' + short(v) }); }
+    else if (String(v || '').trim()) out.push({ key: 'cs:' + f, label: ((searchLabels[f] || {}).label || f) + ' contains "' + v + '"' });
   }
   return out;
 }
@@ -24096,6 +24172,7 @@ function saleReportRowPassesNewFilters(r) {
     if (picks.length && !picks.includes(saleReportColValue(f, r))) return false;
   }
   for (const [f, def] of Object.entries(SALE_COL_SEARCH_FIELDS)) {
+    if (Array.isArray(cs[f])) { if (cs[f].length && !cs[f].includes(String(def.get(r) ?? '').trim())) return false; continue; }
     const q = String(cs[f] || '').trim().toLowerCase();
     if (q && !searchMatch(def.get(r), q)) return false;
   }
@@ -24139,8 +24216,8 @@ function colSearchPickerModal(kind, field) {
   finally { if (saved !== undefined) st.colSearch[field] = saved; }
   const values = [...new Set(rows.map(r => String(def.get(r) ?? '').trim()).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  _colSearchCtx = { kind, field, values, shown: [] };
-  const cur = String(saved || '');
+  _colSearchCtx = { kind, field, values, shown: [], picked: Array.isArray(saved) ? saved.filter(v => values.includes(v)) : [] };
+  const cur = Array.isArray(saved) ? '' : String(saved || '');
   // Invoice No. (Sale Report) also sorts, so an export comes out in invoice order.
   const canSort = isSale && field === 'invoice';
   const sortOn = canSort && saleReportState.sortBy === 'invoice' ? saleReportState.sortDir : '';
@@ -24152,6 +24229,7 @@ function colSearchPickerModal(kind, field) {
     <h2 style="margin:0 0 10px;font-size:16px;">Search: ${esc(def.label)}</h2>
     ${sortRow}
     <input type="text" id="srcs-input" value="${esc(cur)}" autocomplete="off" placeholder="Type part of the ${esc(def.label)}..." oninput="colSearchSuggest()" onkeydown="if (event.key === 'Enter') colSearchPickerApply()" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:14px;">
+    <div id="srcs-picked" style="margin-top:6px;"></div>
     <div id="srcs-list" style="max-height:45vh;overflow-y:auto;margin-top:6px;"></div>
     <div id="srcs-none" style="display:none;color:#991b1b;font-size:12.5px;padding:8px 2px;"></div>
     <div class="modal-actions">
@@ -24187,17 +24265,35 @@ function colSearchSuggest() {
     const i = v.toLowerCase().indexOf(q);
     return i < 0 ? esc(v) : esc(v.slice(0, i)) + '<b style="color:#166534;">' + esc(v.slice(i, i + q.length)) + '</b>' + esc(v.slice(i + q.length));
   };
+  // Tick boxes (owner, 2026-11-18): tick several - they stay ticked while you search for the next one.
+  const picked = ctx.picked || [];
+  const pk = document.getElementById('srcs-picked');
+  if (pk) pk.innerHTML = picked.length ? `<div style="font-size:11px;font-weight:700;color:#166534;margin-bottom:3px;">Ticked (${picked.length})</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${picked.map((v, i) => `<span style="display:inline-flex;align-items:center;gap:4px;background:#dcfce7;border:1px solid #22c55e;border-radius:12px;padding:1px 4px 1px 9px;font-size:12px;">${esc(v)}<button type="button" onclick="colSearchUntick(${i})" title="Untick" style="border:0;background:none;cursor:pointer;color:#166534;font-weight:900;padding:0 3px;">&times;</button></span>`).join('')}</div>` : '';
   list.innerHTML = ctx.shown.length
     ? `<div style="border:1px solid var(--border);border-radius:8px;padding:4px;">${ctx.shown.map((v, i) =>
-        `<div onclick="colSearchPickerPick(${i})" style="padding:6px 8px;border-radius:5px;cursor:pointer;font-size:13px;" onmouseover="this.style.background='#dcfce7'" onmouseout="this.style.background=''">${mark(v)}</div>`).join('')}
+        `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:5px;cursor:pointer;font-size:13px;${picked.includes(v) ? 'background:#bbf7d0;' : ''}"><input type="checkbox" ${picked.includes(v) ? 'checked' : ''} onchange="colSearchTick(${i}, this.checked)"> <span>${mark(v)}</span></label>`).join('')}
         ${hits.length > ctx.shown.length ? `<div style="padding:6px 8px;font-size:11.5px;color:var(--text2);">+ ${hits.length - ctx.shown.length} more — keep typing to narrow</div>` : ''}</div>`
     : '';
   if (none) {
     none.style.display = (q && !hits.length) ? '' : 'none';
     none.textContent = (q && !hits.length) ? 'Nothing in this column matches "' + el.value.trim() + '".' : '';
   }
-  // A search that matches nothing cannot be applied.
-  if (apply) apply.disabled = !!(q && !hits.length);
+  // A search that matches nothing cannot be applied (unless something is ticked).
+  if (apply) { apply.disabled = !!(q && !hits.length) && !picked.length; apply.textContent = picked.length ? `Apply (${picked.length} ticked)` : 'Apply'; }
+}
+function colSearchTick(i, on) {
+  const ctx = _colSearchCtx;
+  if (!ctx || ctx.shown[i] === undefined) return;
+  const v = ctx.shown[i];
+  ctx.picked = (ctx.picked || []).filter(x => x !== v);
+  if (on) ctx.picked.push(v);
+  colSearchSuggest();
+}
+function colSearchUntick(i) {
+  const ctx = _colSearchCtx;
+  if (!ctx || !ctx.picked) return;
+  ctx.picked.splice(i, 1);
+  colSearchSuggest();
 }
 function colSearchPickerPick(i) {
   const ctx = _colSearchCtx;
@@ -24208,6 +24304,7 @@ function colSearchPickerApply() {
   const ctx = _colSearchCtx;
   const el = document.getElementById('srcs-input');
   if (!ctx || !el) return;
+  if ((ctx.picked || []).length) { colSearchPickerSet(ctx.picked.slice()); return; }   // the ticked values
   const q = el.value.trim();
   if (q && !ctx.values.some(v => searchMatch(v, q))) return;   // nothing there - stay put
   colSearchPickerSet(q);
@@ -24222,7 +24319,7 @@ function srColSearchApply(field, forced) {
   const el = document.getElementById('srcs-input');
   const v = forced !== undefined ? forced : (el ? el.value : '');
   if (!saleReportState.colSearch) saleReportState.colSearch = {};
-  saleReportState.colSearch[field] = String(v || '').trim();
+  saleReportState.colSearch[field] = Array.isArray(v) ? v : String(v || '').trim();
   closeModal();
   renderSaleReport();
 }
@@ -36291,11 +36388,13 @@ function openDeliverGroupModal(groupName) {
     return { j, avail };
   }).filter(x => x.avail > 0);
   const totalAvail = available.reduce((s, x) => s + x.avail, 0);
-  // Deliver from (owner, 2026-11-17): oldest job first, or one job picked here.
+  // Deliver from (owner, 2026-11-17; several jobs 2026-11-18): every job oldest first, or tick the jobs - oldest
+  // first among the ticked ones.
   const rowCss = 'display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);padding:3px 0;cursor:pointer;';
   const availRows = available.length
-    ? `<label style="${rowCss}"><input type="radio" name="dg-from" value="" checked onchange="dgFromChanged()"> <b style="color:#5b21b6;">Oldest job first (FIFO)</b></label>`
-      + available.map(x => `<label style="${rowCss}"><input type="radio" name="dg-from" value="${x.j.id}" data-avail="${x.avail}" onchange="dgFromChanged()"> Only from E-${x.j.id} · ${esc(x.j.name)}: <b>${x.avail.toLocaleString()} available</b></label>`).join('')
+    ? `<label style="${rowCss}"><input type="checkbox" id="dg-fifo-all" checked onchange="dgFromAllChanged(this.checked)"> <b style="color:#5b21b6;">All jobs, oldest first (FIFO)</b></label>
+       <div style="font-size:10.5px;color:var(--text2);margin:1px 0 2px 22px;">or tick only the jobs to deliver from - oldest of them first</div>`
+      + available.map(x => `<label style="${rowCss}padding-left:14px;"><input type="checkbox" class="dg-from" value="${x.j.id}" data-avail="${x.avail}" onchange="dgFromChanged()"> E-${x.j.id} · ${esc(x.j.name)}: <b>${x.avail.toLocaleString()} available</b></label>`).join('')
     : `<div style="font-size:11px;color:#dc2626;padding:1px 0;">No jobs at Ready to Deliver — advance a job there first.</div>`;
   const gName = jsStr(groupName);
   // Finance's invoicing fields (Cartons/Packets, E-FBR, MSI, Rate, Sale Tax) show only for holders of job_btn_pricing.
@@ -36352,16 +36451,23 @@ function openDeliverGroupModal(groupName) {
     </div>
   </div>`);
 }
-// The picked "Deliver from" job: { id, avail } or null for oldest first.
+// The ticked "Deliver from" jobs: { ids, avail } or null for every job oldest first.
 function dgFromPicked() {
-  const r = document.querySelector('input[name="dg-from"]:checked');
-  return r && r.value ? { id: Number(r.value), avail: Number(r.dataset.avail) || 0 } : null;
+  const ticked = [...document.querySelectorAll('input.dg-from:checked')];
+  return ticked.length ? { ids: ticked.map(r => Number(r.value)), avail: ticked.reduce((a, r) => a + (Number(r.dataset.avail) || 0), 0) } : null;
+}
+function dgFromAllChanged(on) {
+  if (on) document.querySelectorAll('input.dg-from').forEach(cb => { cb.checked = false; });
+  else if (!dgFromPicked()) { const all = document.getElementById('dg-fifo-all'); if (all) all.checked = true; }   // nothing ticked = all jobs
+  dgFromChanged();
 }
 function dgFromChanged() {
+  const p = dgFromPicked();
+  const all = document.getElementById('dg-fifo-all');
+  if (all) all.checked = !p;
   const line = document.getElementById('dg-avail-line');
   if (!line) return;
-  const p = dgFromPicked();
-  line.textContent = p ? `Available in E-${p.id}: ${p.avail.toLocaleString()} unit cartons` : `Total available: ${(Number(line.dataset.total) || 0).toLocaleString()} unit cartons`;
+  line.textContent = p ? `Available in ${p.ids.map(id => 'E-' + id).join(', ')}: ${p.avail.toLocaleString()} unit cartons${p.ids.length > 1 ? ' - oldest first' : ''}` : `Total available: ${(Number(line.dataset.total) || 0).toLocaleString()} unit cartons`;
 }
 async function submitGroupDelivery(groupName) {
   const cartons = ((document.getElementById('dg-cartons')||{}).value||'').trim();
@@ -36375,12 +36481,12 @@ async function submitGroupDelivery(groupName) {
   const notes   = ((document.getElementById('dg-notes')||{}).value||'').trim();
   if (!parseFloat(cartons) || parseFloat(cartons) <= 0) { await alertDialog({ title: 'Enter cartons to deliver', kind: 'warn' }); return; }
   if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
-  if (from && parseFloat(cartons) > from.avail) { await alertDialog({ title: `E-${from.id} has only ${from.avail.toLocaleString()} cartons available`, message: 'Lower the qty, or pick Oldest job first.', kind: 'warn' }); return; }
+  if (from && parseFloat(cartons) > from.avail) { await alertDialog({ title: `${from.ids.map(id => 'E-' + id).join(', ')} ha${from.ids.length === 1 ? 's' : 've'} only ${from.avail.toLocaleString()} cartons available`, message: 'Lower the qty, tick more jobs, or pick All jobs.', kind: 'warn' }); return; }
   // Rate / Sale Tax inputs exist only for job_btn_pricing holders; for everyone else they're simply not sent.
   const rateEl = document.getElementById('dg-rate');
   const taxEl  = document.getElementById('dg-tax');
   const body = { group_name: groupName, cartons, date, po_no: po, batch_no: batch, fbr_no: fbr, msi_no: msi, notes };
-  if (from) body.job_id = from.id;
+  if (from) body.job_ids = from.ids;
   if (cp !== '') body.cartons_packets = cp;
   if (rateEl || taxEl) {
     const rateStr = ((rateEl||{}).value || '').trim();

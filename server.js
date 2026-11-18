@@ -6135,6 +6135,28 @@ async function itemBatches(sql, itemId) {
        AND t.reverses_tx_id IS NULL
        AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
      ORDER BY t.created_at, t.id`;
+  return batchesFromRows(item.current_balance, rows);
+}
+// Every paper item's batches at once (Current Balance Summary, owner 2026-11-18): { item_id: [batch] }.
+async function allItemBatches(sql) {
+  const items = await sql`SELECT id, current_balance FROM inventory_items WHERE deleted_at IS NULL AND NOT COALESCE(is_offcut, false)`;
+  const rows = await sql`
+    SELECT t.id, t.item_id, t.batch, t.change, t.created_at, t.challan_no, t.po_no, t.invoice_no, t.batch_label, t.batch_alloc
+      FROM inventory_transactions t
+     WHERE (t.batch IS NOT NULL OR t.batch_alloc IS NOT NULL)
+       AND t.reverses_tx_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+     ORDER BY t.created_at, t.id`;
+  const byItem = new Map();
+  for (const r of rows) { if (!byItem.has(r.item_id)) byItem.set(r.item_id, []); byItem.get(r.item_id).push(r); }
+  const out = {};
+  for (const it of items) {
+    const list = batchesFromRows(it.current_balance, byItem.get(it.id) || []);
+    if (list.length) out[it.id] = list.map(b => ({ n: b.n, label: b.label, left: b.left, received: b.received, first_at: b.first_at }));
+  }
+  return out;
+}
+function batchesFromRows(currentBalance, rows) {
   const byN = new Map();
   const get = n => {
     if (!byN.has(n)) byN.set(n, { n, tx_id: null, received: null, out: 0, first_at: null, challan_no: '', po_no: '', invoice_no: '', batch_label: '' });
@@ -6150,7 +6172,7 @@ async function itemBatches(sql, itemId) {
       for (const a of r.batch_alloc) if (a && a.n) get(+a.n).out += +a.sheets || 0;
     }
   }
-  const balance = parseFloat(item.current_balance) || 0;
+  const balance = parseFloat(currentBalance) || 0;
   if (!byN.size && !(balance > 0)) return [];
   get(1);
   const list = [...byN.values()].sort((a, b) => a.n - b.n);
@@ -10581,25 +10603,31 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
       WHERE stock_group_name = ${String(group_name).trim()} AND deleted_at IS NULL
       ORDER BY id ASC`;
     if (!groupJobs.length) return res.status(404).json({ error: 'No jobs found in this group' });
-    // Deliver from one chosen job instead of oldest first (owner, 2026-11-17): only that job, and not more
-    // than it has ready.
-    const fromJobId = req.body?.job_id ? parseInt(req.body.job_id, 10) : null;
-    if (fromJobId) {
-      const only = groupJobs.find(j => j.id === fromJobId);
-      if (!only) return res.status(400).json({ error: `Job E-${fromJobId} is not in this group.` });
-      const eligErr = deliveryEligibilityError(only);
-      if (eligErr) return res.status(400).json({ error: eligErr });
-      const readyOnly = parseFloat(((only.particulars || {}).delivered_cartons_qty || {}).quantity || '')
-        || parseFloat(String(only.cartonqty || '').replace(/[^0-9.\-]/g, '')) || 0;
-      const availOnly = Math.max(0, readyOnly - sumDeliveryCartons(only.deliveries));
-      if (totalCartons > availOnly) return res.status(400).json({ error: `E-${fromJobId} has only ${availOnly.toLocaleString()} cartons available.` });
+    // Deliver from the jobs chosen instead of all of them (owner, 2026-11-17: one job; 2026-11-18: any number) -
+    // oldest first among the chosen ones, and not more than they have ready together.
+    const pickedIds = [...new Set((Array.isArray(req.body?.job_ids) ? req.body.job_ids : (req.body?.job_id ? [req.body.job_id] : []))
+      .map(x => parseInt(x, 10)).filter(n => n > 0))].sort((a, b) => a - b);
+    const picked = pickedIds.length ? new Set(pickedIds) : null;
+    if (picked) {
+      let availPicked = 0;
+      for (const id of pickedIds) {
+        const only = groupJobs.find(j => j.id === id);
+        if (!only) return res.status(400).json({ error: `Job E-${id} is not in this group.` });
+        const eligErr = deliveryEligibilityError(only);
+        if (eligErr) return res.status(400).json({ error: `E-${id}: ${eligErr}` });
+        const readyOnly = parseFloat(((only.particulars || {}).delivered_cartons_qty || {}).quantity || '')
+          || parseFloat(String(only.cartonqty || '').replace(/[^0-9.\-]/g, '')) || 0;
+        availPicked += Math.max(0, readyOnly - sumDeliveryCartons(only.deliveries));
+      }
+      if (totalCartons > availPicked) return res.status(400).json({ error: `${pickedIds.map(id => 'E-' + id).join(', ')} ha${pickedIds.length === 1 ? 's' : 've'} only ${availPicked.toLocaleString()} cartons available.` });
     }
+    const fromJobId = pickedIds.length === 1 ? pickedIds[0] : null;
     let remaining = totalCartons;
     const deliveriesMade = [];
     const plan = [];
     for (const job of groupJobs) {
       if (remaining <= 0) break;
-      if (fromJobId && job.id !== fromJobId) continue;
+      if (picked && !picked.has(job.id)) continue;
       if (deliveryEligibilityError(job)) continue;
       const readyQty = parseFloat(
         ((job.particulars || {}).delivered_cartons_qty || {}).quantity || ''
@@ -10645,7 +10673,7 @@ app.post('/api/groups/deliver', requireDeliveryWriter, async (req, res) => {
     const fulfilled = totalCartons - remaining;
     await logAudit(sql, req, {
       action: 'group.deliver', entityType: 'group', entityId: null,
-      summary: `${fromJobId ? `Delivery from E-${fromJobId} of` : 'FIFO delivery from'} group "${group_name}": ${fulfilled} cartons across ${deliveriesMade.length} job(s)${remaining > 0 ? ` — ${remaining} unfulfilled` : ''}`,
+      summary: `${fromJobId ? `Delivery from E-${fromJobId} of` : picked ? `Delivery from ${pickedIds.map(id => 'E-' + id).join(', ')} (oldest first) of` : 'FIFO delivery from'} group "${group_name}": ${fulfilled} cartons across ${deliveriesMade.length} job(s)${remaining > 0 ? ` — ${remaining} unfulfilled` : ''}`,
     });
     res.json({ ok: true, deliveries_made: deliveriesMade, unfulfilled: remaining });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -13515,6 +13543,14 @@ app.post('/api/inventory/tx-ref', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Every paper item's batches - the Current Balance Summary's Batches column (owner, 2026-11-18).
+app.get('/api/reports/item-batches', requireAuth, async (req, res) => {
+  try {
+    if (!userHasBtn(req.user, 'rpt_current_balance', 'view') && !userHasBtn(req.user, 'inv_btn_batches', 'view')) return res.status(403).json({ error: 'Not allowed' });
+    await dbReady;
+    res.json(await allItemBatches(getDb()));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 // Batches of one paper item (Batch window, stickers) - see itemBatches.
 app.get('/api/inventory/:id/batches', requireAuth, async (req, res) => {
   try {
