@@ -40039,6 +40039,7 @@ async function exportCSV() {
 // ── Users tab ────────────────────────────────────────────────
 let usersList = [];
 let auditList = [];
+let usersLoadErrors = [], usersLoadFailed = false;   // a part of the Users tab that did not load (Retry)
 
 // Recent Activity feed filters — type (matches the action-tag badge, e.g.
 // "job" catches job.create/job.stage/…) and a date period, same today/
@@ -40190,12 +40191,18 @@ async function loadUsersAndAudit() {
     // the server's real behavior: CEO no longer requests this at all.
     const wantsOperators = hasPerm('user_btn_operators', 'view');
     if (wantsOperators) reqs.push(api('GET', '/api/operators'), api('GET', '/api/floor-people').catch(() => []));
-    const results = await Promise.all(reqs);
+    // Each part on its own (owner, 2026-11-18: one request failing showed "No users yet" for the whole tab) -
+    // a part that fails keeps what it had and says so, with Retry.
+    const results = await Promise.all(reqs.map(p => p.then(v => ({ ok: true, v }), e => ({ ok: false, e }))));
     let i = 0;
-    usersList = wantsUsers ? results[i++] : [];
-    auditList = wantsAudit ? results[i++] : [];
-    operatorsList = wantsOperators ? (results[i++] || []) : [];
-    floorPeople = wantsOperators ? (results[i++] || []) : [];
+    const take = (cur, empty) => { const r = results[i++]; if (!r.ok) { usersLoadErrors.push(r.e && r.e.message || 'error'); return cur && cur.length ? cur : empty; } return r.v || empty; };
+    usersLoadErrors = [];
+    usersLoadFailed = false;
+    if (wantsUsers) { const before = usersLoadErrors.length; usersList = take(usersList, []); usersLoadFailed = usersLoadErrors.length > before && !usersList.length; } else usersList = [];
+    auditList = wantsAudit ? take(auditList, []) : [];
+    operatorsList = wantsOperators ? take(operatorsList, []) : [];
+    floorPeople = wantsOperators ? take(floorPeople, []) : [];
+    if (usersLoadErrors.length) notify('Some of the Users tab did not load: ' + usersLoadErrors[0] + ' - press Retry or refresh');
     renderUsersTab();
     renderOperators();
     renderFloorPeople();
@@ -43894,7 +43901,9 @@ function renderUsersTab() {
         ${(isMe || !hasPerm('user_btn_remove', 'view')) ? '' : `<button class="btn btn-sm btn-danger" onclick="removeUser(${u.id})">Remove</button>`}
       </div>
     </div>`;
-  }).join('') || '<div class="empty">No users yet.</div>';
+  }).join('') || (usersLoadFailed
+    ? `<div class="empty" style="color:#b91c1c;">The users did not load (${esc(usersLoadErrors[0] || 'error')}). <button class="btn btn-sm" style="margin-left:8px;" onclick="loadUsersAndAudit()">&#8635; Retry</button></div>`
+    : '<div class="empty">No users yet.</div>');
 
   // Recent activity feed — type + date filtered, see auditFeedState above.
   const filterBarEl = document.getElementById('audit-filter-bar');
