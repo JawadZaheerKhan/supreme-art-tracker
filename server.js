@@ -2306,6 +2306,7 @@ async function authMiddleware(req, res, next) {
             // Session was logged out by an admin, or the account is
             // blocked — kill the cookie so the client re-prompts login.
             res.clearCookie(SESSION_COOKIE, { path: '/' });
+            req.authSignedOut = true;   // /api/auth/alive tells the page it was signed out (owner, 2026-11-18)
           } else {
             req.user = candidate;
             // Heartbeat so the Users tab's "last seen" stays fresh. Fire
@@ -2802,6 +2803,14 @@ app.post('/api/auth/logout', async (req, res) => {
 // (up to 30-day-old) session token, re-issues the cookie on the spot. So an
 // admin ticking a second role box takes effect on the user's next page
 // load/refresh — no logout-login dance required.
+// Is this device still signed in? (owner, 2026-11-18) The page asks every few seconds, so a device logged out
+// from Users (Sessions / Block) leaves the app right away, with no refresh. The check is the session lookup the
+// auth step already does - nothing more.
+app.get('/api/auth/alive', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!req.user) return res.status(401).json({ error: 'Not signed in', signed_out: !!req.authSignedOut });
+  res.json({ ok: true });
+});
 app.get('/api/auth/me', async (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
   try {

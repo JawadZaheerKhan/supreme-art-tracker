@@ -45462,7 +45462,9 @@ async function init() {
     const { user } = await api('GET', '/api/auth/me');
     currentUser = user;
   } catch {
-    showLogin();
+    let kicked = false;
+    try { kicked = sessionStorage.getItem('sa_signed_out') === '1'; sessionStorage.removeItem('sa_signed_out'); } catch (e) {}
+    showLogin(kicked ? 'You were signed out by an admin.' : undefined);
     hideLoadingScreen();
     return;
   }
@@ -45558,6 +45560,33 @@ function startSmartPolling() {
     if (document.visibilityState === 'visible') { lastActivity = Date.now(); pollTick(); }
   });
 }
+
+// ── Signed out from Users -> out right away (owner, 2026-11-18) ──
+// While signed in, the page asks the server every few seconds if this device is still signed in: every 4s while
+// the tab is open and in use, every 30s when nobody has touched it for 5 minutes, and at once when the tab comes
+// back into view. Logged out (Sessions / Block) -> the page reloads to the sign-in screen with nothing left on it.
+const SESSION_CHECK_ACTIVE_MS = 4000, SESSION_CHECK_IDLE_MS = 30000;
+let _sessionLastCheck = 0, _sessionChecking = false;
+async function sessionCheck(force) {
+  if (!currentUser || _sessionChecking) return;
+  if (document.visibilityState !== 'visible') return;
+  const gap = Date.now() - lastActivity > IDLE_LIMIT_MS ? SESSION_CHECK_IDLE_MS : SESSION_CHECK_ACTIVE_MS;
+  if (!force && Date.now() - _sessionLastCheck < gap) return;
+  _sessionChecking = true; _sessionLastCheck = Date.now();
+  try {
+    const r = await fetch('/api/auth/alive', { credentials: 'same-origin', cache: 'no-store' });
+    if (r.status === 401 && currentUser) {
+      try { sessionStorage.setItem('sa_signed_out', '1'); } catch (e) {}
+      currentUser = null;
+      location.reload();
+    }
+  } catch (e) { /* offline / server busy - try again next time */ }
+  finally { _sessionChecking = false; }
+}
+setInterval(() => sessionCheck(false), 1000);
+['mousedown', 'keydown', 'touchstart', 'scroll'].forEach(ev => document.addEventListener(ev, () => { lastActivity = Date.now(); }, { passive: true }));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') sessionCheck(true); });
+window.addEventListener('focus', () => sessionCheck(true));
 
 init();
 </script>
