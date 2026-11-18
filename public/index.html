@@ -2445,6 +2445,7 @@
   .lc-mchip:not(.is-on):hover { border-color: #A32D2D; color: #A32D2D; }
   .lc-mchip-n { display: inline-block; min-width: 14px; padding: 0 4px; margin-left: 2px; border-radius: 8px; background: rgba(0,0,0,.08); font-size: 10px; line-height: 14px; }
   .lc-mchip.is-on .lc-mchip-n { background: rgba(255,255,255,.25); }
+  .lc-sec-tag { display: inline-block; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .03em; padding: 0 6px; border: 1px solid; border-radius: 999px; margin-right: 6px; vertical-align: middle; color: #1f2937; }
   .lc-legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin-bottom: 8px; }
   .lc-legend-sec { border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
   .lc-legend-name { font-weight: 900; text-transform: uppercase; letter-spacing: .04em; font-size: 11.5px; margin-bottom: 4px; }
@@ -27584,19 +27585,36 @@ function lcSortCmp(a, b) {
     : lcJobAt(a).localeCompare(lcJobAt(b)) || (lcEntryAt(a) - lcEntryAt(b)) || (a.id - b.id);
 }
 function lcEntryTimeHtml(e) { const t = lcEntryAt(e); return t ? `${esc(fmtDMY(new Date(t)))}<div class="lc-sub">${esc(fmtTime12(new Date(t)))}</div>` : ''; }
-// One log per machine (and per paper form, if a machine ever has both).
+// One log per machine - a machine with entries on both paper forms (Die Cutting + Coating) is one log too
+// (owner, 2026-11-18): its forms B then A, so Die Cutting sits left of Coating.
 function lcGroups(rows) {
   const map = new Map();
-  for (const r of rows) { const k = r.machine + '\u0000' + r.form; if (!map.has(k)) map.set(k, { machine: r.machine, form: r.form, list: [] }); map.get(k).list.push(r); }
-  for (const g of map.values()) g.list.sort(lcSortCmp);
+  for (const r of rows) { const k = r.machine; if (!map.has(k)) map.set(k, { machine: r.machine, list: [] }); map.get(k).list.push(r); }
+  for (const g of map.values()) {
+    g.list.sort(lcSortCmp);
+    g.forms = [...new Set(g.list.map(e => e.form))].filter(f => LC_FORMS[f]).sort().reverse();
+    g.form = g.forms[0] || g.list[0].form;
+  }
   // Across machines too: the machine with the earliest entry (by the Sort by pick) on top.
   const order = lcMachineOrder(lcCodeOf());
-  return [...map.values()].sort((x, y) => lcSortCmp(x.list[0], y.list[0]) || order(x.machine, y.machine) || x.form.localeCompare(y.form));
+  return [...map.values()].sort((x, y) => lcSortCmp(x.list[0], y.list[0]) || order(x.machine, y.machine));
 }
 // The sections a machine's entries used, in the paper form's order, and their point numbers.
 function lcGroupSections(g) {
-  const used = new Set(g.list.flatMap(e => e.sections || []));
-  return LC_FORMS[g.form].sections.filter(x => used.has(x.name));
+  return (g.forms || [g.form]).flatMap(f => {
+    const used = new Set(g.list.filter(e => e.form === f).flatMap(e => e.sections || []));
+    return LC_FORMS[f].sections.filter(x => used.has(x.name)).map(x => ({ ...x, form: f }));
+  });
+}
+// The point columns of a log: { form, n, sec } - a point of the other form reads N/A on an entry.
+function lcGroupCols(g) { return lcGroupSections(g).flatMap(x => x.points.map(pt => ({ form: x.form, n: pt[0], sec: x }))); }
+function lcColMark(e, c) { return e.form === c.form ? lcPointMark(e, c.n) : ['lc-na', '&ndash;']; }
+// The sign on the Previous Job when a machine's log holds both forms: what QA chose - Die or Coating.
+function lcSecTagHtml(e, mixed, print) {
+  if (!mixed) return '';
+  const f = LC_FORMS[e.form];
+  const secs = f ? f.sections.filter(x => (e.sections || []).includes(x.name)) : [];
+  return secs.map(x => `<span class="lc-sec-tag" style="background:${x.color};border-color:${LC_SEC_STRONG[x.color] || '#999'};${print ? 'font-size:6.5pt;padding:0 3px;border:1px solid #000;' : ''}">${esc(x.name === 'Die Cutting' ? 'Die' : x.name)}</span>`).join('');
 }
 // A job number with its company under it.
 // A job's name in the report opens its job card right there (owner, 2026-11-16) - in the app, not on paper or at
@@ -27626,17 +27644,17 @@ function lcLegendHtml(secs) {
 }
 function lcTableHtml(g, withLegend) {
   const secs = lcGroupSections(g);
-  const nums = secs.flatMap(x => x.points.map(p => p[0]));
+  const cols = lcGroupCols(g), mixed = (g.forms || []).length > 1;
   const atStation = typeof mode !== 'undefined' && mode === 'station';
   const pinCan = k => !!(stationOperator && stationOperator.perms && stationOperator.perms[k] === 'yes');
   const canEdit = atStation ? pinCan('rpt_line_clearance_edit') : seeBtn('rpt_line_clearance_edit');
   const canDel = atStation ? pinCan('rpt_line_clearance_delete') : seeBtn('rpt_line_clearance_delete');
   const head = `<tr><th>#</th><th>Date</th><th>Job Time</th><th title="When QA saved this entry">Entry Time</th><th>Previous Job</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
-    ${nums.map(n => { const sec = lcSectionOf(g.form, n) || {}; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === n) || [])[1] || '')}">${n}</th>`; }).join('')}
+    ${cols.map(c => { const sec = c.sec; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === c.n) || [])[1] || '')}">${c.n}</th>`; }).join('')}
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
   const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td style="white-space:nowrap;">${esc(hm12(e.entry_time))}</td><td style="white-space:nowrap;">${lcEntryTimeHtml(e)}</td>
-    <td>${canEdit ? lcJobCellIn(e, 'prev') : lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${canEdit ? lcWasteIn(e) : lcWasteHtml(e)}</td><td>${canEdit ? lcJobCellIn(e, 'new') : lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
-    ${nums.map(n => { const [c, m] = lcPointMark(e, n); return `<td class="${c}">${m}</td>`; }).join('')}
+    <td>${lcSecTagHtml(e, mixed)}${canEdit ? lcJobCellIn(e, 'prev') : lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${canEdit ? lcWasteIn(e) : lcWasteHtml(e)}</td><td>${canEdit ? lcJobCellIn(e, 'new') : lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
+    ${cols.map(col => { const [c, m] = lcColMark(e, col); return `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
   return `<div class="lc-log">
     ${lcState.machine ? '' : `<div class="lc-machine">${esc(g.machine)}${(g.list.find(e => e.machine_code) || {}).machine_code ? ` <b style="font-size:12px;color:var(--text2);">${esc(g.list.find(e => e.machine_code).machine_code)}</b>` : ''} <span>${esc(secs.map(x => x.name).join(' · '))} &middot; ${g.list.length} entr${g.list.length === 1 ? 'y' : 'ies'}</span></div>`}
@@ -27792,19 +27810,20 @@ function printLineClearance() {
   const td = 'border:1px solid #000;padding:3px 4px;';
   const groups = lcGroups(rows);
   const pages = groups.map((g, gi) => {
-    const f = LC_FORMS[g.form];
+    const forms = (g.forms || [g.form]).map(k => LC_FORMS[k]);
+    const f = { doc: forms.map(x => x.doc).join(' + '), title: forms.map(x => x.title).join(' + ') };
     const secs = lcGroupSections(g);
-    const nums = secs.flatMap(x => x.points.map(p => p[0]));
+    const cols = lcGroupCols(g), mixed = forms.length > 1;
     const legend = secs.map(x => x.points.map((pt, j) => `<tr>
       ${j === 0 ? `<td rowspan="${x.points.length}" style="${td}background:${x.color};font-weight:bold;width:90px;">${esc(x.name)}<div style="font-weight:normal;" dir="rtl">${x.ur}</div></td>` : ''}
       <td style="${td}background:${x.color};text-align:center;font-weight:bold;width:22px;">${pt[0]}</td><td style="${td}">${esc(pt[1])}</td><td style="${td}text-align:right;" dir="rtl">${pt[2]}</td></tr>`).join('')).join('');
     const head = `<tr style="background:#f7f1ea;"><th style="${td}">#</th><th style="${td}">Date</th><th style="${td}">Job Time</th><th style="${td}">Entry Time</th><th style="${td}">Previous Job No.</th>
       <th style="${td}">Waste <span style="font-weight:normal;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th style="${td}">New Job No.</th>
-      ${nums.map(n => `<th style="${td}background:${(lcSectionOf(g.form, n) || {}).color};width:20px;">${n}</th>`).join('')}
+      ${cols.map(c => `<th style="${td}background:${c.sec.color};width:20px;">${c.n}</th>`).join('')}
       <th style="${td}">QC</th><th style="${td}">QA</th><th style="${td}">Remarks</th></tr>`;
     const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(hm12(e.entry_time))}</td><td style="${td}">${lcEntryAt(e) ? esc(fmtDMYT12(new Date(lcEntryAt(e)))) : ''}</td>
-      <td style="${td}">${lcJobCell(e.prev_job, e.prev_company, true, e.prev_job_name)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${lcJobCell(e.new_job, e.new_company, true, e.new_job_name)}</td>
-      ${nums.map(n => { const [c] = lcPointMark(e, n); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;background:#dcfce7;' : c === 'lc-no' ? 'color:#b91c1c;background:#fee2e2;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
+      <td style="${td}">${lcSecTagHtml(e, mixed, true)}${lcJobCell(e.prev_job, e.prev_company, true, e.prev_job_name)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${lcJobCell(e.new_job, e.new_company, true, e.new_job_name)}</td>
+      ${cols.map(col => { const [c] = lcColMark(e, col); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;background:#dcfce7;' : c === 'lc-no' ? 'color:#b91c1c;background:#fee2e2;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
       <td style="${td}text-align:center;font-weight:bold;color:${e.qc_cleared ? '#166534' : '#b91c1c'};background:${e.qc_cleared ? '#dcfce7' : '#fee2e2'};">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');
     const dates = g.list.map(e => String(e.entry_date).slice(0, 10)).sort();
     return `<div style="${REPORT_PRINT_WRAP}${gi < groups.length - 1 ? 'page-break-after:always;break-after:page;' : ''}">
