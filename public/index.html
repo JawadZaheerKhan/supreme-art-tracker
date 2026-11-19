@@ -2407,6 +2407,10 @@
   .lc-ops-p { flex: 1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .lc-ops-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 6px 5px 12px; border-radius: 16px; border: 1.5px solid #16a34a; background: #16a34a; color: #fff; font-size: 14px; font-weight: 700; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
   .lc-ops-chip.is-dragging { opacity: .35; }
+  /* Absent today (owner, 2026-11-19): tapped - no green, no credit for that machine today. */
+  .lc-ops-chip.is-absent { background: #fff; color: #6b7280; border-color: #9ca3af; border-style: dashed; }
+  .lc-ops-chip.is-absent .lc-ops-name { text-decoration: line-through; }
+  .lc-ops-absent-tag { font-size: 10px; font-weight: 800; text-transform: uppercase; color: #b91c1c; letter-spacing: .03em; }
   .lc-ops-ghost { position: fixed; z-index: 99999; pointer-events: none; box-shadow: 0 6px 16px rgba(0,0,0,.25); opacity: .95; }
   .lc-ops-del { width: 24px; height: 24px; border-radius: 50%; border: 0; background: #dc2626; color: #fff; font-size: 12px; line-height: 24px; padding: 0; cursor: pointer; }
   .lc-ops-del:hover { background: #b91c1c; }
@@ -42102,12 +42106,34 @@ function opsDragEnd(ev) {
   const d = _opsDrag;
   _opsDrag = null;
   document.querySelectorAll('.lc-ops-row.is-drop').forEach(r => r.classList.remove('is-drop'));
+  if (d && !d.ghost && ev.type === 'pointerup' && !(ev.target && ev.target.closest && ev.target.closest('.lc-ops-del'))) { stationQaOpsToggleAbsent(d.machine, d.person); return; }
   if (!d || !d.ghost) return;
   d.ghost.remove();
   d.chip.classList.remove('is-dragging');
   if (ev.type !== 'pointerup') return;
   const row = opsRowAt(ev.clientX, ev.clientY);
   if (row) stationQaOpsMove(d.machine, row.dataset.machine, d.person);
+}
+// Absent today (owner, 2026-11-19): tap a name - the green goes, and that machine's entries today don't credit him.
+function opsIsAbsent(machine, person) { return ((stationQaOps && stationQaOps.absent && stationQaOps.absent[machine]) || []).some(n => String(n).toLowerCase() === String(person).toLowerCase()); }
+async function stationQaOpsToggleAbsent(machine, person) {
+  if (!stationQaOps) return;
+  const was = opsIsAbsent(machine, person);
+  const ab = stationQaOps.absent || (stationQaOps.absent = {});
+  ab[machine] = was ? (ab[machine] || []).filter(n => String(n).toLowerCase() !== String(person).toLowerCase()) : [...(ab[machine] || []), person];
+  stationResetIdle();
+  stationRender();
+  stationQaOpsSetState('saving');
+  try {
+    const r = await api('POST', '/api/station/machine-ops/absent', { pin: stationOperator.pin, machine, person, absent: !was, person_name: (stationPerson && stationPerson.name) || '' });
+    if (r && r.absent) stationQaOps.absent = r.absent;
+    stationQaOpsSetState('saved');
+    notify(was ? `${person} is back - present on ${machine} today` : `${person} marked absent on ${machine} today`);
+  } catch (e) {
+    ab[machine] = was ? [...(ab[machine] || []), person] : (ab[machine] || []).filter(n => n !== person);
+    stationQaOpsSetState('error'); notify('Could not save: ' + e.message);
+  }
+  stationRender();
 }
 function stationQaOpsAdd(machine, sel) {
   const p = sel.value; sel.value = '';
@@ -42147,7 +42173,7 @@ function stationQaOpsHtml() {
       <div style="display:flex;gap:8px;"><button class="btn" onclick="stationView=stationOpsHome(); stationRender();">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>`;
   if (!d || !stationQaOpsEdit) return head + '<div class="empty">Loading…</div>';
-  const note = `<div class="lc-ops-note">The same operators as Users &rarr; Operators - a change here changes them there too. Drag a name onto another machine to move them, &#128465; to take one off, + someone else to add. Every change saves by itself.</div>`;
+  const note = `<div class="lc-ops-note">The same operators as Users &rarr; Operators - a change here changes them there too. Tap a name = absent today (the green goes - no credit for that machine today; tap again = present). Drag a name onto another machine to move them, &#128465; to take one off, + someone else to add. Every change saves by itself.</div>`;
   const machines = [...d.machines].sort((a, b) => (!a.code - !b.code) || (a.code || '').localeCompare(b.code || '', undefined, { numeric: true }) || a.name.localeCompare(b.name));
   const rows = machines.map(m => {
     const on = stationQaOpsEdit[m.name] || [];
@@ -42155,7 +42181,7 @@ function stationQaOpsHtml() {
     const M = esc(JSON.stringify(m.name));
     return `<div class="lc-ops-row${on.length ? '' : ' is-empty'}" data-machine="${esc(m.name)}">
       <div class="lc-ops-m">${m.code ? `<span class="lc-ops-code">${esc(m.code)}</span>` : ''}<b>${esc(m.name)}</b></div>
-      <div class="lc-ops-p">${on.map(p => `<span class="lc-ops-chip is-on" onpointerdown="opsChipDown(event, ${M}, ${esc(JSON.stringify(p))})" title="Drag onto another machine to move">${esc(p)}<button type="button" class="lc-ops-del" title="Take off this machine" onclick="stationQaOpsRemove(${M}, ${esc(JSON.stringify(p))})">&#128465;</button></span>`).join('')}
+      <div class="lc-ops-p">${on.map(p => `<span class="lc-ops-chip is-on${opsIsAbsent(m.name, p) ? ' is-absent' : ''}" onpointerdown="opsChipDown(event, ${M}, ${esc(JSON.stringify(p))})" title="${opsIsAbsent(m.name, p) ? 'Absent today - tap to mark present' : 'Tap = absent today (no credit) · drag onto another machine to move'}"><span class="lc-ops-name">${esc(p)}</span>${opsIsAbsent(m.name, p) ? '<span class="lc-ops-absent-tag">absent</span>' : ''}<button type="button" class="lc-ops-del" title="Take off this machine" onclick="stationQaOpsRemove(${M}, ${esc(JSON.stringify(p))})">&#128465;</button></span>`).join('')}
         ${on.length ? '' : '<span class="lc-ops-none">nobody</span>'}
         ${others.length ? `<select class="lc-ops-add" onchange="stationQaOpsAdd(${M}, this)"><option value="">+ someone else</option>${others.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select>` : ''}</div>
     </div>`;

@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-18-job-warnings-saved';   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-19-machine-absent';   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1098,6 +1098,10 @@ async function initDb() {
     // ...and the warnings found on a job ({ rule: { sig, tag, title, text, at } }) - a sign stays until it is ignored,
     // even once the figures are put right (owner, 2026-11-18).
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS warn_raised JSONB`;
+    // Absent today (owner, 2026-11-19): a name tapped off in Today's operators - no machine credit for that day.
+    await sql`CREATE TABLE IF NOT EXISTS machine_absent (
+      day DATE NOT NULL, machine TEXT NOT NULL, person TEXT NOT NULL, by_name TEXT, at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (day, machine, person))`;
     await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
@@ -8389,7 +8393,7 @@ app.post('/api/station/line-clearance', requireStationUser, async (req, res) => 
     const row = (await sql`
       INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, machine_code, operator_name, prev_job, prev_company, new_job, new_company, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
       VALUES (${date}, ${lcText(b.entry_time, 10)}, ${form}, ${sections}, ${machine}, ${lcText(b.machine_code, 40)},
-              ${(((await machineOpsFor(sql, date)).assign || {})[machine] || []).join(', ')},
+              ${(((await machineOpsFor(sql, date)).present || {})[machine] || []).join(', ')},
               ${prev}, ${lcText(b.prev_company, 120)}, ${next}, ${lcText(b.new_company, 120)}, ${JSON.stringify(points)}, ${cleared}, ${b.qc_cleared === true}, ${waste}, ${lcText(b.remarks, 500)}, ${qaName}, ${v.operator.id})
       RETURNING *`)[0];
     await logAudit(sql, req, { action: 'line_clearance.create', entityType: 'line_clearance', entityId: row.id,
@@ -8512,7 +8516,17 @@ async function machineOpsFor(sql, date) {
     const names = (Array.isArray(r.persons) ? r.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean);
     if (names.length) assign[r.name] = names;
   }
-  return { from: date, assign };
+  // Absent that day (owner, 2026-11-19): { machine: [person] } and each machine's people who were there.
+  const absent = {};
+  try {
+    for (const a of await sql`SELECT machine, person FROM machine_absent WHERE day = ${date}`) (absent[a.machine] = absent[a.machine] || []).push(a.person);
+  } catch (e) { /* table not made yet - nobody absent */ }
+  const present = {};
+  for (const [m, list] of Object.entries(assign)) {
+    const off = new Set((absent[m] || []).map(n => String(n).trim().toLowerCase()));
+    present[m] = list.filter(n => !off.has(n.toLowerCase()));
+  }
+  return { from: date, assign, absent, present };
 }
 // Today's operators at the Station: a QA Incharge or a QC PIN (owner, 2026-11-16).
 async function verifyOpsPin(sql, rawPin) {
@@ -8572,12 +8586,12 @@ app.post('/api/station/machine-ops', requireStationUser, async (req, res) => {
     if (v.error) return res.status(v.status).json({ error: v.error });
     const today = businessDateISO();
     const machines = await stationMachineList(sql);
-    const { from, assign } = await machineOpsFor(sql, today);
+    const { from, assign, absent } = await machineOpsFor(sql, today);
     // "+ someone else" (owner, 2026-11-16): every active operator in Users -> Operators - a machine with no PIN
     // (breaking, driver, loader...) too, not only the station machines; QC / QA people are not operators.
     const everyone = await sql`SELECT persons FROM operators WHERE active AND COALESCE(kind, '') = '' AND persons IS NOT NULL`;
     const people = [...new Set([...machines, ...everyone].flatMap(m => (Array.isArray(m.persons) ? m.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean)))].sort((a, b) => a.localeCompare(b));
-    res.json({ date: today, from, assign, people,
+    res.json({ date: today, from, assign, absent, people,
       machines: machines.map(m => ({ name: m.name, code: m.machine_code || '', persons: (Array.isArray(m.persons) ? m.persons : []).map(p => String((p && p.name) || '').trim()).filter(Boolean) })) });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -8618,6 +8632,27 @@ app.post('/api/station/machine-ops/save', requireStationUser, async (req, res) =
     if (changed.length) await logAudit(sql, req, { action: 'station.machine_ops', entityType: 'settings', entityId: null,
       summary: `Machine operators changed at the Station by ${lcText(req.body.person_name, 60) || v.operator.name}: ${changed.map(m => m + ' = ' + ((assign[m] || []).join(' / ') || 'nobody')).join('; ')}` });
     res.json({ date: today, assign, changed });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Absent today (owner, 2026-11-19): tap a name in Today's operators - grey = absent, no credit for that machine today.
+app.post('/api/station/machine-ops/absent', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyOpsPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const machine = String(req.body.machine || '').trim(), person = String(req.body.person || '').trim().slice(0, 60);
+    if (!machine || !person) return res.status(400).json({ error: 'Pick the machine and the person' });
+    if (!(await stationMachineList(sql)).some(m => m.name === machine)) return res.status(400).json({ error: 'Unknown machine' });
+    const today = businessDateISO(), who = lcText(req.body.person_name, 60) || v.operator.name;
+    if (req.body.absent === true) {
+      await sql`INSERT INTO machine_absent (day, machine, person, by_name) VALUES (${today}, ${machine}, ${person}, ${who}) ON CONFLICT (day, machine, person) DO NOTHING`;
+    } else {
+      await sql`DELETE FROM machine_absent WHERE day = ${today} AND machine = ${machine} AND person = ${person}`;
+    }
+    await logAudit(sql, req, { action: 'station.machine_absent', entityType: 'settings', entityId: null,
+      summary: `${person} marked ${req.body.absent === true ? 'absent' : 'present'} on ${machine} today by ${who}` });
+    res.json({ date: today, absent: (await machineOpsFor(sql, today)).absent });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // QA's own recent entries on his screen (PIN in the body, never the URL).
@@ -14688,7 +14723,8 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     // Someone else (owner, 2026-11-13). Someone from another machine keeps his (custom) mark on his own name.
     let signer = person.name, crewRest = [];
     if (!viaJobCard) {
-      const crew = ((await machineOpsFor(sql, businessDateISO())).assign || {})[machine.name] || [];
+      // Only the ones there today - a name marked absent in Today's operators gets no credit (owner, 2026-11-19).
+      const crew = ((await machineOpsFor(sql, businessDateISO())).present || {})[machine.name] || [];
       const me = String(person.name || '').trim().toLowerCase();
       if (crew.some(n => String(n).trim().toLowerCase() === me)) personIsCustom = false;   // on this machine today
       crewRest = crew.filter(n => String(n).trim().toLowerCase() !== me);
