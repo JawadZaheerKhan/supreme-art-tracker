@@ -21253,42 +21253,60 @@ const OLD_SHIP_DEL_BTN = (k) => `<button type="button" class="btn btn-sm" style=
 // newest check first; the row turns green once the job is delivered after the check (partly or fully).
 const pmcState = { q: '', show: 'all' };
 function pmcSet(k, v) { pmcState[k] = v; renderPmCheckedReport(); }
+// Every job the PM checked, and every job delivered (owner, 2026-11-19: delivered jobs belong here too, in green).
+// Green = delivered: a checked job once a delivery came after its check; any other job once it shipped anything.
+// Its date = the latest of its check and its last delivery - the list runs newest first.
 function pmcRows() {
   const num = v => parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')) || 0;
-  return (jobs || []).filter(j => j && !j.deleted_at && j.pm_check && j.pm_check.at).map(j => {
-    const c = j.pm_check, del = totalDeliveredCartons(j) || 0;
-    const nDel = Array.isArray(j.deliveries) ? j.deliveries.length : 0;
-    const delivered = isDone(j) || nDel > (+c.n || 0) || del > (+c.del || 0);
+  return (jobs || []).filter(j => j && !j.deleted_at && ((j.pm_check && j.pm_check.at) || (Array.isArray(j.deliveries) && j.deliveries.length) || isDone(j))).map(j => {
+    const c = (j.pm_check && j.pm_check.at) ? j.pm_check : null;
+    const list = Array.isArray(j.deliveries) ? j.deliveries : [];
+    const del = totalDeliveredCartons(j) || 0;
+    const delivered = c ? (isDone(j) || list.length > (+c.n || 0) || del > (+c.del || 0)) : true;
+    const lastDelMs = list.reduce((m, d) => { const t = deliveryEntryMs(d); return isFinite(t) && t > m ? t : m; }, 0)
+      || (isDone(j) ? (Date.parse((j.stages && j.stages[7] && j.stages[7].at) || '') || 0) : 0);
+    const checkMs = c ? (Date.parse(c.at) || 0) : 0;
     const mf = j.stock_group_name ? milTileShipmentFacts(j) : null;
     let wastage = 0; try { wastage = +jobShipmentFigures(j).jobWastageAll || 0; } catch (e) { wastage = 0; }
-    return { j, c, delivered, po: mf ? mf.qtyLine : (j.qty || ''), poNum: mf ? 0 : num(j.qty), uc: num(j.cartonqty), del, wastage };
+    return { j, c, delivered, checkMs, lastDelMs, ms: Math.max(checkMs, lastDelMs), po: mf ? mf.qtyLine : (j.qty || ''), poNum: mf ? 0 : num(j.qty), uc: num(j.cartonqty), del, wastage };
   });
+}
+function pmcFiltered() {
+  const q = pmcState.q.trim().toLowerCase();
+  return pmcRows().filter(r => (pmcState.show === 'all' || (pmcState.show === 'delivered') === r.delivered)
+    && (!q || [r.j.id, 'e-' + r.j.id, r.j.name, r.j.client].some(v => String(v || '').toLowerCase().includes(q))))
+    .sort((x, y) => (y.ms - x.ms) || (y.j.id - x.j.id));   // newest first
+}
+function pmcDatesHtml(r, print) {
+  const sz = print ? '7pt' : '10.5px';
+  return (r.c ? `<div style="font-size:${sz};color:${print ? '#000' : '#e10600'};">&#10004; ${esc(fmtDMY(r.c.at))}</div>` : '')
+    + (r.lastDelMs ? `<div style="font-size:${sz};color:${print ? '#000' : '#166534'};">Delivered ${esc(fmtDMY(new Date(r.lastDelMs)))}</div>` : '');
 }
 function renderPmCheckedReport() {
   const pane = document.getElementById('rt-pm-checked');
   if (!pane) return;
-  const q = pmcState.q.trim().toLowerCase();
   const all = pmcRows();
-  const rows = all.filter(r => (pmcState.show === 'all' || (pmcState.show === 'delivered') === r.delivered)
-    && (!q || [r.j.id, 'e-' + r.j.id, r.j.name, r.j.client].some(v => String(v || '').toLowerCase().includes(q))))
-    .sort((a, b) => String(b.c.at).localeCompare(String(a.c.at)));
+  const rows = pmcFiltered();
   const fmt = n => n ? (+n).toLocaleString() : '';
-  const nDel = all.filter(r => r.delivered).length;
+  const nDel = all.filter(r => r.delivered).length, nChk = all.filter(r => r.c).length;
   const btn = (k, l) => `<button type="button" class="${pmcState.show === k ? 'is-on' : ''}" onclick="pmcSet('show', '${k}')">${l}</button>`;
-  const tot = rows.reduce((a, r) => ({ po: a.po + r.poNum, uc: a.uc + r.uc, del: a.del + r.del, w: a.w + r.wastage }), { po: 0, uc: 0, del: 0, w: 0 });
+  const tot = rows.reduce((x, r) => ({ po: x.po + r.poNum, uc: x.uc + r.uc, del: x.del + r.del, w: x.w + r.wastage }), { po: 0, uc: 0, del: 0, w: 0 });
   const td = 'padding:8px 10px;border-bottom:1px solid var(--border);';
   const tdR = td + 'text-align:right;white-space:nowrap;';
   const th = 'padding:8px 10px;text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;background:var(--bg2);white-space:nowrap;';
   pane.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:10px;">
       <div><div class="dash-flbl">Show</div><div class="lc-sortby">${btn('all', 'All')}${btn('open', 'Not delivered')}${btn('delivered', 'Delivered')}</div></div>
       <div style="flex:1;min-width:220px;max-width:380px;"><div class="dash-flbl">Search</div><input class="filter" type="search" style="width:100%;" placeholder="Job no., name, company..." value="${esc(pmcState.q)}" oninput="pmcState.q = this.value; clearTimeout(window._pmcT); window._pmcT = setTimeout(renderPmCheckedReport, 250);"></div>
-      <div style="margin-left:auto;font-size:12px;color:var(--text2);"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#bbf7d0;border:1px solid #22c55e;vertical-align:-2px;"></span> Green = delivered after the check</div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:12px;">
+        <span style="font-size:12px;color:var(--text2);"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#bbf7d0;border:1px solid #22c55e;vertical-align:-2px;"></span> Green = delivered</span>
+        <button class="btn btn-sm" onclick="printPmRegister()" title="Print - oldest first">&#128424; Print</button>
+      </div>
     </div>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${all.length} job${all.length === 1 ? '' : 's'} checked by the PM &middot; <b style="color:#166534;">${nDel} delivered</b> &middot; <b style="color:#e10600;">${all.length - nDel} not delivered yet</b></div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">${all.length} job${all.length === 1 ? '' : 's'} &middot; ${nChk} checked by the PM &middot; <b style="color:#166534;">${nDel} delivered</b> &middot; <b style="color:#e10600;">${all.length - nDel} not delivered yet</b> &middot; newest first</div>
     ${rows.length ? `<div class="report-scroll-wrap"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13.5px;">
       <thead><tr><th style="${th}">Job No.</th><th style="${th}">Job Name</th><th style="${th}">Company</th><th style="${th}text-align:right;">PO Qty</th><th style="${th}text-align:right;">Printed UC Qty</th><th style="${th}text-align:right;">Delivered UC Qty</th><th style="${th}text-align:right;">Wastage</th></tr></thead>
-      <tbody>${rows.map(r => `<tr style="${r.delivered ? 'background:#dcfce7;' : ''}cursor:pointer;" onclick="openEdit(${r.j.id})" title="Checked ${esc(fmtDMYT12(r.c.at))}${r.c.by ? ' by ' + esc(r.c.by) : ''}${r.c.via === 'station' ? ' (Ready qty saved at the station)' : ''} - click to open the job card">
-        <td style="${td}white-space:nowrap;"><b style="color:${r.delivered ? '#166534' : '#e10600'};">&#10004; E-${r.j.id}</b><div style="font-size:10.5px;color:var(--text2);">${esc(fmtDMY(r.c.at))}</div></td>
+      <tbody>${rows.map(r => `<tr style="${r.delivered ? 'background:#dcfce7;' : ''}cursor:pointer;" onclick="openEdit(${r.j.id})" title="${r.c ? 'Checked ' + esc(fmtDMYT12(r.c.at)) + (r.c.by ? ' by ' + esc(r.c.by) : '') + (r.c.via === 'station' ? ' (Ready qty saved at the station)' : '') + ' - ' : ''}click to open the job card">
+        <td style="${td}white-space:nowrap;"><b style="color:${r.delivered ? '#166534' : '#e10600'};">${r.c ? '&#10004; ' : ''}E-${r.j.id}</b>${pmcDatesHtml(r)}</td>
         <td style="${td}font-weight:600;">${esc(r.j.name || '')}</td>
         <td style="${td}">${esc(r.j.client || '')}</td>
         <td style="${tdR}">${r.poNum ? fmt(r.poNum) : esc(String(r.po || ''))}</td>
@@ -21296,7 +21314,33 @@ function renderPmCheckedReport() {
         <td style="${tdR}font-weight:${r.del ? 700 : 400};">${fmt(r.del)}</td>
         <td style="${tdR}">${fmt(r.wastage)}</td></tr>`).join('')}</tbody>
       <tfoot><tr style="font-weight:700;background:var(--bg2);"><td style="${td}" colspan="3">${rows.length} job${rows.length === 1 ? '' : 's'}</td><td style="${tdR}">${fmt(tot.po)}</td><td style="${tdR}">${fmt(tot.uc)}</td><td style="${tdR}">${fmt(tot.del)}</td><td style="${tdR}">${fmt(tot.w)}</td></tr></tfoot>
-    </table></div>` : `<div class="empty" style="padding:28px;text-align:center;">${all.length ? 'No checked jobs match these filters.' : 'No job has been checked by the PM yet.'}</div>`}`;
+    </table></div>` : `<div class="empty" style="padding:28px;text-align:center;">${all.length ? 'No jobs match these filters.' : 'No job has been checked by the PM or delivered yet.'}</div>`}`;
+}
+// Print: the same rows, oldest first (owner, 2026-11-19).
+function printPmRegister() {
+  const rows = pmcFiltered().reverse();
+  if (!rows.length) { notify('Nothing to print - empty filter result.'); return; }
+  const fmt = n => n ? (+n).toLocaleString() : '';
+  const td = 'border:1px solid #000;padding:3px 5px;';
+  const tdR = td + 'text-align:right;white-space:nowrap;';
+  const tot = rows.reduce((x, r) => ({ po: x.po + r.poNum, uc: x.uc + r.uc, del: x.del + r.del, w: x.w + r.wastage }), { po: 0, uc: 0, del: 0, w: 0 });
+  const show = { all: 'All', open: 'Not delivered', delivered: 'Delivered' }[pmcState.show] || 'All';
+  const html = `<div style="${REPORT_PRINT_WRAP}">
+    <div style="margin-bottom:6px;">${reportPrintHeading({ title: 'PM REGISTER', scope: `Show: ${show}${pmcState.q.trim() ? ' · Search: ' + pmcState.q.trim() : ''} · oldest first · green = delivered`, dateText: `Printed: ${fmtDMYT12(new Date())}` })}</div>
+    <table style="width:100%;font-size:8.5pt;border-collapse:collapse;">
+      <tr style="background:#f3eee4;"><th style="${td}">Job No.</th><th style="${td}">Job Name</th><th style="${td}">Company</th><th style="${td}">PO Qty</th><th style="${td}">Printed UC Qty</th><th style="${td}">Delivered UC Qty</th><th style="${td}">Wastage</th></tr>
+      ${rows.map(r => `<tr style="${r.delivered ? 'background:#dcfce7;' : ''}">
+        <td style="${td}white-space:nowrap;"><b>${r.c ? '&#10004; ' : ''}E-${r.j.id}</b>${pmcDatesHtml(r, true)}</td>
+        <td style="${td}">${esc(r.j.name || '')}</td><td style="${td}">${esc(r.j.client || '')}</td>
+        <td style="${tdR}">${r.poNum ? fmt(r.poNum) : esc(String(r.po || ''))}</td><td style="${tdR}">${fmt(r.uc)}</td><td style="${tdR}">${fmt(r.del)}</td><td style="${tdR}">${fmt(r.wastage)}</td></tr>`).join('')}
+      <tr style="font-weight:bold;background:#f3eee4;"><td style="${td}" colspan="3">${rows.length} job${rows.length === 1 ? '' : 's'}</td><td style="${tdR}">${fmt(tot.po)}</td><td style="${tdR}">${fmt(tot.uc)}</td><td style="${tdR}">${fmt(tot.del)}</td><td style="${tdR}">${fmt(tot.w)}</td></tr>
+    </table></div>`;
+  const area = document.getElementById('print-area');
+  area.innerHTML = `<style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>${html}`;
+  reportPrintPrepare(area, 'portrait');
+  const imgs = Array.from(area.querySelectorAll('img'));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = img.onerror = () => res(); }));
+  Promise.race([Promise.all(waits), new Promise(res => setTimeout(res, 1500))]).then(() => { window.print(); setTimeout(() => { area.innerHTML = ''; }, 500); });
 }
 const milRptState = { asOf: '', q: '', client: '' };
 function jrMilAsOf() { return milRptState.asOf || localDateISO(); }
