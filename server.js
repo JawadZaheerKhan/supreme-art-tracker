@@ -8551,7 +8551,10 @@ app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
     // A job already Delivered is never waiting (owner, 2026-11-17: E-1426, printed days before, was only marked done
     // on Printing today and run through to Delivered in minutes - it showed as waiting for line clearance).
     const jobs = await sql`SELECT id, name, client, log FROM jobs WHERE deleted_at IS NULL AND updated_at > NOW() - INTERVAL '3 days' AND COALESCE(stage_index, 0) < 7`;
-    const lcs = await sql`SELECT machine, machine_code, prev_job FROM line_clearance WHERE deleted_at IS NULL AND entry_date >= ${yday}`;
+    // QA's entry may come before the operator's (owner, 2026-11-19: QA cleared the line, the operator entered the job
+    // late - it must not show as waiting). Any entry of the last 30 days counts, by its date or by when it was saved.
+    const lcs = await sql`SELECT machine, machine_code, prev_job FROM line_clearance WHERE deleted_at IS NULL
+                            AND (entry_date >= (${yday}::date - 30) OR created_at > NOW() - INTERVAL '30 days')`;
     // A QA entry with this job as its Previous Job takes it off (owner, 2026-11-13) - the machine matched by
     // its name or by its code, so a renamed / re-typed machine still counts.
     const byCode = new Map(machines.filter(m => m.machine_code).map(m => [String(m.machine_code).trim().toLowerCase(), m]));
@@ -8673,8 +8676,12 @@ async function lineClearanceRows(sql, from, to) {
     // job card for this machine's section(s) - entries on this machine when the card names it.
     const jobIdOf = lcJobId;
     const ids = [...new Set(rows.flatMap(r => [jobIdOf(r.prev_job), jobIdOf(r.new_job)]).filter(Boolean))];
-    const jobs = ids.length ? await sql`SELECT id, name, client, particulars FROM jobs WHERE id = ANY(${ids})` : [];
+    const jobs = ids.length ? await sql`SELECT id, name, client, particulars, coatings FROM jobs WHERE id = ANY(${ids})` : [];
     const byId = new Map(jobs.map(j => [j.id, j]));
+    // Each machine's roles (print / diecut / embellish) for the no-entry warning.
+    const mRoles = new Map();
+    try { for (const m of await sql`SELECT name, roles FROM operators WHERE active`) mRoles.set(String(m.name || '').trim().toLowerCase(), Array.isArray(m.roles) ? m.roles : []); } catch (e) { /* no roles - sections decide */ }
+    const rolesOf = name => mRoles.get(String(name || '').trim().toLowerCase()) || [];
     const rowSum = (row, machine) => {
       if (!row) return null;
       if (Array.isArray(row.entries) && row.entries.length) {
@@ -8714,8 +8721,40 @@ async function lineClearanceRows(sql, from, to) {
         }
       }
       r.jc_waste = total;
+      r.prev_warn = pj ? lcNoEntryWarn(r, pj, rolesOf(r.machine)) : null;
     }
   return rows;
+}
+// Warning on a Previous Job (owner, 2026-11-19, E-1193): QA cleared the line after it, but the job has no operator
+// entry for what that machine does - Printing (print machine), Die Cutting or Coating / embellishment (whichever
+// QA ticked on a die + coating machine). Worked out on every load: gone once the operator enters it, even late.
+// An entry counts when it was made on this machine (any number or waste), or the stage has its qty from any machine.
+const LC_WARN_STAGE = { Printing: 1, Coating: 2, 'Die Cutting': 3 };
+const LC_WARN_NAME = { 1: 'Printing', 2: 'Coating / Embellishment', 3: 'Die Cutting' };
+function lcNoEntryWarn(r, pj, roles) {
+  const secs = (r.sections || []).filter(s => LC_WARN_STAGE[s]);
+  let stages;
+  if (roles.includes('print')) stages = [1];
+  else if (secs.includes('Die Cutting') || secs.includes('Coating')) stages = secs.filter(s => s !== 'Printing').map(s => LC_WARN_STAGE[s]);
+  else if (roles.includes('diecut')) stages = [3];
+  else if (roles.includes('embellish')) stages = [2];
+  else stages = secs.map(s => LC_WARN_STAGE[s]);
+  stages = [...new Set(stages)];
+  if (!stages.length) return null;
+  const p = pj.particulars || {}, lowM = String(r.machine || '').trim().toLowerCase();
+  const onMachine = Object.values(p).some(row => row && Array.isArray(row.entries)
+    && row.entries.some(e => e && String(e.machine || '').trim().toLowerCase() === lowM && String(e.qty == null ? '' : e.qty).trim() !== ''));
+  if (onMachine) return null;
+  const missing = stages.filter(st => {
+    if (stageDoneQtyServer(pj, st) > 0) return false;
+    // No coating planned on the job: nothing to enter, no warning (same as the job tile's rule).
+    if (st === 2 && !(Array.isArray(pj.coatings) && pj.coatings.filter(Boolean).length)) return false;
+    if (st === 2) return !Object.keys(p).some(k => /^(coating|uv|embellish|emboss|foil|lamination|varnish)/i.test(k) && /qty|sheets/i.test(k) && !/waste/i.test(k) && readyQtyFromParticularsRow(p[k]) > 0);
+    return true;
+  });
+  if (!missing.length) return null;
+  const what = missing.map(st => LC_WARN_NAME[st]).join(' and ');
+  return { stage: what, text: `No ${what} entry by the operator for E-${pj.id}. QA cleared ${r.machine} after this job, but nothing was entered for it on the job card.` };
 }
 app.get('/api/reports/line-clearance', requirePermission('rpt_line_clearance', 'view'), async (req, res) => {
   try {

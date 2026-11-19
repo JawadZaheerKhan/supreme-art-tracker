@@ -1807,6 +1807,8 @@
   .jw-chip span { font-size: 8.5px; font-weight: 900; color: #e10600; letter-spacing: .02em; margin-top: 1px; }
   @keyframes jwPulse { 0%, 100% { box-shadow: 0 0 0 2px rgba(255,26,26,.12); } 50% { box-shadow: 0 0 0 4px rgba(255,26,26,.28); } }
   .jw-chip { animation: jwPulse 2.2s ease-in-out infinite; }
+  .jw-chip.lc-warn { float: right; margin: 0 0 2px 6px; padding: 1px 3px; }
+  .jw-chip.lc-warn span { font-size: 7.5px; }
   #over-issue-alert:hover { background: #fecaca; border-color: #ef4444; }
   /* Stock Group tile — purple accent top-border to distinguish from job cards */
   .group-card { border-top: 4px solid #7c3aed !important; }
@@ -28074,6 +28076,28 @@ function lcSecTagHtml(e, mixed, print) {
   const secs = f ? f.sections.filter(x => (e.sections || []).includes(x.name)) : [];
   return secs.map(x => `<span class="lc-sec-tag" style="background:${x.color};border-color:${LC_SEC_STRONG[x.color] || '#999'};${print ? 'font-size:6.5pt;padding:0 3px;border:1px solid #000;' : ''}">${esc(x.name === 'Die Cutting' ? 'Die' : x.name)}</span>`).join('');
 }
+// No operator entry (owner, 2026-11-19, E-1193): a small red sign on the Previous Job when the job has no entry for
+// what this machine does (Printing / Die Cutting / Coating). The server works it out on each load - gone once entered.
+function lcWarnHtml(e, print) {
+  if (!e || !e.prev_warn || print) return '';
+  return `<button type="button" class="jw-chip lc-warn" onclick="event.stopPropagation(); openLcWarn(${e.id})" title="No ${esc(e.prev_warn.stage)} entry - click for the reason">${JW_SVG}<span>NO ENTRY</span></button>`;
+}
+function openLcWarn(id) {
+  const e = (lcState.rows || []).find(r => r.id === id);
+  if (!e || !e.prev_warn) return;
+  const jid = lcJobId(e.prev_job);
+  const inApp = jid && !lcAtStation() && typeof jobs !== 'undefined' && jobs.some(j => j.id === jid);
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">${JW_SVG.replace('width="17" height="15"', 'width="34" height="30"')}<div><div style="font-weight:800;color:#e10600;font-size:15px;">No ${esc(e.prev_warn.stage)} entry</div><div style="font-size:12px;color:var(--text2);">${esc(lcJobNo(e.prev_job))}${e.prev_job_name ? ' &middot; ' + esc(e.prev_job_name) : ''} &middot; ${esc(e.machine)}</div></div></div>
+    <div style="font-size:14px;line-height:1.45;padding:8px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;">${esc(e.prev_warn.text)}</div>
+    <div style="font-size:12px;color:var(--text2);margin-top:6px;">The sign goes away by itself once the operator enters the job.</div>
+    <div class="modal-actions">
+      ${inApp ? `<button class="btn" onclick="closeModal(); openEdit(${jid})">Open job card</button>` : ''}
+      <button class="btn btn-primary" onclick="closeModal()">OK</button>
+    </div>
+  </div>`);
+}
+function lcJobId(v) { const m = String(v || '').match(/\d+/); return m && !m[0].startsWith('4') ? +m[0] : 0; }
 // A job number with its company under it.
 // A job's name in the report opens its job card right there (owner, 2026-11-16) - in the app, not on paper or at
 // the Station (no job card there).
@@ -28111,7 +28135,7 @@ function lcTableHtml(g, withLegend) {
     ${cols.map(c => { const sec = c.sec; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === c.n) || [])[1] || '')}">${c.n}</th>`; }).join('')}
     <th style="text-align:center;">QC</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
   const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td style="white-space:nowrap;">${esc(hm12(e.entry_time))}</td><td style="white-space:nowrap;">${lcEntryTimeHtml(e)}</td>
-    <td>${lcSecTagHtml(e, mixed)}${canEdit ? lcJobCellIn(e, 'prev') : lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${canEdit ? lcWasteIn(e) : lcWasteHtml(e)}</td><td>${canEdit ? lcJobCellIn(e, 'new') : lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
+    <td>${lcSecTagHtml(e, mixed)}${lcWarnHtml(e)}${canEdit ? lcJobCellIn(e, 'prev') : lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${canEdit ? lcWasteIn(e) : lcWasteHtml(e)}</td><td>${canEdit ? lcJobCellIn(e, 'new') : lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
     ${cols.map(col => { const [c, m] = lcColMark(e, col); return canEdit && c !== 'lc-na' ? `<td class="${c} lc-tap" data-acc="rpt_line_clearance_edit" onclick="lcTogglePoint(${e.id}, ${col.n})" title="Click to ${c === 'lc-ok' ? 'untick' : 'tick'}">${m}</td>` : `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}${canEdit ? ' lc-tap' : ''}"${canEdit ? ` data-acc="rpt_line_clearance_edit" onclick="lcToggleQc(${e.id})" title="Click to mark ${e.qc_cleared ? 'not cleared' : 'cleared'} by QC"` : ''}>${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${canEdit ? lcRemarksIn(e) : esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
   return `<div class="lc-log">
