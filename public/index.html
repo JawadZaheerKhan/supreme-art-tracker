@@ -12575,6 +12575,11 @@ function jhPaperLabel(it) {
 // issue it undid says "(reversed on ...)".
 // Issues of the open job's History: reversed ones, and what each sent to offcut (sheets) - for the Sent to offcut button.
 let jhRevTx = new Set(), jhSentTx = new Map();
+// When the open job was last sent back for re-issuance (paper changed after issue, or Move to Pending Stock) - an issue
+// before that also gets "Sent to offcut", even with the same paper on the card (owner, 2026-11-19: E-1491, E-1210 - their
+// paper went to another job).
+let jhReissueAt = 0;
+const JH_REISSUE_ACTIONS = ['job.paper_change_reissue', 'job.move_to_pending_stock'];
 function jhWithReversals(audit, revs) {
   const rows = Array.isArray(audit) ? audit.slice() : [];
   const all = Array.isArray(revs) ? revs : [];
@@ -12638,16 +12643,17 @@ function jhToOffcutBtns(jobId, a, job) {
   const { key, keys } = jhCardKeys(job);
   return items.map(x => {
     const txId = Number(x && x.tx_id), it = inv.find(i => i.id === Number(x && x.item_id));
-    if (!txId || !it || jhRevTx.has(txId) || keys.has(key(it))) return '';
+    const reissued = jhReissueAt > 0 && (Date.parse(a.created_at) || 0) < jhReissueAt;
+    if (!txId || !it || jhRevTx.has(txId) || (keys.has(key(it)) && !reissued)) return '';
     const left = Math.max(0, (+x.sheets || 0) - (jhSentTx.get(txId) || 0));
     if (!(left > 0)) return '';
     const ps = packetSize(it.paper_type), unit = packetUnitLabel(it.paper_type).toLowerCase(), pk = +(left / ps).toFixed(2);
-    return `<div style="margin-top:4px;"><button class="btn btn-sm" data-acc="job_btn_paper_to_offcut" onclick="event.stopPropagation(); jhSendToOffcut(${jobId}, ${txId}, ${pk}, '${unit}')" style="${OFFCUT_BTN_STYLE}padding:2px 10px;font-size:11.5px;" title="This paper is no longer on the job card - send what is left of it to offcut stock">&#8635; Sent to offcut (${pk} ${unit})</button></div>`;
+    return `<div style="margin-top:4px;"><button class="btn btn-sm" data-acc="job_btn_paper_to_offcut" onclick="event.stopPropagation(); jhSendToOffcut(${jobId}, ${txId}, ${pk}, '${unit}')" style="${OFFCUT_BTN_STYLE}padding:2px 10px;font-size:11.5px;" title="${keys.has(key(it)) ? 'The job was sent back for re-issuance after this issue' : 'This paper is no longer on the job card'} - send what is left of it to offcut stock">&#8635; Sent to offcut (${pk} ${unit})</button></div>`;
   }).join('');
 }
 async function jhSendToOffcut(jobId, txId, maxPkts, unit) {
   const v = await promptDialog({ title: 'Send the old paper to offcut', confirmText: 'Send to offcut', defaultValue: String(maxPkts),
-    message: `This paper is no longer on Job E-${jobId}'s card. How many ${unit} of it went to offcut? (up to ${maxPkts}) - they are added to offcut stock.` });
+    message: `Old paper of Job E-${jobId} (no longer on its card, or the job was sent back for re-issuance). How many ${unit} of it went to offcut? (up to ${maxPkts}) - they are added to offcut stock.` });
   if (v === null || v === undefined) return;
   const n = parseFloat(String(v).trim());
   if (!(n > 0) || n > maxPkts + 0.001) { notify(`Enter 0 to ${maxPkts} ${unit}`); return; }
@@ -16404,6 +16410,7 @@ function renderAuditFeed(rows, opts) {
   const isTxEdit = a => a && a.action === 'inventory.tx.edit' && a.metadata && Array.isArray(a.metadata.tx_ids) && a.metadata.tx_ids.length;
   rows.forEach(a => { if (isTxEdit(a)) txEditAuditRows[a.id] = a; });
   if (jobId) { jhAuditRows = {}; rows.forEach(a => { if (jhIsIssueEntry(a)) jhAuditRows[a.id] = a; }); }
+  if (jobId) jhReissueAt = Math.max(0, ...rows.filter(a => a && JH_REISSUE_ACTIONS.includes(a.action)).map(a => Date.parse(a.created_at) || 0));
   // Job History: which lines were already reversed, and the Reverse button.
   const reversedIds = new Set(rows.map(a => a && a.metadata && a.metadata.reverses_audit_id).filter(Boolean).map(Number));
   if (jobId) rows.forEach(a => { jhRevRows[a.id] = a; });

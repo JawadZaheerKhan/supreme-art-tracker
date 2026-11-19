@@ -9732,7 +9732,7 @@ app.post('/api/jobs/:id/paper-to-offcut', requirePermission('job_btn_paper_to_of
     const paper = [src.paper_type, src.size, src.gsm ? src.gsm + 'gsm' : ''].filter(Boolean).join(' ') + (src.brand ? ' · ' + src.brand : '');
     const amount = `${+(asked / ps).toFixed(2)} ${unit} (${asked.toLocaleString()} sheets)`;
     const newTx = await applyInventoryChange(sql, { itemId: off.id, change: asked, reason: 'job-offcut', jobId: id, pairedTxId: txId, user: req.user,
-      notes: `Job E-${id}: ${amount} of the old paper ${paper} (no longer on the job card) sent to offcut` });
+      notes: `Job E-${id}: ${amount} of the old paper ${paper} sent to offcut` });
     await logAudit(sql, req, { action: 'job.paper_to_offcut', entityType: 'job', entityId: id,
       summary: `Old paper sent to offcut: ${amount} of ${paper}`, metadata: { tx_id: txId, offcut_item_id: off.id, offcut_tx_id: newTx || null, sheets: asked } });
     res.json({ ok: true, sheets: asked, left: left - asked, offcut_item_id: off.id });
