@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-19-qa-waiting-ignore';   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-19-low-issue-ignore';   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -499,7 +499,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -566,6 +566,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   job_btn_paper_to_offcut: { label: 'Old paper — Sent to offcut (job History / Dashboard)', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_pm_check:        { label: 'PM Check — the red tick on Ready / Partial Ready jobs (checked by the PM)', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_warning_ignore:  { label: 'Job warning — Ignore (the red warning signs on a job tile)', levels: { admin: 'yes', production_manager: 'yes' } },
+  job_btn_low_issue_ignore: { label: 'Low issuance — Ignore (the yellow Low issuance sign on a job tile)', levels: { admin: 'yes', production_manager: 'yes' } },
   job_btn_record_delivery: { label: 'Record Delivery button — also covers Deliver Linked and group (FIFO) Record Delivery', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes' } },
   // Filling the Record Delivery form is separated from pressing the button, so
   // finance can enter the invoicing detail on a shipment the PM then records.
@@ -14947,16 +14948,20 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         // stamp, the seed back-fill runs with date:null and the Daily
         // Production report skips the entry.
         const qty = String(value ?? '').trim();
+        // Saved again with the same value (owner, 2026-11-19: Shade Card / Inside Leaflet "Yes" ticks re-saved on a
+        // later day took the new date and name): keep the first entry as it was.
+        const same = Array.isArray(prev.entries) && prev.entries.length === 1 && prev.entries[0]
+          && String(prev.entries[0].qty ?? '').trim() === qty ? prev.entries[0] : null;
         const nextEntries = qty
-          ? [{ qty, date: todayISO, operator: operator.name, machine: operator.machine || null }]
+          ? [same || { qty, date: todayISO, operator: operator.name, machine: operator.machine || null }]
           : [];
         particulars[key] = {
           ...prev,
           entries: nextEntries,
           details: prev.details || businessStamp(),
           quantity: qty,
-          name: operator.machine || '',
-          signature: operator.name,
+          name: same ? (prev.name || same.machine || '') : (operator.machine || ''),
+          signature: same ? (prev.signature || same.operator || '') : operator.name,
         };
       }
     }
@@ -15363,13 +15368,15 @@ app.post('/api/jobs/:id/warning-raise', requirePermission('job_tab_access', 'vie
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Job warnings - Ignore (owner, 2026-11-18): hides one warning on a job for the figures it had then.
-app.post('/api/jobs/:id/warning-ignore', requirePermission('job_btn_warning_ignore'), async (req, res) => {
+app.post('/api/jobs/:id/warning-ignore', requireAnyBtn(['job_btn_warning_ignore', 'job_btn_low_issue_ignore']), async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const rule = String((req.body && req.body.rule) || '');
     if (!/^[a-z_]{2,24}$/.test(rule)) return res.status(400).json({ error: 'Unknown warning' });
+    // Low issuance has its own row (owner, 2026-11-19); the red warning signs keep theirs.
+    if (!userHasBtn(req.user, rule === 'low_issue' ? 'job_btn_low_issue_ignore' : 'job_btn_warning_ignore', 'yes')) return res.status(403).json({ error: 'Not allowed' });
     const sig = String((req.body && req.body.sig) ?? '').slice(0, 200);
     const label = String((req.body && req.body.label) || rule).slice(0, 200);
     const rows = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
