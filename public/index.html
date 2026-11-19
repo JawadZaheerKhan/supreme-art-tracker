@@ -28922,8 +28922,8 @@ async function costSaveRow(el) {
 // filter toggle inside Stock In / Stock Out so the two share one set of
 // paper-type/size/gsm/period/challan filters instead of two independent ones.
 const stockMovementStates = {
-  in:  { period: 'all', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list' },
-  out: { period: 'all', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list' },
+  in:  { period: 'all', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list', colPick: {} },
+  out: { period: 'all', from: '', to: '', paperType: '', size: '', gsm: '', challan: '', jobCard: '', rows: [], viewMode: 'list', colPick: {} },
 };
 
 // Per-direction bulk selection. Independent sets so flipping tabs keeps the
@@ -29179,7 +29179,14 @@ function syncStockTotalFromMovement(dir) {
   const dst = stockTotalStates[dir];
   dst.period = src.period; dst.from = src.from; dst.to = src.to;
   dst.paperType = src.paperType; dst.size = src.size; dst.gsm = src.gsm;
-  dst.challan = src.challan; dst.rows = src.rows;
+  dst.challan = src.challan;
+  // only the rows the green column filters leave (a split issuance goes by its combined row)
+  const pk = src.colPick || {};
+  if (Object.values(pk).some(v => v && v.length)) {
+    const keep = new Set();
+    smBaseRows(dir).filter(t => invColPass(pk, INV_COL_DEFS, t)).forEach(t => (Array.isArray(t.group_ids) && t.group_ids.length ? t.group_ids : [t.id]).forEach(id => keep.add(id)));
+    dst.rows = src.rows.filter(t => keep.has(t.id));
+  } else dst.rows = src.rows;
   renderStockTotal(dir);
 }
 
@@ -29243,9 +29250,119 @@ function txMatchesJobCardSearch(t, qLower) {
   if (mcNo && mcNo !== '(no reference)' && searchMatch(mcNo, qLower)) return true;
   return false;
 }
+// The Stock In / Out rows after the toolbar filters (paper type / size / gsm / job card), split issuances collapsed -
+// before the green column filters.
+function smBaseRows(dir) {
+  const state = stockMovementStates[dir];
+  const jobCardL = (state.jobCard || '').toLowerCase();
+  return collapseSplitIssuances(state.rows.filter(t =>
+       (!state.paperType || t.paper_type === state.paperType)
+    && (!state.size      || (t.item_size || '') === state.size)
+    && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
+    && txMatchesJobCardSearch(t, jobCardL)));
+}
+// ── Green column filters (owner, 2026-11-19): Stock In / Out - Item, Batch, Reason; Offcut - Reason.
+// Tick the values to keep; the list inside has its own search box. Excel rule: a column's list shows the
+// values the OTHER filters leave.
+function smItemText(t) { return [t.paper_type, t.item_size, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).join(' · ') || '(deleted item)'; }
+function smBatchValues(t) {
+  if (t && Array.isArray(t.split_parts) && t.split_parts.length > 1) return [...new Set(t.split_parts.flatMap(x => smBatchValues(x)))];
+  if (t && t.item_id && invIsOffcutItem(t.item_id)) return ['(no batch)'];
+  let alloc = t && t.batch_alloc;
+  if (typeof alloc === 'string') { try { alloc = JSON.parse(alloc); } catch (e) { alloc = null; } }
+  if (Array.isArray(alloc) && alloc.length) return [...new Set(alloc.map(a => String(a.label || invBatchNo(a.n))))];
+  if (t && t.batch) return [String(invBatchShown(t))];
+  return ['(no batch)'];
+}
+const INV_COL_DEFS = {
+  item:   { label: 'Item',   vals: t => [smItemText(t)] },
+  batch:  { label: 'Batch',  vals: t => smBatchValues(t) },
+  reason: { label: 'Reason', vals: t => [String(t.reason || '').trim() || '(none)'] },
+};
+const OC_COL_DEFS = {
+  reason: { label: 'Reason', vals: t => [offcutRowReason(t) || '(none)'] },
+};
+function invColPass(picks, defs, t, skip) {
+  for (const [k, def] of Object.entries(defs)) {
+    if (k === skip) continue;
+    const pk = picks && picks[k];
+    if (pk && pk.length && !def.vals(t).some(v => pk.includes(v))) return false;
+  }
+  return true;
+}
+// kind: 'sm-in' / 'sm-out' / 'oc'
+function invColState(kind) { return kind === 'oc' ? offcutConsumptionState : stockMovementStates[kind.slice(3)]; }
+function invColHeadHtml(kind, field, label) {
+  const pk = (invColState(kind).colPick || {})[field] || [];
+  const on = pk.length > 0;
+  return `${esc(label)} <button type="button" onclick="event.stopPropagation(); invColFilterModal('${kind}', '${field}')" title="Filter ${esc(label)}${on ? ' - ' + pk.length + ' ticked' : ''}" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;font-size:${on ? '16px' : '14px'};line-height:1;vertical-align:middle;color:${on ? '#166534' : '#22c55e'};font-weight:${on ? '900' : '700'};">&#9660;</button>`;
+}
+let _invColCtx = null;
+function invColFilterModal(kind, field) {
+  const defs = kind === 'oc' ? OC_COL_DEFS : INV_COL_DEFS;
+  const def = defs[field]; if (!def) return;
+  const st = invColState(kind);
+  if (!st.colPick) st.colPick = {};
+  const rows = kind === 'oc' ? offcutBaseRows() : smBaseRows(kind.slice(3));
+  const set = new Set();
+  rows.filter(t => invColPass(st.colPick, defs, t, field)).forEach(t => def.vals(t).forEach(v => set.add(v)));
+  const values = [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  _invColCtx = { kind, field, values, shown: [], picked: new Set((st.colPick[field] || []).filter(v => set.has(v))) };
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:440px;">
+    <h2 style="margin:0 0 10px;font-size:16px;">Filter: ${esc(def.label)}</h2>
+    <input type="text" id="invcf-q" autocomplete="off" placeholder="Search ${esc(def.label.toLowerCase())}..." oninput="invColFilterList()" onkeydown="if (event.key === 'Enter') invColFilterApply()" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:14px;">
+    <div style="display:flex;gap:6px;margin-top:8px;">
+      <button type="button" class="btn btn-sm" onclick="invColFilterAll(true)">Tick all shown</button>
+      <button type="button" class="btn btn-sm" onclick="invColFilterAll(false)">Untick all</button>
+    </div>
+    <div id="invcf-list" style="max-height:48vh;overflow-y:auto;margin-top:8px;border:1px solid var(--border);border-radius:8px;padding:4px;"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="invColFilterApply(true)">Clear</button>
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="invcf-apply" onclick="invColFilterApply()">Apply</button>
+    </div>
+  </div>`);
+  invColFilterList();
+  const el = document.getElementById('invcf-q'); if (el) el.focus();
+}
+function invColFilterList() {
+  const ctx = _invColCtx; const list = document.getElementById('invcf-list');
+  if (!ctx || !list) return;
+  const q = String((document.getElementById('invcf-q') || {}).value || '').trim().toLowerCase();
+  ctx.shown = q ? ctx.values.filter(v => searchMatch(v, q)) : ctx.values.slice();
+  list.innerHTML = ctx.shown.length ? ctx.shown.map((v, i) => {
+    const on = ctx.picked.has(v);
+    return `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:5px;cursor:pointer;font-size:13px;${on ? 'background:#bbf7d0;' : ''}"><input type="checkbox" ${on ? 'checked' : ''} onchange="invColFilterTick(${i}, this.checked)"> <span>${esc(v)}</span></label>`;
+  }).join('') : `<div style="padding:8px;color:var(--text2);font-size:12.5px;">${q ? 'Nothing matches.' : 'Nothing in this column.'}</div>`;
+  const ap = document.getElementById('invcf-apply');
+  if (ap) ap.textContent = ctx.picked.size ? `Apply (${ctx.picked.size} ticked)` : 'Apply';
+}
+function invColFilterTick(i, on) {
+  const ctx = _invColCtx; if (!ctx || ctx.shown[i] === undefined) return;
+  if (on) ctx.picked.add(ctx.shown[i]); else ctx.picked.delete(ctx.shown[i]);
+  invColFilterList();
+}
+function invColFilterAll(on) {
+  const ctx = _invColCtx; if (!ctx) return;
+  if (on) ctx.shown.forEach(v => ctx.picked.add(v)); else ctx.picked.clear();
+  invColFilterList();
+}
+function invColFilterApply(clear) {
+  const ctx = _invColCtx; if (!ctx) return;
+  const st = invColState(ctx.kind);
+  if (!st.colPick) st.colPick = {};
+  st.colPick[ctx.field] = clear ? [] : [...ctx.picked];
+  closeModal();
+  if (ctx.kind === 'oc') { renderOffcutConsumption(); return; }
+  const dir = ctx.kind.slice(3);
+  stockMovementSel[dir].clear();
+  const r = periodToDateRange(st.period, st.from, st.to);
+  renderStockMovement(dir, r.from, r.to);
+  if (st.viewMode === 'total') syncStockTotalFromMovement(dir);
+}
 function resetMovementFilters(dir) {
   const state = stockMovementStates[dir];
-  state.paperType = ''; state.size = ''; state.gsm = '';
+  state.paperType = ''; state.size = ''; state.gsm = ''; state.colPick = {};
   stockMovementSel[dir].clear();
   const pt = document.getElementById(`sm-${dir}-paper-type`); if (pt) pt.value = '';
   renderStockMovement(dir, periodToDateRange(state.period, state.from, state.to).from, periodToDateRange(state.period, state.from, state.to).to);
@@ -29401,19 +29518,13 @@ function renderStockMovement(direction, from, to) {
   // subset — no dead "5,000gsm" options).
   refreshMovementFilterOptions(direction);
   // Apply all filters (paper type / size / gsm / job card) client-side before totals.
-  const jobCardL = (state.jobCard || '').toLowerCase();
-  const rawTxs = state.rows.filter(t =>
-       (!state.paperType || t.paper_type === state.paperType)
-    && (!state.size      || (t.item_size || '') === state.size)
-    && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
-    && txMatchesJobCardSearch(t, jobCardL)
-  );
   // Split-issuance grouping: a single Issue Stock click may deduct from
   // 2+ brands at once (same job, same paper group, within-a-second of
   // each other). Collapse those rows into one synthetic row for display
   // — brand becomes "century/ningbo", change is summed. Underlying ids
   // are preserved in group_ids so the bulk checkbox still round-trips.
-  const txs = collapseSplitIssuances(rawTxs);
+  // Then the green column filters (Item / Batch / Reason).
+  const txs = smBaseRows(direction).filter(t => invColPass(state.colPick, INV_COL_DEFS, t));
   // Direction is fixed so there's only one total to show. Net change column
   // would just duplicate that — skip it.
   let total = 0;
@@ -29534,13 +29645,15 @@ function renderStockMovement(direction, from, to) {
          <thead>
            <tr style="background:var(--bg2);">
              <th class="bulk-th"><input type="checkbox" id="sm-${direction}-bulk-all" class="bulk-check" ${allVisSel?'checked':''} onclick="toggleStockMovementAll('${direction}', this.checked)" title="Select all visible"></th>
-             <th ${th}>When</th><th ${th}>Item</th><th ${th}>Change</th><th ${th}>Batch</th><th ${th} title="Right after this entry - top: this brand, below: total of every brand of this paper">Balance After</th><th ${th}>Weight</th><th ${th}>Reason</th>${direction === 'out' ? `<th ${th}>Job</th>` : ''}<th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
+             <th ${th}>When</th><th ${th}>${invColHeadHtml('sm-' + direction, 'item', 'Item')}</th><th ${th}>Change</th><th ${th}>${invColHeadHtml('sm-' + direction, 'batch', 'Batch')}</th><th ${th} title="Right after this entry - top: this brand, below: total of every brand of this paper">Balance After</th><th ${th}>Weight</th><th ${th}>${invColHeadHtml('sm-' + direction, 'reason', 'Reason')}</th>${direction === 'out' ? `<th ${th}>Job</th>` : ''}<th ${th}>Challan No.</th><th ${th}>Notes</th><th ${th}></th>
            </tr>
          </thead>
          <tbody>${rows}</tbody>
        </table>
        </div>`
-    : `<div class="empty">No ${direction === 'in' ? 'stock-in' : 'stock-out'} transactions in this period.</div>`;
+    : (Object.values(state.colPick || {}).some(v => v && v.length)
+      ? `<div class="empty">No rows match the green column filters. <button class="btn btn-sm" onclick="stockMovementStates['${direction}'].colPick = {}; renderStockMovement('${direction}', '${from || ''}', '${to || ''}')">Clear column filters</button></div>`
+      : `<div class="empty">No ${direction === 'in' ? 'stock-in' : 'stock-out'} transactions in this period.</div>`);
   const headChk = document.getElementById(`sm-${direction}-bulk-all`);
   if (headChk) headChk.indeterminate = someVisSel;
   renderStockMovementBulkBar(direction);
@@ -30829,7 +30942,7 @@ function printManualConsumption() {
 // ── Offcut Consumption ───────────────────────────────────────
 // Automatic offcut issues to tracked E-jobs. Kept separate from Manual
 // Consumption (offline job cards) and from normal fresh-stock movement.
-const offcutConsumptionState = { period: 'all', from: '', to: '', paperType: '', jobCard: '', rows: [], selected: new Set() };
+const offcutConsumptionState = { period: 'all', from: '', to: '', paperType: '', jobCard: '', paperQ: '', colPick: {}, rows: [], selected: new Set() };
 
 function openOffcutConsumptionPane() {
   const state = offcutConsumptionState;
@@ -30846,6 +30959,10 @@ function openOffcutConsumptionPane() {
       <div>
         <div class="dash-flbl">Job Card No.</div>
         <input class="filter" type="text" id="oc-jobcard" value="${esc(state.jobCard || '')}" placeholder="E-254 or manual no." title="Matches an E-job (e.g. E-254 or 254) or a Manual Job Card reference" oninput="setOffcutConsumptionJobCard(this.value)" style="min-width:150px;">
+      </div>
+      <div>
+        <div class="dash-flbl">Paper</div>
+        <input class="filter" type="search" id="oc-paper-q" value="${esc(state.paperQ || '')}" placeholder="e.g. art 23x36 80 nivea" title="Search the paper - type, size, GSM or brand; every word must match" oninput="setOffcutPaperSearch(this.value)" style="min-width:200px;">
       </div>
       <div style="margin-left:auto;display:flex;gap:8px;">
         <button class="btn btn-sm" onclick="exportOffcutConsumption()">&#128202; Excel</button>
@@ -30868,7 +30985,7 @@ function openOffcutConsumptionPane() {
 }
 function resetOcFilters() {
   const st = offcutConsumptionState;
-  st.paperType = ''; st.jobCard = '';
+  st.paperType = ''; st.jobCard = ''; st.paperQ = ''; st.colPick = {};
   openOffcutConsumptionPane();   // rebuilds the dropdowns blank
 }
 function setOffcutConsumptionPeriod(v) {
@@ -30926,12 +31043,30 @@ function offcutRowJobText(t) {
 function offcutRowReason(t) {
   return OFFCUT_OUT_REASON_LABELS[t && t.reason] || (t && t.reason) || '';
 }
-function offcutConsumptionRows() {
-  const jobCardL = (offcutConsumptionState.jobCard || '').toLowerCase();
-  return (offcutConsumptionState.rows || [])
-    .filter(t => !offcutConsumptionState.paperType || t.paper_type === offcutConsumptionState.paperType)
+// Paper search (owner, 2026-11-19): every word typed must be in the paper's type / size / gsm / brand.
+function offcutPaperMatch(t, q) {
+  const words = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return true;
+  const hay = [t.paper_type, t.item_size, t.item_gsm, t.item_gsm && (t.item_gsm + 'gsm'), t.item_brand].filter(Boolean).join(' ').toLowerCase();
+  return words.every(w => hay.includes(w));
+}
+function offcutBaseRows() {
+  const st = offcutConsumptionState;
+  const jobCardL = (st.jobCard || '').toLowerCase();
+  return (st.rows || [])
+    .filter(t => !st.paperType || t.paper_type === st.paperType)
     .filter(t => txMatchesJobCardSearch(t, jobCardL))
+    .filter(t => offcutPaperMatch(t, st.paperQ))
     .sort((a,b) => new Date(b.created_at)-new Date(a.created_at));
+}
+function offcutConsumptionRows() {
+  return offcutBaseRows().filter(t => invColPass(offcutConsumptionState.colPick, OC_COL_DEFS, t));
+}
+let _ocPaperTimer = null;
+function setOffcutPaperSearch(v) {
+  offcutConsumptionState.paperQ = String(v || '');
+  clearTimeout(_ocPaperTimer);
+  _ocPaperTimer = setTimeout(renderOffcutConsumption, 200);
 }
 // Same Reverse as Stock Out; greyed at View. Not on the old 'job-auto-offcut' rows:
 // moving such a job back to CTP refunds them by itself, so it would refund twice.
@@ -30955,13 +31090,18 @@ function renderOffcutConsumption() {
   const allSelected = visibleIds.length > 0 && visibleIds.every(id => offcutConsumptionState.selected.has(id));
   const someSelected = visibleIds.some(id => offcutConsumptionState.selected.has(id));
   renderOffcutConsumptionBulkBar(rows, canDelete);
-  if (!rows.length) { el.innerHTML = '<div class="empty">No offcut issuance in this period.</div>'; return; }
+  if (!rows.length) {
+    const colOn = Object.values(offcutConsumptionState.colPick || {}).some(v => v && v.length);
+    el.innerHTML = colOn ? '<div class="empty">No rows match the Reason filter. <button class="btn btn-sm" onclick="offcutConsumptionState.colPick = {}; renderOffcutConsumption()">Clear it</button></div>'
+      : (offcutConsumptionState.paperQ.trim() ? '<div class="empty">No paper matches the search.</div>' : '<div class="empty">No offcut issuance in this period.</div>');
+    return;
+  }
   const th = 'style="text-align:left;padding:8px;color:var(--text);font-weight:700;"';
   el.innerHTML = `<div class="report-scroll-wrap">
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
       <thead><tr style="background:var(--bg2);">
         ${canDelete ? `<th style="width:34px;padding:8px;text-align:center;"><input type="checkbox" ${allSelected?'checked':''} ${someSelected&&!allSelected?'data-indeterminate="1"':''} onchange="toggleAllOffcutConsumption(this.checked)"></th>` : ''}
-        <th ${th}>When</th><th ${th}>E-Job No.</th><th ${th}>Reason</th><th ${th}>Paper Type</th>
+        <th ${th}>When</th><th ${th}>E-Job No.</th><th ${th}>${invColHeadHtml('oc', 'reason', 'Reason')}</th><th ${th}>Paper Type</th>
         <th ${th}>Size</th><th ${th}>GSM</th><th ${th}>Brand</th>
         <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Consumed</th>
         <th ${th}>Issued By</th>
@@ -31155,14 +31295,8 @@ function splitBalancesText(t, ps) {
 function stockMovementPrintRows(direction) {
   const state = stockMovementStates[direction];
   const sel = stockMovementSel[direction];
-  const jobCardL = (state.jobCard || '').toLowerCase();
-  const filtered = sel && sel.size ? state.rows.filter(t => sel.has(t.id)) : state.rows.filter(t =>
-       (!state.paperType || t.paper_type === state.paperType)
-    && (!state.size      || (t.item_size || '') === state.size)
-    && (!state.gsm       || String(t.item_gsm || '') === String(state.gsm))
-    && txMatchesJobCardSearch(t, jobCardL)
-  );
-  return collapseSplitIssuances(filtered);
+  if (sel && sel.size) return collapseSplitIssuances(state.rows.filter(t => sel.has(t.id)));
+  return smBaseRows(direction).filter(t => invColPass(state.colPick, INV_COL_DEFS, t));
 }
 
 // Print using the same A4 portrait layout as the old Stock Report — direction
