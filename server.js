@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-19-machine-absent';   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-19-qa-waiting-ignore';   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -499,7 +499,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -686,6 +686,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_cost_report:                 { label: 'Cost Report — view every job\'s cost', levels: {} },
   rpt_line_clearance:              { label: 'Line Clearance — QA\'s line clearance log for every machine (previous job, new job, check points), with Print', levels: { admin: 'view', ceo: 'view', production_manager: 'view' } },
   rpt_line_clearance_edit:         { label: 'Line Clearance — green dot: open an entry and correct it', levels: { admin: 'yes' } },
+  // QA station (owner, 2026-11-19): take a job off "Waiting for line clearance" without an entry. Needs a QA PIN too.
+  qa_btn_waiting_ignore:           { label: 'Waiting for line clearance — Ignore a job (QA at the Station)', levels: { admin: 'yes', operator: 'yes' } },
   rpt_days_off:                    { label: 'Days off — set the days with no work time (holidays); Sundays are always off', levels: { admin: 'yes' } },
   rpt_line_clearance_delete:       { label: 'Line Clearance — delete an entry', levels: { admin: 'yes' } },
   rpt_cost_settings:               { label: 'Cost Report — Cost Settings and each job\'s board rate (see and change the rates)', levels: {} },
@@ -1102,6 +1104,11 @@ async function initDb() {
     await sql`CREATE TABLE IF NOT EXISTS machine_absent (
       day DATE NOT NULL, machine TEXT NOT NULL, person TEXT NOT NULL, by_name TEXT, at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (day, machine, person))`;
+    // QA ignored a job on "Waiting for line clearance" (owner, 2026-11-19): up to that finish time - the same job
+    // coming off the same machine again later shows again.
+    await sql`CREATE TABLE IF NOT EXISTS qa_waiting_ignore (
+      machine TEXT NOT NULL, job_id INTEGER NOT NULL, upto TEXT NOT NULL, by_name TEXT, at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (machine, job_id))`;
     await sql`CREATE INDEX IF NOT EXISTS stock_groups_product_idx ON stock_groups(product) WHERE deleted_at IS NULL`;
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS group_job_id INTEGER REFERENCES stock_groups(id) ON DELETE SET NULL`;
     await sql`CREATE INDEX IF NOT EXISTS jobs_group_job_id_idx ON jobs(group_job_id) WHERE group_job_id IS NOT NULL`;
@@ -8563,6 +8570,9 @@ app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
       const m = byM.get(String(l.machine || '').trim().toLowerCase()) || byCode.get(String(l.machine_code || '').trim().toLowerCase());
       cleared.add(String(m ? m.name : l.machine || '').trim().toLowerCase() + '|' + lcJobId(l.prev_job));
     }
+    // Ignored by QA (owner, 2026-11-19): off the list up to the finish time it had then.
+    const ignored = new Map();
+    try { for (const g of await sql`SELECT machine, job_id, upto FROM qa_waiting_ignore`) ignored.set(String(g.machine).trim().toLowerCase() + '|' + g.job_id, String(g.upto)); } catch (e) { /* table not made yet */ }
     const latest = new Map();
     for (const j of jobs) for (const e of (Array.isArray(j.log) ? j.log : [])) {
       if (!/^Moved from /.test(String((e && e.notes) || ''))) continue;   // the job finished on that machine
@@ -8575,10 +8585,32 @@ app.post('/api/station/qa-waiting', requireStationUser, async (req, res) => {
       const key = String(mach.name).trim().toLowerCase() + '|' + j.id;
       if (cleared.has(key)) continue;
       const at = `${date}T${t[4]}:${t[5]}`;
+      if (ignored.has(key) && at <= ignored.get(key)) continue;
       const prev = latest.get(key);
       if (!prev || prev.at < at) latest.set(key, { job_id: j.id, job_name: j.name || '', company: j.client || '', machine: mach.name, machine_code: mach.machine_code || '', operator: m[1].trim(), stage: m[3].trim(), at });
     }
     res.json([...latest.values()].sort((a, b) => b.at.localeCompare(a.at)));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Ignore a job on "Waiting for line clearance" (owner, 2026-11-19): a QA PIN whose QA column has the row on Yes.
+app.post('/api/station/qa-waiting/ignore', requireStationUser, async (req, res) => {
+  try {
+    if (!canProcessStation(req.user)) return res.status(403).json({ error: 'View-only: your role cannot save at the station.' });
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyQaPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    await ensureRolePermsFresh();
+    if ((operatorKindPerms('qa') || {}).qa_btn_waiting_ignore !== 'yes') return res.status(403).json({ error: 'Ignore is off for QA in the Access Register.' });
+    const machine = lcText(req.body.machine, 80), jobId = parseInt(req.body.job_id, 10);
+    const upto = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(req.body.at || '')) ? String(req.body.at) : businessNowWc();
+    if (!machine || !Number.isFinite(jobId)) return res.status(400).json({ error: 'Machine and job are needed' });
+    const who = lcText(req.body.person_name, 60) || v.operator.name;
+    await sql`INSERT INTO qa_waiting_ignore (machine, job_id, upto, by_name) VALUES (${machine}, ${jobId}, ${upto}, ${who})
+              ON CONFLICT (machine, job_id) DO UPDATE SET upto = EXCLUDED.upto, by_name = EXCLUDED.by_name, at = NOW()`;
+    await logAudit(sql, req, { action: 'station.qa_waiting_ignore', entityType: 'job', entityId: jobId,
+      summary: `Job E-${jobId} on ${machine}: ignored on "Waiting for line clearance" by ${who} (QA)` });
+    res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.post('/api/station/machine-ops', requireStationUser, async (req, res) => {
