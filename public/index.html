@@ -4241,7 +4241,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
           <span class="rsb-icon" style="color:#A32D2D;">&#9997;</span> Manual Job Card Consumption
         </button>
         <button class="rsb-item" data-rpt="rpt_offcut_consumption" data-rt="offcut-consumption" onclick="setReportsTab('offcut-consumption')">
-          <span class="rsb-icon" style="color:#0891b2;">&#9986;</span> Offcut Consumption
+          <span class="rsb-icon" style="color:#0891b2;">&#9986;</span> Offcut
         </button>
       </aside>
       <main class="reports-content">
@@ -4251,6 +4251,13 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
         <div id="rt-inventory-report" class="rt-pane" style="display:none;"></div>
         <div id="rt-manual-consumption" class="rt-pane" style="display:none;"></div>
         <div id="rt-offcut-consumption" class="rt-pane" style="display:none;"></div>
+        <style>
+          /* Offcut report Stock Out / Stock In toggle (owner, 2026-11-20) */
+          .oc-dir { display: inline-flex; border: 1px solid #0891b2; border-radius: 9px; overflow: hidden; margin-bottom: 12px; }
+          .oc-dir button { border: 0; background: #fff; color: #0e7490; font: inherit; font-size: 13px; font-weight: 700; padding: 6px 16px; cursor: pointer; }
+          .oc-dir button + button { border-left: 1px solid #0891b2; }
+          .oc-dir button.is-on { background: #0891b2; color: #fff; }
+        </style>
       </main>
     </div>
   </div>
@@ -12966,12 +12973,12 @@ function smOffcutText(direction, t) {
 function smOffcutNoteHtml(direction, t) {
   const text = smOffcutText(direction, t);
   if (!text) return '';
-  return `<div><span class="sm-offcut-note" onclick="event.stopPropagation(); smOpenOffcut(${t.job_id})" title="Job E-${t.job_id} also used offcut paper - click to open that issuance in the Offcut Consumption report">&#9986; ${esc(text)}</span></div>`;
+  return `<div><span class="sm-offcut-note" onclick="event.stopPropagation(); smOpenOffcut(${t.job_id})" title="Job E-${t.job_id} also used offcut paper - click to open that issuance in the Offcut report">&#9986; ${esc(text)}</span></div>`;
 }
 function smOpenOffcut(jobId) {
   const o = smOffcutForJob(jobId);
   if (!o) return;
-  if (!hasPerm('rpt_offcut_consumption', 'view')) { notify('The Offcut Consumption report is not available for your role.'); return; }
+  if (!hasPerm('rpt_offcut_consumption', 'view')) { notify('The Offcut report is not available for your role.'); return; }
   // Stock Out may itself be a jump (e.g. from a job's History): keep that
   // one as the parent instead of clearing it, so Back returns to it intact.
   const parent = (ssReturn && ssReturn.direction === 'out') ? ssReturn : null;
@@ -12979,12 +12986,12 @@ function smOpenOffcut(jobId) {
   const st = offcutConsumptionState;
   ssReturn = {
     target: 'offcut', barId: 'oc-return-bar', pane: 'offcut-consumption',
-    restore: { period: st.period, from: st.from, to: st.to, paperType: st.paperType, jobCard: st.jobCard },
+    restore: { period: st.period, from: st.from, to: st.to, paperType: st.paperType, jobCard: st.jobCard, dir: st.dir || 'out' },
     label: `Job E-${jobId} · offcut issued`,
     rangeText: 'all of this job\'s offcut issuance',
     scrollY: window.scrollY || 0, backLabel: 'Stock Out', backToStockOut: true, parent,
   };
-  Object.assign(st, { period: 'all', from: '', to: '', paperType: '', jobCard: 'e-' + jobId });
+  Object.assign(st, { period: 'all', from: '', to: '', paperType: '', jobCard: 'e-' + jobId, dir: 'out' });
   openReportsGroup('stocks-group', 'offcut-consumption');
   renderSsReturnBars();
   window.scrollTo(0, 0);
@@ -13000,7 +13007,7 @@ function smOpenOffcut(jobId) {
   }, 150);
 }
 function jhOpenOffcutIssuance(jobId, a) {
-  if (!hasPerm('rpt_offcut_consumption', 'view')) { notify('The Offcut Consumption report is not available for your role.'); return; }
+  if (!hasPerm('rpt_offcut_consumption', 'view')) { notify('The Offcut report is not available for your role.'); return; }
   const txIds = (a.metadata && Array.isArray(a.metadata.tx_ids)) ? a.metadata.tx_ids : [];
   const auditDay = localDateISO(new Date(a.created_at));
   const prevMode = mode;
@@ -13010,12 +13017,12 @@ function jhOpenOffcutIssuance(jobId, a) {
   const st = offcutConsumptionState;
   ssReturn = {
     target: 'offcut', barId: 'oc-return-bar', pane: 'offcut-consumption',
-    restore: { period: st.period, from: st.from, to: st.to, paperType: st.paperType, jobCard: st.jobCard },
+    restore: { period: st.period, from: st.from, to: st.to, paperType: st.paperType, jobCard: st.jobCard, dir: st.dir || 'out' },
     label: `Job E-${jobId} · offcut issued ${fmtDMY(auditDay)}`,
     rangeText: 'all of this job\'s offcut issuance',
     scrollY: 0, backLabel: `Job E-${jobId} History`, historyJobId: jobId, prevMode,
   };
-  Object.assign(st, { period: 'all', from: '', to: '', paperType: '', jobCard: 'e-' + jobId });
+  Object.assign(st, { period: 'all', from: '', to: '', paperType: '', jobCard: 'e-' + jobId, dir: 'out' });
   openReportsGroup('stocks-group', 'offcut-consumption');
   renderSsReturnBars();
   window.scrollTo(0, 0);
@@ -16613,7 +16620,7 @@ function renderAuditFeed(rows, opts) {
     // New entries already name the paper in their text; older ones get it here.
     const showPaper = papers.length && !(a.metadata && Array.isArray(a.metadata.items) && a.metadata.items.length);
     return `${showPaper ? `<div style="font-size:12px;color:var(--text);margin-top:2px;">Paper: <b>${esc(papers.join(' + '))}</b></div>` : ''}${jhToOffcutBtns(jobId, a, job)}
-      <div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open in the ${offcut ? 'Offcut Consumption' : 'Stock Out'} report &rarr;</div>`;
+      <div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open in the ${offcut ? 'Offcut' : 'Stock Out'} report &rarr;</div>`;
   };
   const groups = [];
   let curKey = null, curArr = null;
@@ -30883,7 +30890,7 @@ async function loadManualConsumption() {
 // size + gsm) — brands merged, packet size varies per paper type so
 // different papers can't be summed into one physical unit anyway.
 // The sign on a Manual Consumption row taken from offcut paper.
-const MC_OFFCUT_BADGE = ' <span title="Taken from offcut paper - also in the Offcut Consumption report" style="display:inline-block;background:#cffafe;color:#155e75;border:1px solid #67e8f9;font-size:9.5px;font-weight:800;letter-spacing:0.04em;padding:0 6px;border-radius:999px;vertical-align:middle;">&#9986; OFFCUT</span>';
+const MC_OFFCUT_BADGE = ' <span title="Taken from offcut paper - also in the Offcut report" style="display:inline-block;background:#cffafe;color:#155e75;border:1px solid #67e8f9;font-size:9.5px;font-weight:800;letter-spacing:0.04em;padding:0 6px;border-radius:999px;vertical-align:middle;">&#9986; OFFCUT</span>';
 function computeManualConsumptionRows() {
   const state = manualConsumptionState;
   const { from, to } = periodToDateRange(state.period, state.from, state.to);
@@ -31221,7 +31228,16 @@ function printManualConsumption() {
 // ── Offcut Consumption ───────────────────────────────────────
 // Automatic offcut issues to tracked E-jobs. Kept separate from Manual
 // Consumption (offline job cards) and from normal fresh-stock movement.
-const offcutConsumptionState = { period: 'all', from: '', to: '', paperType: '', jobCard: '', paperQ: '', colPick: {}, rows: [], selected: new Set() };
+const offcutConsumptionState = { dir: 'out', period: 'all', from: '', to: '', paperType: '', jobCard: '', paperQ: '', colPick: {}, rows: [], selected: new Set() };
+// Stock Out / Stock In toggle (owner, 2026-11-20).
+function setOffcutDir(d) {
+  const st = offcutConsumptionState;
+  if (st.dir === d) return;
+  st.dir = d; st.rows = []; st.selected.clear(); st.colPick = {};
+  document.querySelectorAll('#oc-dir button').forEach(b => b.classList.toggle('is-on', b.dataset.dir === d));
+  const el = document.getElementById('oc-content'); if (el) el.innerHTML = 'Loading…';
+  loadOffcutConsumption();
+}
 
 function openOffcutConsumptionPane() {
   const state = offcutConsumptionState;
@@ -31232,6 +31248,10 @@ function openOffcutConsumptionPane() {
   const paperOpts = paperTypeList().map(p => `<option value="${esc(p)}"${state.paperType===p?' selected':''}>${esc(p)}</option>`).join('');
   pane.innerHTML = `
     <div id="oc-return-bar" style="display:none;"></div>
+    <div id="oc-dir" class="oc-dir">
+      <button type="button" data-dir="out" class="${state.dir !== 'in' ? 'is-on' : ''}" onclick="setOffcutDir('out')">&#8593; Stock Out</button>
+      <button type="button" data-dir="in" class="${state.dir === 'in' ? 'is-on' : ''}" onclick="setOffcutDir('in')">&#8595; Stock In</button>
+    </div>
     <div style="margin-bottom:14px;display:flex;flex-direction:column;gap:10px;">
     <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
       <div id="oc-summary" style="display:flex;gap:10px;flex-wrap:wrap;"></div>
@@ -31289,7 +31309,8 @@ function setOffcutConsumptionJobCard(v) {
 async function loadOffcutConsumption() {
   const s = offcutConsumptionState;
   const {from,to} = periodToDateRange(s.period, s.from, s.to);
-  const qs = new URLSearchParams({ direction:'out', include_offcut_auto:'1' });
+  const dirIn = s.dir === 'in';
+  const qs = new URLSearchParams(dirIn ? { direction: 'in', include_offcut_in: '1' } : { direction: 'out', include_offcut_auto: '1' });
   if (from) qs.set('from', from); if (to) qs.set('to', to);
   try {
     const rows = await api('GET', `/api/inventory/transactions?${qs.toString()}`);
@@ -31303,7 +31324,7 @@ async function loadOffcutConsumption() {
     // Every stock-out from an offcut item - job issues AND the other
     // reasons (Sold / Damaged / Adjustment / Manual Job Card), which were
     // silently left out before. The Reason column tells them apart.
-    s.rows = rows.filter(t => t.item_is_offcut && (+t.change || 0) < 0);
+    s.rows = rows.filter(t => t.item_is_offcut && (dirIn ? (+t.change || 0) > 0 : (+t.change || 0) < 0));
     const liveIds = new Set(s.rows.map(t => t.id));
     for (const id of [...s.selected]) if (!liveIds.has(id)) s.selected.delete(id);
     renderOffcutConsumption();
@@ -31313,6 +31334,9 @@ async function loadOffcutConsumption() {
 const OFFCUT_OUT_REASON_LABELS = {
   'job-consumed': 'Job issue', 'job-auto-offcut': 'Auto (CTP)', 'manual-job-card': 'Manual Job Card',
   'job-edit-apply': 'Job edit', sold: 'Sold', damaged: 'Damaged', adjustment: 'Manual adjustment', proofing: 'Proofing',
+  // Stock In side
+  'opening-balance': 'Opening balance', opening: 'Opening balance', delivery: 'Delivery', 'left-over': 'Left-over', 'job-offcut': 'From a job',
+  'offcut-transfer-in': 'Offcut from a paper', 'job-auto-offcut-refund': 'Auto refund (CTP)', return: 'Return', 'manual-add': 'Added',
 };
 function offcutRowJobText(t) {
   if (t && t.job_id) return 'E-' + t.job_id;
@@ -31350,20 +31374,36 @@ function setOffcutPaperSearch(v) {
 // Same Reverse as Stock Out; greyed at View. Not on the old 'job-auto-offcut' rows:
 // moving such a job back to CTP refunds them by itself, so it would refund twice.
 function offcutRowReverseBtn(t) {
-  if (t.reason === 'job-auto-offcut') return '';
+  if (t.reason === 'job-auto-offcut' || t.reason === 'job-auto-offcut-refund') return '';
+  if (t.reason === 'offcut-transfer-in' && t.paired_tx_id) return '';
+  if (+t.change > 0) {
+    if (!canReverseTx(t) && permLevel('inv_btn_reverse') !== 'view') return '';
+    return `<button class="btn btn-sm" data-acc="inv_btn_reverse" style="background:#DC2626;color:#fff;border-color:#DC2626;font-weight:600;padding:3px 8px;font-size:11px;white-space:nowrap;" onclick="event.stopPropagation(); reverseStockTx(${t.id}, ${t.item_id || 'null'})" title="Undo this stock-in entry — adds a correction that cancels it out">&#8634; Reverse</button>`;
+  }
   if (!canReverseTx(t) && permLevel('inv_btn_reverse') !== 'view') return '';
   return `<button class="btn btn-sm" data-acc="inv_btn_reverse" style="background:#DC2626;color:#fff;border-color:#DC2626;font-weight:600;padding:3px 8px;font-size:11px;white-space:nowrap;" onclick="event.stopPropagation(); reverseStockTx(${t.id}, ${t.item_id || 'null'})" title="Refund this stock-out entry — adds a correction that cancels it out">&#8634; Reverse</button>`;
 }
+// Date of an Offcut report row - change it and it is saved (same as the Stock In / Stock Out reports).
+async function saveOcTxDate(ids, value) {
+  if (!value) { renderOffcutConsumption(); return; }
+  try {
+    const r = await api('POST', '/api/inventory/tx-ref', { ids, field: 'date', value });
+    if (!(r && r.unchanged)) notify('Date saved');
+  } catch (e) { notify('Error: ' + e.message); }
+  loadOffcutConsumption();
+}
 function renderOffcutConsumption() {
   const rows = offcutConsumptionRows();
-  const canDelete = seeBtn('rpt_btn_delete_consumption');   // its own row (owner, 2026-10-27)
+  const isIn = offcutConsumptionState.dir === 'in';
+  const canDate = isSuperAdmin() || hasPerm(isIn ? 'inv_btn_stock_in' : 'inv_btn_stock_out');
+  const canDelete = !isIn && seeBtn('rpt_btn_delete_consumption');   // its own row (owner, 2026-10-27)
   const hasActions = canDelete || rows.some(t => offcutRowReverseBtn(t) || canEditPaperTx(t));
   const totalSheets = rows.reduce((a,t)=>a+Math.abs(+t.change||0),0);
   const totalUnits = rows.reduce((a,t)=>a+(Math.abs(+t.change||0)/packetSize(t.paper_type||'')),0);
   const fmt = n => Number.isInteger(n) ? n.toLocaleString() : (+n.toFixed(2)).toLocaleString();
-  const color = '#A32D2D';
+  const color = isIn ? '#166534' : '#A32D2D';
   const sum = document.getElementById('oc-summary');
-  if (sum) sum.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:5px 12px;min-width:130px;"><div style="font-size:9.5px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Total Offcut Consumption</div><div style="font-size:16px;font-weight:600;color:${color};line-height:1.15;">${fmt(totalUnits)} packets / reams</div><div style="font-size:10.5px;color:var(--text2);">${totalSheets.toLocaleString()} sheets</div></div><div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:5px 12px;min-width:110px;"><div style="font-size:9.5px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Transactions</div><div style="font-size:16px;font-weight:600;line-height:1.15;">${rows.length}</div></div>`;
+  if (sum) sum.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:5px 12px;min-width:130px;"><div style="font-size:9.5px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Total Offcut ${isIn ? 'Stock In' : 'Stock Out'}</div><div style="font-size:16px;font-weight:600;color:${color};line-height:1.15;">${fmt(totalUnits)} packets / reams</div><div style="font-size:10.5px;color:var(--text2);">${totalSheets.toLocaleString()} sheets</div></div><div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:5px 12px;min-width:110px;"><div style="font-size:9.5px;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Transactions</div><div style="font-size:16px;font-weight:600;line-height:1.15;">${rows.length}</div></div>`;
   const el = document.getElementById('oc-content'); if (!el) return;
   const visibleIds = rows.map(t => t.id);
   const allSelected = visibleIds.length > 0 && visibleIds.every(id => offcutConsumptionState.selected.has(id));
@@ -31372,7 +31412,7 @@ function renderOffcutConsumption() {
   if (!rows.length) {
     const colOn = Object.values(offcutConsumptionState.colPick || {}).some(v => v && v.length);
     el.innerHTML = colOn ? '<div class="empty">No rows match the Reason filter. <button class="btn btn-sm" onclick="offcutConsumptionState.colPick = {}; renderOffcutConsumption()">Clear it</button></div>'
-      : (offcutConsumptionState.paperQ.trim() ? '<div class="empty">No paper matches the search.</div>' : '<div class="empty">No offcut issuance in this period.</div>');
+      : (offcutConsumptionState.paperQ.trim() ? '<div class="empty">No paper matches the search.</div>' : `<div class="empty">No offcut ${isIn ? 'stock in' : 'issuance'} in this period.</div>`);
     return;
   }
   const th = 'style="text-align:left;padding:8px;color:var(--text);font-weight:700;"';
@@ -31382,24 +31422,28 @@ function renderOffcutConsumption() {
         ${canDelete ? `<th style="width:34px;padding:8px;text-align:center;"><input type="checkbox" ${allSelected?'checked':''} ${someSelected&&!allSelected?'data-indeterminate="1"':''} onchange="toggleAllOffcutConsumption(this.checked)"></th>` : ''}
         <th ${th}>When</th><th ${th}>E-Job No.</th><th ${th}>${invColHeadHtml('oc', 'reason', 'Reason')}</th><th ${th}>Paper Type</th>
         <th ${th}>Size</th><th ${th}>GSM</th><th ${th}>Brand</th>
-        <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">Consumed</th>
-        <th ${th}>Issued By</th>
+        <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">${isIn ? 'Added' : 'Issued'}</th>
+        ${isIn ? `<th ${th}>Challan</th><th ${th}>Notes</th>` : ''}
+        <th ${th}>${isIn ? 'Entered By' : 'Issued By'}</th>
         ${hasActions ? '<th style="width:70px;padding:8px;"></th>' : ''}
       </tr></thead>
       <tbody>${rows.map(t => {
         const ps = packetSize(t.paper_type || '');
         const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
-        const rowClick = t.item_id ? ` onclick="openInvHistoryAt(${t.item_id}, ${t.id})" title="Open this issuance in the item's History"` : '';
+        const rowClick = t.item_id ? ` onclick="openInvHistoryAt(${t.item_id}, ${t.id})" title="Open this entry in the item's History"` : '';
         return `<tr data-oc-row="${t.id}" class="row-hover-red${t.item_id ? ' cv-summary-row' : ''}" style="border-bottom:1px solid var(--border);"${rowClick}>
           ${canDelete ? `<td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${offcutConsumptionState.selected.has(t.id)?'checked':''} onclick="event.stopPropagation()" onchange="toggleOffcutConsumptionRow(${t.id}, this.checked)"></td>` : ''}
-          <td style="padding:6px 8px;white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}</td>
+          <td style="padding:6px 8px;white-space:nowrap;">${canDate
+            ? `<input type="date" value="${localDateISO(new Date(t.created_at))}" max="${localDateISO()}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveOcTxDate([${t.id}], this.value)" title="Date - change it and it is saved; the change is logged in this paper's History" class="sm-ref-input" style="width:118px;"><div style="font-size:11px;color:var(--text2);margin-top:2px;">${esc(fmtTime12(t.created_at))}</div>`
+            : esc(fmtDMYT12(t.created_at))}${lateEntryTagHtml(t)}</td>
           <td style="padding:6px 8px;font-weight:700;white-space:nowrap;">${esc(offcutRowJobText(t))}</td>
-          <td style="padding:6px 8px;white-space:nowrap;${t.job_id ? '' : 'color:#9a3412;font-weight:600;'}">${esc(offcutRowReason(t))}</td>
+          <td style="padding:6px 8px;white-space:nowrap;${t.job_id || isIn ? '' : 'color:#9a3412;font-weight:600;'}">${esc(offcutRowReason(t))}</td>
           <td style="padding:6px 8px;">${esc(t.paper_type || '—')}</td>
           <td style="padding:6px 8px;">${esc(t.item_size || '—')}</td>
           <td style="padding:6px 8px;">${esc(t.item_gsm || '—')}</td>
           <td style="padding:6px 8px;">${esc(t.item_brand || '—')}</td>
           <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};white-space:nowrap;">${fmt(Math.abs(t.change)/ps)} ${unit}<br><span style="font-size:11px;color:var(--text2);font-weight:500;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
+          ${isIn ? `<td style="padding:6px 8px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td><td style="padding:6px 8px;max-width:220px;">${esc(txNotesShown(t))}</td>` : ''}
           <td style="padding:6px 8px;white-space:nowrap;"${t.actor_name ? ` title="${esc(txByTitle(t))}"` : ''}>${esc(txByName(t) || '—')}</td>
           ${hasActions ? `<td style="padding:6px 8px;text-align:right;white-space:nowrap;">${offcutRowReverseBtn(t)} ${editPaperBtnHtml(t, [t.id], t.item_id)}${canDelete ? ` <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteOffcutConsumptionRows([${t.id}])">Delete</button>` : ''}</td>` : ''}
         </tr>`;
@@ -31458,7 +31502,7 @@ async function deleteOffcutConsumptionRows(ids, skipConfirm = false) {
   if (!cleanIds.length) return;
   if (!skipConfirm) {
     const ok = await confirmDialog({
-      title: 'Delete this Offcut Consumption row?',
+      title: 'Delete this Offcut row?',
       message: 'It moves to the Archive (Archive → Stock Entries), where an admin can restore it, and leaves this report. The stock balance does not change.',
       confirmText: 'Delete', danger: true,
     });
@@ -31479,7 +31523,7 @@ async function deleteSelectedOffcutConsumption() {
   if (!ids.length) return;
   const ok = await confirmDialog({
     title: `Delete ${ids.length} selected transaction${ids.length===1?'':'s'}?`,
-    message: 'They will be removed from Offcut Consumption and inventory history. Current physical stock balances will not change.',
+    message: 'They will be removed from the Offcut report and inventory history. Current physical stock balances will not change.',
     confirmText: 'Delete Selected', danger: true,
   });
   if (!ok) return;
@@ -31488,17 +31532,18 @@ async function deleteSelectedOffcutConsumption() {
 async function exportOffcutConsumption() {
   try { await ensureXlsx(); } catch(e) { notify(e.message); return; }
   const rows=offcutConsumptionRows(); if(!rows.length){notify('Nothing to export.');return;}
-  const header=['When','E-Job No.','Reason','Paper Type','Size','GSM','Brand','Consumed Sheets','Consumed Packets/Reams','Issued By'];
+  const isIn = offcutConsumptionState.dir === 'in';
+  const header=['When','E-Job No.','Reason','Paper Type','Size','GSM','Brand',isIn?'Added Sheets':'Issued Sheets',isIn?'Added Packets/Reams':'Issued Packets/Reams',isIn?'Entered By':'Issued By'];
   const aoa=reportExcelAoa(header);
   rows.forEach(t=>aoa.push([fmtDMYT12(t.created_at),offcutRowJobText(t),offcutRowReason(t),t.paper_type||'',t.item_size||'',t.item_gsm||'',t.item_brand||'',Math.abs(t.change),+(Math.abs(t.change)/packetSize(t.paper_type||'')).toFixed(2),txByName(t)]));
   const ws=XLSX.utils.aoa_to_sheet(aoa);
   applyReportExcelHeading(ws, header, {
-    title: 'OFFCUT CONSUMPTION REPORT',
+    title: isIn ? 'OFFCUT REPORT - STOCK IN' : 'OFFCUT REPORT - STOCK OUT',
     scope: offcutConsumptionScope(),
     dateText: offcutConsumptionDateText(),
   });
   applyReportExcelCols(ws, header, aoa);
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Offcut Consumption');XLSX.writeFile(wb,`supreme-art-offcut-consumption-${localDateISO()}.xlsx`);
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,isIn?'Offcut Stock In':'Offcut Stock Out');XLSX.writeFile(wb,`supreme-art-offcut-${isIn?'stock-in':'stock-out'}-${localDateISO()}.xlsx`);
   notify('Exported!');
 }
 // Scope / date lines shared by this report's print and Excel headings.
@@ -31512,18 +31557,19 @@ function offcutConsumptionDateText() {
   return `Date: ${fmtDMY(from) || '(any)'} to ${fmtDMY(to) || '(any)'}`;
 }
 function printOffcutConsumption() {
+  const isIn = offcutConsumptionState.dir === 'in';
   const rows=offcutConsumptionRows(); const td='style="border:1px solid #000;padding:4px;"';
   const body=rows.map(t=>`<tr><td ${td}>${esc(fmtDMYT12(t.created_at))}</td><td ${td}>${esc(offcutRowJobText(t))}</td><td ${td}>${esc(offcutRowReason(t))}</td><td ${td}>${esc(t.paper_type||'')}</td><td ${td}>${esc(t.item_size||'')}</td><td ${td}>${esc(t.item_gsm||'')}</td><td ${td}>${esc(t.item_brand||'')}</td><td ${td}>${Math.abs(t.change).toLocaleString()} sheets</td></tr>`).join('');
   const area=document.getElementById('print-area');area.innerHTML=`
     <style>@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }</style>
     <div style="${REPORT_PRINT_WRAP}">
     <div style="margin-bottom:8px;">${reportPrintHeading({
-      title: 'OFFCUT CONSUMPTION REPORT',
+      title: isIn ? 'OFFCUT REPORT - STOCK IN' : 'OFFCUT REPORT - STOCK OUT',
       scope: offcutConsumptionScope(),
       dateText: offcutConsumptionDateText(),
       note: `Generated: ${fmtDMYT12(new Date())}`,
     })}</div>
-    ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:9pt;"><tr style="background:#f7f1ea;"><th ${td}>When</th><th ${td}>E-Job No.</th><th ${td}>Reason</th><th ${td}>Paper Type</th><th ${td}>Size</th><th ${td}>GSM</th><th ${td}>Brand</th><th ${td}>Consumed</th></tr>${body}</table>`:'<div style="text-align:center;padding:30px;border:1px dashed #000;">No offcut issuance in this period.</div>'}</div>`;reportPrintPrepare(area, 'portrait');window.print();setTimeout(()=>area.innerHTML='',500);
+    ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:9pt;"><tr style="background:#f7f1ea;"><th ${td}>When</th><th ${td}>E-Job No.</th><th ${td}>Reason</th><th ${td}>Paper Type</th><th ${td}>Size</th><th ${td}>GSM</th><th ${td}>Brand</th><th ${td}>${isIn?'Added':'Issued'}</th></tr>${body}</table>`:`<div style="text-align:center;padding:30px;border:1px dashed #000;">No offcut ${isIn?'stock in':'issuance'} in this period.</div>`}</div>`;reportPrintPrepare(area, 'portrait');window.print();setTimeout(()=>area.innerHTML='',500);
 }
 
 // Rows for Print/Export: if the user has checked specific rows via the bulk

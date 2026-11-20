@@ -645,7 +645,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   rpt_stock_out:                   { label: 'Stock Out report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   rpt_stock_summary:                { label: 'Stock Summary report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   rpt_current_balance:             { label: 'Current Balance Summary report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
-  rpt_offcut_consumption:          { label: 'Offcut Consumption report', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
+  rpt_offcut_consumption:          { label: 'Offcut report (Stock Out / Stock In)', levels: { admin: 'view', ceo: 'view', production_manager: 'view', store_manager: 'view', finance: 'view' } },
   // Empty by default, same as the old wastage_adjustment group it mirrors
   // (only Super Admin gets this today).
   rpt_manual_job_card_consumption: { label: 'Manual Job Card Consumption report — also covers its own Archive view', levels: {} },
@@ -14125,6 +14125,8 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
     // Offcut Consumption report only: include automatic E-job deductions
     // from offcut inventory while all other movement reports stay unchanged.
     const includeOffcutAuto = req.query.include_offcut_auto === '1';
+    // Offcut report - Stock In side (owner, 2026-11-20): the offcut items' stock-ins too.
+    const includeOffcutIn = req.query.include_offcut_in === '1';
     // Stock Out's "+ offcut" note (with include_offcut_auto=1): only offcut
     // items' stock-outs that belong to a job.
     const offcutOnly = req.query.offcut_only === '1';
@@ -14247,6 +14249,7 @@ app.get('/api/inventory/transactions', requireAuth, async (req, res) => {
           -- stock for any reason is offcut issuance, and those rows used to
           -- show in no movement report at all.
           OR (${includeOffcutAuto} AND t.change < 0)
+          OR (${includeOffcutIn} AND t.change > 0)
         )
         AND (${dir} = 'all'
              OR (${dir} = 'in'  AND t.change > 0)
