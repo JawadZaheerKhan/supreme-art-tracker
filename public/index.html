@@ -4266,6 +4266,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
           .oc-tbl .oc-paper { width: 1%; white-space: nowrap; }
           .oc-tbl .oc-notes { width: 100%; max-width: 0; min-width: 140px; }
           .oc-tbl .oc-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; font-size: 12px; color: var(--text2); }
+          .oc-tbl .oc-ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
           .oc-tbl .oc-sub { font-size: 10.5px; color: var(--text2); margin-top: 1px; }
           .oc-tbl .oc-date { width: 112px; padding: 2px 4px; font-size: 12px; }
           .oc-tbl .oc-grow { width: 100%; white-space: normal; }
@@ -31448,18 +31449,23 @@ function renderOffcutConsumption() {
         const rowClick = t.item_id ? ` onclick="openInvHistoryAt(${t.item_id}, ${t.id})" title="Open this entry in the item's History"` : '';
         const paper = [t.paper_type, t.item_size, t.item_gsm ? t.item_gsm + 'gsm' : ''].filter(Boolean).join(' ') || '—';
         const notes = isIn ? String(txNotesShown(t) || '') : '';
+        // Stock In: a real job only - an "offcut from a paper" row carries the stock-out's note ("Job Card: For off Cut
+        // Issue"), which is a note, not a job; it stays in Notes.
+        const jobTxt = isIn ? (t.job_id ? 'E-' + t.job_id : '—') : String(offcutRowJobText(t) || '—');
+        // The part before the @ (full address on hover), as the History window does; a Station entry: its operator.
+        const byShort = t.actor_name || (t.user_email ? String(t.user_email).split('@')[0] : (txByName(t) || '—'));
         const acts = hasActions ? [offcutRowReverseBtn(t), editPaperBtnHtml(t, [t.id], t.item_id), canDelete ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteOffcutConsumptionRows([${t.id}])">Delete</button>` : ''].filter(Boolean).join('') : '';
         return `<tr data-oc-row="${t.id}" class="row-hover-red${t.item_id ? ' cv-summary-row' : ''}"${rowClick}>
           ${canDelete ? `<td class="oc-fit" style="text-align:center;"><input type="checkbox" ${offcutConsumptionState.selected.has(t.id)?'checked':''} onclick="event.stopPropagation()" onchange="toggleOffcutConsumptionRow(${t.id}, this.checked)"></td>` : ''}
           <td class="oc-fit">${canDate
             ? `<input type="date" value="${localDateISO(new Date(t.created_at))}" max="${localDateISO()}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveOcTxDate([${t.id}], this.value)" title="Date - change it and it is saved; the change is logged in this paper's History" class="sm-ref-input oc-date"><div class="oc-sub">${esc(fmtTime12(t.created_at))}</div>`
             : `${esc(fmtDMY(t.created_at))}<div class="oc-sub">${esc(fmtTime12(t.created_at))}</div>`}${lateEntryTagHtml(t)}</td>
-          <td class="oc-fit" style="font-weight:700;">${offcutRowJobText(t) === '—' ? dash : esc(offcutRowJobText(t))}</td>
-          <td class="oc-fit" style="${t.job_id || isIn ? '' : 'color:#9a3412;font-weight:600;'}">${esc(offcutRowReason(t))}</td>
-          <td class="oc-paper${isIn ? '' : ' oc-grow'}">${esc(paper)}${t.item_brand ? `<div class="oc-sub">${esc(t.item_brand)}</div>` : ''}</td>
+          <td class="oc-fit" style="font-weight:700;">${jobTxt === '—' ? dash : `<div class="oc-ell" style="max-width:90px;" title="${esc(jobTxt)}">${esc(jobTxt)}</div>`}</td>
+          <td class="oc-fit" style="${t.job_id || isIn ? '' : 'color:#9a3412;font-weight:600;'}"><div class="oc-ell" style="max-width:130px;" title="${esc(offcutRowReason(t))}">${esc(offcutRowReason(t))}</div></td>
+          <td class="oc-paper${isIn ? '' : ' oc-grow'}"><div class="oc-ell"${isIn ? ' style="max-width:210px;"' : ''} title="${esc(paper + (t.item_brand ? ' · ' + t.item_brand : ''))}">${esc(paper)}</div>${t.item_brand ? `<div class="oc-sub">${esc(t.item_brand)}</div>` : ''}</td>
           <td class="oc-fit" style="text-align:right;font-weight:700;color:${color};">${fmt(Math.abs(t.change)/ps)} ${unit}<div class="oc-sub" style="font-weight:500;">${Math.abs(t.change).toLocaleString()} sh</div></td>
           ${isIn ? `<td class="oc-fit">${t.challan_no ? esc(t.challan_no) : dash}</td><td class="oc-notes">${notes ? `<div class="oc-clamp" title="${esc(notes)}">${esc(notes)}</div>` : dash}</td>` : ''}
-          <td class="oc-fit"${t.actor_name ? ` title="${esc(txByTitle(t))}"` : ''}>${esc(txByName(t) || '—')}</td>
+          <td class="oc-fit"><div class="oc-ell" style="max-width:110px;" title="${esc(t.actor_name ? txByTitle(t) : (t.user_email || ''))}">${esc(byShort)}</div></td>
           ${hasActions ? `<td class="oc-fit"><div class="oc-acts">${acts}</div></td>` : ''}
         </tr>`;
       }).join('')}</tbody>
