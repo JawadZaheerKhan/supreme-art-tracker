@@ -28144,7 +28144,7 @@ function openLcWarn(id) {
   const e = (lcState.rows || []).find(r => r.id === id);
   if (!e || !e.prev_warn) return;
   const jid = lcJobId(e.prev_job);
-  const inApp = jid && !lcAtStation() && typeof jobs !== 'undefined' && jobs.some(j => j.id === jid);
+  const inApp = jid && typeof jobs !== 'undefined' && jobs.some(j => j.id === jid);   // the Station too (owner, 2026-11-20)
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">${JW_SVG.replace('width="17" height="15"', 'width="34" height="30"')}<div><div style="font-weight:800;color:#e10600;font-size:15px;">No ${esc(e.prev_warn.stage)} entry</div><div style="font-size:12px;color:var(--text2);">${esc(lcJobNo(e.prev_job))}${e.prev_job_name ? ' &middot; ' + esc(e.prev_job_name) : ''} &middot; ${esc(e.machine)}</div></div></div>
     <div style="font-size:14px;line-height:1.45;padding:8px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;">${esc(e.prev_warn.text)}</div>
@@ -28157,12 +28157,12 @@ function openLcWarn(id) {
 }
 function lcJobId(v) { const m = String(v || '').match(/\d+/); return m && !m[0].startsWith('4') ? +m[0] : 0; }
 // A job number with its company under it.
-// A job's name in the report opens its job card right there (owner, 2026-11-16) - in the app, not on paper or at
-// the Station (no job card there).
+// A job's name in the report opens its job card right there (owner, 2026-11-16) - not on paper. At the Station too
+// (owner, 2026-11-20: QA's log must work like the report) - the job card opens read-only there (View on Edit).
 function lcJobNameHtml(job, name, print) {
   if (!name) return '';
   const m = String(job || '').match(/\d+/), id = m && !m[0].startsWith('4') ? +m[0] : 0;
-  const inApp = !print && id && !lcAtStation() && typeof jobs !== 'undefined' && jobs.some(j => j.id === id);
+  const inApp = !print && id && typeof jobs !== 'undefined' && jobs.some(j => j.id === id);
   return inApp ? ` <a class="lc-job-link" onclick="event.stopPropagation(); openEdit(${id})" title="Open E-${id}'s job card">${esc(name)}</a>` : ` <span style="font-weight:600;">${esc(name)}</span>`;
 }
 function lcJobCell(job, co, print, name) {
@@ -28326,7 +28326,7 @@ async function lcSaveRow(e, change) {
     if (lcAtStation()) await api('POST', `/api/station/line-clearance/${e.id}/edit`, { ...body, ...lcStationWho() });
     else await api('PUT', '/api/line-clearance/' + e.id, body);
     notify('Saved');
-    if (!lcAtStation()) lcState.highlight = e.id;   // the app's report flashes the row it saved
+    lcState.highlight = e.id;   // the row it saved flashes - in the app and at the Station
     if (lcAtStation()) await stationLoadLcReport(); else await openLineClearanceReport();
   } catch (err) { notify('Error: ' + err.message); renderLineClearanceReport(); }
 }
@@ -42144,7 +42144,15 @@ async function stationLoadLcReport() {
   stationRender();
   try { lcState.rows = await api('POST', '/api/station/line-clearance-report', { pin: stationOperator.pin, from: lcState.from, to: lcState.to }); }
   catch (e) { lcState.rows = []; notify('Could not load the Line Clearance Log: ' + e.message); }
-  if (stationView === 'lc-report') stationRender();
+  if (stationView === 'lc-report') { stationRender(); lcFlashHighlight(document); }
+}
+// The saved row: scroll to it, the highlight fades after a while (the report and the Station).
+function lcFlashHighlight(root) {
+  if (!lcState.highlight || !root) return;
+  const row = root.querySelector(`tr[data-lc-id="${lcState.highlight}"]`);
+  if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  const id = lcState.highlight;
+  setTimeout(() => { if (lcState.highlight === id) { lcState.highlight = null; root.querySelectorAll('tr.lc-hl').forEach(r => r.classList.remove('lc-hl')); } }, 6000);
 }
 function stationLcBackTo() { stationView = _stationLcBack || 'qa'; stationRender(); }
 function stationLcReportHtml() {
