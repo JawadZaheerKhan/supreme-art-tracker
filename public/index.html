@@ -10457,6 +10457,10 @@ function renderReadyNoti() {
     + list.map(j => `<button type="button" class="rn-item" onclick="openEdit(${j.id})" title="Reached Ready to Deliver ${esc(fmtDMYT12(new Date(readyNotiAt(j))))} - open the job card"><b>E-${j.id}</b> ${esc(j.name || '')}<small>${esc(j.client || '')}</small></button>`).join('') + '</div>';
   const list2 = el.querySelector('.rn-list'); if (list2 && top) list2.scrollTop = top;
 }
+// Ready cartons not shipped yet: Ready to Delivery Qty minus what was delivered.
+function readyLeftCartons(j) { return Math.max(0, readyCartonsTotal(j) - totalDeliveredCartons(j)); }
+// The Ready to Deliver tile: jobs at Ready, and partly delivered jobs with Ready cartons still waiting.
+function inReadyTile(j) { return !!j && !isDone(j) && (isStorage(j) || (isPartialDelivery(j) && readyLeftCartons(j) > 0)); }
 function renderStats() {
   try { updateOffcutIssueBtn(); } catch (e) { /* the button is a shortcut - never break the figures */ }
   try { renderReadyNoti(); } catch (e) { /* a notice - never break the figures */ }
@@ -10468,10 +10472,12 @@ function renderStats() {
     active: jobs.filter(j=>!isNewJob(j)&&!isCtpQueue(j)&&j.issuance_status !== 'pending'&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
     // Ready to Deliver: normal jobs and MIL jobs apart (owner, 2026-11-16).
     // PM-checked jobs (Ready or Partial Ready) show on their own red line (owner, 2026-11-18).
-    storage: jobs.filter(j => isStorage(j) && !isMilJobRow(j) && !isPmChecked(j)).length,
-    storageQty: jobs.filter(j => isStorage(j) && !isMilJobRow(j) && !isPmChecked(j)).reduce((a, j) => a + readyCartonsTotal(j), 0),
-    milStorage: jobs.filter(j => isStorage(j) && isMilJobRow(j) && !isPmChecked(j)).length,
-    milStorageQty: jobs.filter(j => isStorage(j) && isMilJobRow(j) && !isPmChecked(j)).reduce((a, j) => a + readyCartonsTotal(j), 0),
+    // A partly delivered job with Ready cartons still waiting counts too, by what is left (owner, 2026-11-20:
+    // MIL E-875 - 900 of its 11,200 Ready cartons not shipped showed on the group tile but not here).
+    storage: jobs.filter(j => inReadyTile(j) && !isMilJobRow(j) && !isPmChecked(j)).length,
+    storageQty: jobs.filter(j => inReadyTile(j) && !isMilJobRow(j) && !isPmChecked(j)).reduce((a, j) => a + readyLeftCartons(j), 0),
+    milStorage: jobs.filter(j => inReadyTile(j) && isMilJobRow(j) && !isPmChecked(j)).length,
+    milStorageQty: jobs.filter(j => inReadyTile(j) && isMilJobRow(j) && !isPmChecked(j)).reduce((a, j) => a + readyLeftCartons(j), 0),
     checked: jobs.filter(isPmChecked).length,
     checkedQty: jobs.filter(isPmChecked).reduce((a, j) => a + earlyReadyTotal(j), 0),
     done: jobs.filter(isDone).length,
@@ -11444,14 +11450,15 @@ function renderJobCard(j, opts) {
           // delivered_cartons_qty.quantity + ' | ' + ready_packets_qty.quantity
           // (both may themselves be pipe-joined for multi-pass entries).
           // Falls back to pasted_cartons_qty (partial-ready case) and
-          // finally to delqty / pasted_ready_cartons so old jobs still
-          // surface something.
+          // finally to pasted_ready_cartons.
           const parts = j.particulars || {};
           const dc = parts.delivered_cartons_qty && String(parts.delivered_cartons_qty.quantity || '').trim();
           const rp = parts.ready_packets_qty     && String(parts.ready_packets_qty.quantity     || '').trim();
           const rtdJoined = rp ? `${dc || ''} | ${rp} Carton Shipper` : (dc || '');
           const pastedJoined = parts.pasted_cartons_qty && String(parts.pasted_cartons_qty.quantity || '').trim();
-          const readyQty = rtdJoined || pastedJoined || j.delqty || (j.pasted_ready_cartons > 0 ? String(j.pasted_ready_cartons) : '');
+          // Not delqty (owner, 2026-11-20): the server keeps it as the DELIVERED total, so a partly delivered job with
+          // no Ready qty written (MIL E-419 / E-420) showed its delivered cartons as "Ready to Delivery Qty".
+          const readyQty = rtdJoined || pastedJoined || (j.pasted_ready_cartons > 0 ? String(j.pasted_ready_cartons) : '');
           return readyQty ? `<span><b>Ready to Delivery Qty</b> ${esc(readyQty)}</span>` : '';
         })(),
         j.dateissued ? `<span><b>Job Date</b> ${esc(fmtDMY(j.dateissued))}</span>` : '',
