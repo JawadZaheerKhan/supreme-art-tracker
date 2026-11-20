@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-19-low-issue-ignore';   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-20-edit-paper';   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -499,7 +499,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_edit_paper', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -627,6 +627,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   // within the last 30 days — same tier the existing inventory_reverse
   // group already uses, kept as this row's own extra level too.
   inv_btn_reverse:         { label: 'Reverse button', levels: { admin: 'yes', store_manager: '30-day' }, extra: ['30-day'] },
+  inv_btn_edit_paper:      { label: 'Edit paper on a stock-out (History / Stock Out / Offcut report) — the wrong paper\'s issue is reversed and the same sheets are issued from the right paper on the same date; the job card follows', levels: { admin: 'yes' } },
   inv_btn_dismiss_pending: { label: 'Pending Stock — Dismiss button (remove a delivered job from the pending queue)', levels: { admin: 'yes' } },
   inv_btn_brands:          { label: 'Brands & Suppliers button — see every brand and supplier (View); fix a spelling or change an item\'s brand / supplier (Edit)', levels: { admin: 'yes', store_manager: 'yes', production_manager: 'view', finance: 'view', ceo: 'view' } },
   inv_btn_batches:         { label: 'Batches button — the Batch window of a paper: its batches, stock left in each, dates and references', levels: { admin: 'yes', store_manager: 'yes', ceo: 'view', production_manager: 'view', finance: 'view' } },
@@ -13694,6 +13695,112 @@ app.put('/api/inventory/transactions/:id/sticker', requireAuth, async (req, res)
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Edit the paper of a stock-out (owner, 2026-11-20): the wrong paper was picked. The old row is reversed (its stock
+// comes back), the same sheets go out of the right paper on the SAME date (same job, challan), and the job follows -
+// its issued list, and the card's 1st / 2nd / 3rd paper once nothing of the old paper is left issued to it. The job
+// stays issued (not sent back to Pending Stock like a Reverse).
+const EDIT_PAPER_REASONS = new Set(['job-consumed', 'manual-job-card', 'job-card', 'sold', 'damaged', 'sample', 'proofing']);
+const paperKeySrv = (it) => it ? [String(it.paper_type || '').trim().toLowerCase(), String(it.size || '').trim().toLowerCase(), String(it.gsm == null ? '' : it.gsm).trim().toLowerCase(), !!it.is_offcut].join('|') : '';
+const paperNameSrv = (it) => [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : ''].filter(Boolean).join(' ');
+app.post('/api/inventory/transactions/:id/change-paper', requirePermission('inv_btn_edit_paper'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const txId = parseInt(req.params.id, 10), newId = parseInt(req.body && req.body.item_id, 10);
+    if (!Number.isFinite(txId) || !Number.isFinite(newId)) return res.status(400).json({ error: 'Pick the right paper.' });
+    const [tx] = await sql`SELECT * FROM inventory_transactions WHERE id = ${txId}`;
+    if (!tx) return res.status(404).json({ error: 'Entry not found' });
+    if (!(tx.change < 0) || tx.reverses_tx_id || !EDIT_PAPER_REASONS.has(tx.reason)) return res.status(400).json({ error: 'Only a stock-out entry (job issue, sold, damaged ...) can change its paper.' });
+    if (Number(tx.item_id) === newId) return res.status(400).json({ error: 'That is the same paper.' });
+    const held = await takeOpLocks(sql, [`tx-reverse:${txId}`, tx.job_id ? `job-stock:${tx.job_id}` : null]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      if ((await sql`SELECT 1 FROM inventory_transactions WHERE reverses_tx_id = ${txId} LIMIT 1`).length) return res.status(409).json({ error: 'This entry was already reversed - there is nothing to move.' });
+      const sentOff = await sql`
+        SELECT 1 FROM inventory_transactions o WHERE o.paired_tx_id = ${txId} AND o.reverses_tx_id IS NULL
+           AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = o.id) LIMIT 1`;
+      if (sentOff.length) return res.status(400).json({ error: 'Part of this issue was sent to offcut - reverse that offcut entry first.' });
+      const [oldIt] = await sql`SELECT * FROM inventory_items WHERE id = ${tx.item_id}`;
+      const [newIt] = await sql`SELECT * FROM inventory_items WHERE id = ${newId} AND deleted_at IS NULL`;
+      if (!newIt) return res.status(400).json({ error: 'That paper is not in Inventory.' });
+      const sheets = Math.round(-parseFloat(tx.change));
+      const ps = packetSize(newIt.paper_type), unit = isReamPaperSrv(newIt.paper_type) ? 'reams' : 'packets';
+      const bal = parseFloat(newIt.current_balance) || 0;
+      if (bal < sheets) return res.status(400).json({ error: `Not enough stock of ${paperNameSrv(newIt)}${newIt.is_offcut ? ' (offcut)' : ''}: it has ${+(bal / ps).toFixed(2)} ${unit}, this entry needs ${+(sheets / ps).toFixed(2)}. Stock it in first, then edit again.` });
+      const oldName = oldIt ? paperNameSrv(oldIt) + (oldIt.is_offcut ? ' (offcut)' : '') + (oldIt.brand ? ' · ' + oldIt.brand : '') : 'item ' + tx.item_id;
+      const newName = paperNameSrv(newIt) + (newIt.is_offcut ? ' (offcut)' : '') + (newIt.brand ? ' · ' + newIt.brand : '');
+      const by = tx.actor_name || (tx.user_email ? String(tx.user_email).split('@')[0] : '');
+      // 1) the old row is reversed - its stock comes back
+      const revId = await applyInventoryChange(sql, { itemId: tx.item_id, change: sheets, reason: 'correction', jobId: null, user: req.user, reversesTxId: tx.id,
+        notes: `Paper edited: TX #${tx.id} was the wrong paper - moved to ${newName}` });
+      // 2) the same sheets go out of the right paper, on the same date
+      const newTx = await applyInventoryChange(sql, { itemId: newId, change: -sheets, reason: tx.reason, jobId: tx.job_id || null, user: req.user,
+        challanNo: tx.challan_no || null, occurredAt: tx.created_at, notes: tx.notes || null });
+      const shown = `Paper edited from ${oldName}${by ? ' (issued by ' + by + ')' : ''}` + (tx.user_notes ? ' · ' + tx.user_notes : '');
+      await sql`UPDATE inventory_transactions SET user_notes = ${shown} WHERE id = ${newTx}`;
+      // 3) the job follows
+      let card = null;
+      if (tx.job_id) {
+        const [job] = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id}`;
+        if (job) {
+          const items = Array.isArray(job.issued_items) ? job.issued_items.map(x => (x && typeof x === 'object') ? { ...x } : x) : [];
+          let k = items.findIndex(x => x && Number(x.tx_id) === tx.id);
+          if (k < 0) k = items.findIndex(x => x && Number(x.item_id) === Number(tx.item_id) && Math.round(+x.sheets || 0) === sheets);
+          const source = k >= 0 ? items[k].source : null;
+          if (k >= 0) items[k] = { ...items[k], item_id: newId, tx_id: newTx, brand: newIt.brand || '', paper: paperNameSrv(newIt) };
+          const pp = { ...(job.particulars || {}) };
+          if (pp.over_issue_pending && Array.isArray(pp.over_issue_pending.splits)) {
+            pp.over_issue_pending = { ...pp.over_issue_pending, splits: pp.over_issue_pending.splits.map(x => x && Number(x.source_item_id) === Number(tx.item_id) ? { ...x, source_item_id: newId } : x) };
+          }
+          // The card's paper changes once nothing of the old paper is still issued to the job (a split issue moves
+          // one row at a time) - and only when the paper itself differs (a brand fix leaves the card alone).
+          let mainId = job.inventory_item_id, size = job.size;
+          const oldKey = paperKeySrv(oldIt);
+          if (oldIt && oldKey !== paperKeySrv(newIt)) {
+            const [{ n }] = await sql`
+              SELECT COUNT(*)::int AS n FROM inventory_transactions t JOIN inventory_items i ON i.id = t.item_id
+               WHERE t.job_id = ${tx.job_id} AND t.reason = 'job-consumed' AND t.change < 0 AND t.reverses_tx_id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)
+                 AND lower(trim(COALESCE(i.paper_type, ''))) = lower(trim(${oldIt.paper_type || ''}))
+                 AND lower(trim(COALESCE(i.size, ''))) = lower(trim(${oldIt.size || ''}))
+                 AND lower(trim(COALESCE(i.gsm::text, ''))) = lower(trim(${oldIt.gsm == null ? '' : String(oldIt.gsm)}))
+                 AND COALESCE(i.is_offcut, false) = ${!!oldIt.is_offcut}`;
+            if (!n) {
+              const slots = [{ slot: 'primary', label: '1st', id: job.inventory_item_id }]
+                .concat(EXTRA_PAPERS.map(e => ({ slot: e.source, label: e.label, key: e.key, id: pp[e.key] && typeof pp[e.key] === 'object' ? pp[e.key].inventory_item_id : null })))
+                .filter(x => x.id);
+              const ids = slots.map(x => Number(x.id));
+              const its = ids.length ? await sql`SELECT * FROM inventory_items WHERE id = ANY(${ids})` : [];
+              const byId = new Map(its.map(x => [x.id, x]));
+              const match = slots.filter(x => paperKeySrv(byId.get(Number(x.id))) === oldKey);
+              const hit = match.find(x => x.slot === (source || 'primary')) || match[0] || null;
+              if (hit) {
+                if (hit.slot === 'primary') {
+                  mainId = newId;
+                  if (newIt.size || newIt.gsm) size = `${newIt.size || ''}${newIt.size && newIt.gsm ? ' / ' : ''}${newIt.gsm ? newIt.gsm + 'gsm' : ''}`;
+                } else {
+                  pp[hit.key] = { ...pp[hit.key], inventory_item_id: newId };
+                }
+                card = hit.label;
+              }
+            }
+          }
+          await sql`
+            UPDATE jobs SET issued_items = ${JSON.stringify(items)}::jsonb, particulars = ${JSON.stringify(pp)},
+                   inventory_item_id = ${mainId}, size = ${size}, updated_at = NOW()
+             WHERE id = ${tx.job_id}`;
+        }
+      }
+      const amount = `${+(sheets / ps).toFixed(2)} ${unit} (${sheets.toLocaleString()} sheets)`;
+      const summary = `Paper edited on TX #${tx.id}${tx.job_id ? ' (Job E-' + tx.job_id + ')' : ''}: ${amount} moved from ${oldName} to ${newName}${card ? ' · job card ' + card + ' paper changed' : ''}`;
+      const meta = { tx_id: tx.id, reversal_tx_id: revId, new_tx_id: newTx, from_item_id: tx.item_id, to_item_id: newId, sheets, card };
+      await logAudit(sql, req, { action: 'inventory.edit_paper', entityType: 'inventory', entityId: tx.item_id, summary, metadata: meta });
+      await logAudit(sql, req, { action: 'inventory.edit_paper', entityType: 'inventory', entityId: newId, summary, metadata: meta });
+      if (tx.job_id) await logAudit(sql, req, { action: 'job.paper_edited', entityType: 'job', entityId: tx.job_id, summary, metadata: meta });
+      res.json({ ok: true, new_tx_id: newTx, reversal_tx_id: revId, card });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res) => {
   try {
     await dbReady;
