@@ -4257,6 +4257,20 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
           .oc-dir button { border: 0; background: #fff; color: #0e7490; font: inherit; font-size: 13px; font-weight: 700; padding: 6px 16px; cursor: pointer; }
           .oc-dir button + button { border-left: 1px solid #0891b2; }
           .oc-dir button.is-on { background: #0891b2; color: #fff; }
+          /* Offcut report table - fits the screen (owner, 2026-11-20) */
+          .oc-tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+          #oc-content .report-scroll-wrap { min-height: 0; }   /* no empty block under a short list */
+          .oc-tbl th { background: var(--bg2); text-align: left; padding: 6px 7px; color: var(--text); font-weight: 700; white-space: nowrap; }
+          .oc-tbl td { padding: 5px 7px; vertical-align: middle; border-bottom: 1px solid var(--border); line-height: 1.25; }
+          .oc-tbl .oc-fit { width: 1%; white-space: nowrap; }
+          .oc-tbl .oc-paper { width: 1%; white-space: nowrap; }
+          .oc-tbl .oc-notes { width: 100%; max-width: 0; min-width: 140px; }
+          .oc-tbl .oc-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; font-size: 12px; color: var(--text2); }
+          .oc-tbl .oc-sub { font-size: 10.5px; color: var(--text2); margin-top: 1px; }
+          .oc-tbl .oc-date { width: 112px; padding: 2px 4px; font-size: 12px; }
+          .oc-tbl .oc-grow { width: 100%; white-space: normal; }
+          .oc-tbl .oc-acts { display: flex; flex-wrap: nowrap; justify-content: flex-end; gap: 3px; }
+          .oc-tbl .oc-acts .btn { padding: 2px 7px !important; font-size: 10.5px !important; }
         </style>
       </main>
     </div>
@@ -31415,37 +31429,38 @@ function renderOffcutConsumption() {
       : (offcutConsumptionState.paperQ.trim() ? '<div class="empty">No paper matches the search.</div>' : `<div class="empty">No offcut ${isIn ? 'stock in' : 'issuance'} in this period.</div>`);
     return;
   }
-  const th = 'style="text-align:left;padding:8px;color:var(--text);font-weight:700;"';
+  // Fits the screen (owner, 2026-11-20): one Paper column (type size gsm, brand under it), notes cut to 2 lines (all
+  // of it on hover), buttons stacked, tight padding - every column only as wide as it needs, Notes takes what is left.
+  const dash = '<span style="color:var(--text3)">—</span>';
   el.innerHTML = `<div class="report-scroll-wrap">
-    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
-      <thead><tr style="background:var(--bg2);">
-        ${canDelete ? `<th style="width:34px;padding:8px;text-align:center;"><input type="checkbox" ${allSelected?'checked':''} ${someSelected&&!allSelected?'data-indeterminate="1"':''} onchange="toggleAllOffcutConsumption(this.checked)"></th>` : ''}
-        <th ${th}>When</th><th ${th}>E-Job No.</th><th ${th}>${invColHeadHtml('oc', 'reason', 'Reason')}</th><th ${th}>Paper Type</th>
-        <th ${th}>Size</th><th ${th}>GSM</th><th ${th}>Brand</th>
-        <th style="text-align:right;padding:8px;color:var(--text);font-weight:700;">${isIn ? 'Added' : 'Issued'}</th>
-        ${isIn ? `<th ${th}>Challan</th><th ${th}>Notes</th>` : ''}
-        <th ${th}>${isIn ? 'Entered By' : 'Issued By'}</th>
-        ${hasActions ? '<th style="width:70px;padding:8px;"></th>' : ''}
+    <table class="ss-table oc-tbl">
+      <thead><tr>
+        ${canDelete ? `<th class="oc-fit" style="text-align:center;"><input type="checkbox" ${allSelected?'checked':''} ${someSelected&&!allSelected?'data-indeterminate="1"':''} onchange="toggleAllOffcutConsumption(this.checked)"></th>` : ''}
+        <th class="oc-fit">When</th><th class="oc-fit">Job</th><th class="oc-fit">${invColHeadHtml('oc', 'reason', 'Reason')}</th><th class="${isIn ? 'oc-paper' : 'oc-grow'}">Paper</th>
+        <th class="oc-fit" style="text-align:right;">${isIn ? 'Added' : 'Issued'}</th>
+        ${isIn ? `<th class="oc-fit">Challan</th><th class="oc-notes">Notes</th>` : ''}
+        <th class="oc-fit">By</th>
+        ${hasActions ? '<th class="oc-fit"></th>' : ''}
       </tr></thead>
       <tbody>${rows.map(t => {
         const ps = packetSize(t.paper_type || '');
         const unit = packetUnitLabel(t.paper_type || '').toLowerCase();
         const rowClick = t.item_id ? ` onclick="openInvHistoryAt(${t.item_id}, ${t.id})" title="Open this entry in the item's History"` : '';
-        return `<tr data-oc-row="${t.id}" class="row-hover-red${t.item_id ? ' cv-summary-row' : ''}" style="border-bottom:1px solid var(--border);"${rowClick}>
-          ${canDelete ? `<td style="padding:6px 8px;text-align:center;"><input type="checkbox" ${offcutConsumptionState.selected.has(t.id)?'checked':''} onclick="event.stopPropagation()" onchange="toggleOffcutConsumptionRow(${t.id}, this.checked)"></td>` : ''}
-          <td style="padding:6px 8px;white-space:nowrap;">${canDate
-            ? `<input type="date" value="${localDateISO(new Date(t.created_at))}" max="${localDateISO()}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveOcTxDate([${t.id}], this.value)" title="Date - change it and it is saved; the change is logged in this paper's History" class="sm-ref-input" style="width:118px;"><div style="font-size:11px;color:var(--text2);margin-top:2px;">${esc(fmtTime12(t.created_at))}</div>`
-            : esc(fmtDMYT12(t.created_at))}${lateEntryTagHtml(t)}</td>
-          <td style="padding:6px 8px;font-weight:700;white-space:nowrap;">${esc(offcutRowJobText(t))}</td>
-          <td style="padding:6px 8px;white-space:nowrap;${t.job_id || isIn ? '' : 'color:#9a3412;font-weight:600;'}">${esc(offcutRowReason(t))}</td>
-          <td style="padding:6px 8px;">${esc(t.paper_type || '—')}</td>
-          <td style="padding:6px 8px;">${esc(t.item_size || '—')}</td>
-          <td style="padding:6px 8px;">${esc(t.item_gsm || '—')}</td>
-          <td style="padding:6px 8px;">${esc(t.item_brand || '—')}</td>
-          <td style="padding:6px 8px;text-align:right;font-weight:700;color:${color};white-space:nowrap;">${fmt(Math.abs(t.change)/ps)} ${unit}<br><span style="font-size:11px;color:var(--text2);font-weight:500;">${Math.abs(t.change).toLocaleString()} sheets</span></td>
-          ${isIn ? `<td style="padding:6px 8px;">${t.challan_no ? esc(t.challan_no) : '<span style="color:var(--text3)">—</span>'}</td><td style="padding:6px 8px;max-width:220px;">${esc(txNotesShown(t))}</td>` : ''}
-          <td style="padding:6px 8px;white-space:nowrap;"${t.actor_name ? ` title="${esc(txByTitle(t))}"` : ''}>${esc(txByName(t) || '—')}</td>
-          ${hasActions ? `<td style="padding:6px 8px;text-align:right;white-space:nowrap;">${offcutRowReverseBtn(t)} ${editPaperBtnHtml(t, [t.id], t.item_id)}${canDelete ? ` <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteOffcutConsumptionRows([${t.id}])">Delete</button>` : ''}</td>` : ''}
+        const paper = [t.paper_type, t.item_size, t.item_gsm ? t.item_gsm + 'gsm' : ''].filter(Boolean).join(' ') || '—';
+        const notes = isIn ? String(txNotesShown(t) || '') : '';
+        const acts = hasActions ? [offcutRowReverseBtn(t), editPaperBtnHtml(t, [t.id], t.item_id), canDelete ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteOffcutConsumptionRows([${t.id}])">Delete</button>` : ''].filter(Boolean).join('') : '';
+        return `<tr data-oc-row="${t.id}" class="row-hover-red${t.item_id ? ' cv-summary-row' : ''}"${rowClick}>
+          ${canDelete ? `<td class="oc-fit" style="text-align:center;"><input type="checkbox" ${offcutConsumptionState.selected.has(t.id)?'checked':''} onclick="event.stopPropagation()" onchange="toggleOffcutConsumptionRow(${t.id}, this.checked)"></td>` : ''}
+          <td class="oc-fit">${canDate
+            ? `<input type="date" value="${localDateISO(new Date(t.created_at))}" max="${localDateISO()}" onclick="event.stopPropagation()" onchange="event.stopPropagation(); saveOcTxDate([${t.id}], this.value)" title="Date - change it and it is saved; the change is logged in this paper's History" class="sm-ref-input oc-date"><div class="oc-sub">${esc(fmtTime12(t.created_at))}</div>`
+            : `${esc(fmtDMY(t.created_at))}<div class="oc-sub">${esc(fmtTime12(t.created_at))}</div>`}${lateEntryTagHtml(t)}</td>
+          <td class="oc-fit" style="font-weight:700;">${offcutRowJobText(t) === '—' ? dash : esc(offcutRowJobText(t))}</td>
+          <td class="oc-fit" style="${t.job_id || isIn ? '' : 'color:#9a3412;font-weight:600;'}">${esc(offcutRowReason(t))}</td>
+          <td class="oc-paper${isIn ? '' : ' oc-grow'}">${esc(paper)}${t.item_brand ? `<div class="oc-sub">${esc(t.item_brand)}</div>` : ''}</td>
+          <td class="oc-fit" style="text-align:right;font-weight:700;color:${color};">${fmt(Math.abs(t.change)/ps)} ${unit}<div class="oc-sub" style="font-weight:500;">${Math.abs(t.change).toLocaleString()} sh</div></td>
+          ${isIn ? `<td class="oc-fit">${t.challan_no ? esc(t.challan_no) : dash}</td><td class="oc-notes">${notes ? `<div class="oc-clamp" title="${esc(notes)}">${esc(notes)}</div>` : dash}</td>` : ''}
+          <td class="oc-fit"${t.actor_name ? ` title="${esc(txByTitle(t))}"` : ''}>${esc(txByName(t) || '—')}</td>
+          ${hasActions ? `<td class="oc-fit"><div class="oc-acts">${acts}</div></td>` : ''}
         </tr>`;
       }).join('')}</tbody>
     </table>
