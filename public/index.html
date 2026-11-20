@@ -6505,9 +6505,19 @@ function jobWarnInScope(j) {
   const c = Date.parse(j.created_at || '');
   return isFinite(c) && c >= JOB_WARN_SINCE;
 }
+// Delivered but no Ready qty (owner, 2026-11-20): every OPEN job, whatever its date - not only jobs from 19 Nov.
+// A delivery went out and nobody wrote how many were made (MIL E-419 / E-420 stayed partial against their unit cartons).
+function jobWarnDeliveredNoReady(j) {
+  if (!j || j.deleted_at || j.is_shade_card || isDone(j) || (typeof _finalizedJobIds !== 'undefined' && _finalizedJobIds.has(j.id))) return null;
+  const del = totalDeliveredCartons(j) || 0;
+  if (!(del > 0) || readyCartonsTotal(j) > 0) return null;
+  return { key: 'deliv_no_ready', tag: 'READY', title: 'Delivered, but no Ready qty',
+    text: `${del.toLocaleString()} cartons were delivered, but Ready to Delivery Qty is empty. Write the Ready qty on the job card (green arrow).`, sig: String(del) };
+}
 // The warnings the job's figures show right now.
 function jobWarnDetect(j) {
-  if (!jobWarnInScope(j)) return [];
+  const anyDate = jobWarnDeliveredNoReady(j);
+  if (!jobWarnInScope(j)) return anyDate ? [anyDate] : [];
   const num = v => parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')) || 0;
   const rowSum = r => !r ? 0 : (Array.isArray(r.entries) && r.entries.length ? r.entries.reduce((x, e) => x + num(e && e.qty), 0) : String(r.quantity || '').split('|').reduce((x, v) => x + num(v), 0));
   const f = n => (+(+n).toFixed(2)).toLocaleString();
@@ -6554,12 +6564,13 @@ function jobWarnDetect(j) {
   }
   if (missing.length) out.push({ key: 'no_entry', tag: 'ENTRY', title: 'Operator entry missing',
     text: `No operator entry for ${missing.join(', ')}.`, sig: missing.join(',') });
+  if (anyDate && !out.some(x => x.key === 'ready_empty')) out.push(anyDate);   // one READY sign, not two
   return out;
 }
 // What the tile shows: today's warnings, plus any found before that nobody ignored yet - a sign stays until it is
 // ignored, even once the figures are put right (owner, 2026-11-18). Ignored = hidden for the figures it had.
 function jobWarnings(j) {
-  if (!jobWarnInScope(j)) return [];
+  if (!jobWarnInScope(j) && !jobWarnDeliveredNoReady(j) && !(j && j.warn_raised && j.warn_raised.deliv_no_ready)) return [];
   const ign = (j.warn_ignored && typeof j.warn_ignored === 'object') ? j.warn_ignored : {};
   const raised = (j.warn_raised && typeof j.warn_raised === 'object') ? j.warn_raised : {};
   const isIgn = (k, sig) => ign[k] && String(ign[k].sig) === String(sig);
