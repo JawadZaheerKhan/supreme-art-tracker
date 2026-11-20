@@ -5257,6 +5257,15 @@ function overDeliveredMarkHtml(j) {
   const over = delivered - cartonQty;
   return `<span title="Delivered (${delivered.toLocaleString()}) exceeds Unit Carton Qty (${cartonQty.toLocaleString()}) by ${over.toLocaleString()} — check these values." style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#dc2626;color:#fff;font-size:10px;font-weight:800;line-height:1;flex:0 0 auto;">!</span>`;
 }
+// What a job has to ship to be delivered: its PO Qty; a MIL job: every Ready carton (else unit carton), or the PO if
+// more - most MIL jobs have no PO. Same as isPartialDelivery() below and the server's deliveryTargetQty (owner,
+// 2026-11-20: the job card's delivery box used the PO only - E-149 read FULLY DELIVERED in the Partial tab).
+function deliveryTargetCartons(j) {
+  const n = v => parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')) || 0;
+  let booked = n(j && j.qty);
+  if (j && (j.stock_group_name || j.group_job_id) && !j.is_shade_card) booked = Math.max(booked, readyCartonsTotal(j) || n(j.cartonqty));
+  return booked;
+}
 function isPartialDelivery(j) {
   let booked = parseFloat(String((j && j.qty) || '').replace(/[^0-9.\-]/g, '')) || 0;
   // MIL jobs (owner, 2026-11-17): done only once every Ready carton (else unit carton) has shipped, or the
@@ -7248,7 +7257,7 @@ function ceoDashFigures() {
     .sort((x, y) => String(x.deadline).localeCompare(String(y.deadline)));
   f.blocked = live.filter(j => isBlocked(j));
   f.partial = live.filter(j => isPartialDelivery(j) && !isDone(j))
-    .map(j => ({ j, left: Math.max(0, (isReopenedDelivery(j) ? readyCartonsTotal(j) : n(j.qty)) - totalDeliveredCartons(j)) }))
+    .map(j => ({ j, left: Math.max(0, (isReopenedDelivery(j) ? readyCartonsTotal(j) : deliveryTargetCartons(j)) - totalDeliveredCartons(j)) }))   // MIL with no PO: its Ready qty
     .sort((x, y) => y.left - x.left);
   // 4. stock right now
   const pend = f.views.pending;
@@ -10469,7 +10478,7 @@ function renderStats() {
     newJobs: jobs.filter(isNewJob).length,
     ctp: jobs.filter(isCtpQueue).length,
     pending: jobs.filter(j => j.issuance_status === 'pending').length,
-    active: jobs.filter(j=>!isNewJob(j)&&!isCtpQueue(j)&&j.issuance_status !== 'pending'&&!isDone(j)&&!isBlocked(j)&&!isStorage(j)).length,
+    active: jobs.filter(j => jobInView(j, 'active')).length,   // same as the In Progress tab - a partly delivered job past Ready has its own tab (owner, 2026-11-20)
     // Ready to Deliver: normal jobs and MIL jobs apart (owner, 2026-11-16).
     // PM-checked jobs (Ready or Partial Ready) show on their own red line (owner, 2026-11-18).
     // A partly delivered job with Ready cartons still waiting counts too, by what is left (owner, 2026-11-20:
@@ -34528,7 +34537,7 @@ function deliveriesSection(j, opts) {
   const countLabel = isShadeCard ? 'Copies' : 'Delivered UC Qty';
   const countUnit  = isShadeCard ? 'copies' : 'unit cartons';
   const list = Array.isArray(j.deliveries) ? j.deliveries : [];
-  const booked = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const booked = deliveryTargetCartons(j);   // MIL: the Ready qty when it is more than the PO (or no PO)
   const shipped = totalDeliveredCartons(j);
   // A job sent back from Delivered with Ready cartons unshipped counts
   // what is left of the Ready qty, not of the (already covered) booked qty.
@@ -34616,7 +34625,7 @@ function deliveriesSection(j, opts) {
       : `<span style="background:#e5e7eb;color:#374151;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">NOT YET DELIVERED</span>${readyChip}`;
 
   const summaryLine = booked
-    ? `Booked: <b>${booked.toLocaleString()}</b> ${countUnit} &middot; Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} &middot; Remaining: <b>${remaining.toLocaleString()}</b> ${countUnit}`
+    ? `${(j.stock_group_name || j.group_job_id) && !j.is_shade_card ? 'To ship' : 'Booked'}: <b>${booked.toLocaleString()}</b> ${countUnit} &middot; Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} &middot; Remaining: <b>${remaining.toLocaleString()}</b> ${countUnit}`
     : `Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} (booked P.O. qty not set)`;
   const tolLine = deliveryTolLine(j, shipped, readyNotYetShipped);
 
@@ -34716,7 +34725,7 @@ function deliveriesSectionFinance(j, opts) {
   const countLabel = isShadeCard ? 'Copies' : 'Delivered UC Qty';
   const countUnit  = isShadeCard ? 'copies' : 'unit cartons';
   const list = Array.isArray(j.deliveries) ? j.deliveries : [];
-  const booked = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const booked = deliveryTargetCartons(j);   // MIL: the Ready qty when it is more than the PO (or no PO)
   const shipped = totalDeliveredCartons(j);
   // A job sent back from Delivered with Ready cartons unshipped counts
   // what is left of the Ready qty, not of the (already covered) booked qty.
@@ -34858,7 +34867,7 @@ function deliveriesSectionFinance(j, opts) {
       : `<span style="background:#e5e7eb;color:#374151;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.5px;">NOT YET DELIVERED</span>${readyChip}`;
 
   const summaryLine = booked
-    ? `Booked: <b>${booked.toLocaleString()}</b> ${countUnit} &middot; Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} &middot; Remaining: <b>${remaining.toLocaleString()}</b> ${countUnit}`
+    ? `${(j.stock_group_name || j.group_job_id) && !j.is_shade_card ? 'To ship' : 'Booked'}: <b>${booked.toLocaleString()}</b> ${countUnit} &middot; Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} &middot; Remaining: <b>${remaining.toLocaleString()}</b> ${countUnit}`
     : `Shipped: <b>${shipped.toLocaleString()}</b> ${countUnit} (booked P.O. qty not set)`;
   const tolLine = deliveryTolLine(j, shipped, readyNotYetShipped);
 
