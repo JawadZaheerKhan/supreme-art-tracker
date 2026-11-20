@@ -1817,6 +1817,8 @@
   .jw-chip:hover { background: #fee2e2; }
   .jw-chip svg { display: block; }
   .jw-chip span { font-size: 8.5px; font-weight: 900; color: #e10600; letter-spacing: .02em; margin-top: 1px; }
+  .jw-chip.jw-chip-grp { flex-direction: row; gap: 4px; padding: 2px 6px; }
+  .jw-chip.jw-chip-grp span { font-size: 10px; margin-top: 0; white-space: nowrap; }
   @keyframes jwPulse { 0%, 100% { box-shadow: 0 0 0 2px rgba(255,26,26,.12); } 50% { box-shadow: 0 0 0 4px rgba(255,26,26,.28); } }
   .jw-chip { animation: jwPulse 2.2s ease-in-out infinite; }
   .jw-chip.lc-warn { float: right; margin: 0 0 2px 6px; padding: 1px 3px; }
@@ -6603,6 +6605,29 @@ function jobChipsHtml(j) {
   const chips = lowIssueChipHtml(j) + warns.map(x => `<button type="button" class="jw-chip" onclick="event.stopPropagation(); openJobWarning(${j.id}, '${x.key}')" title="${esc(x.title)} - click for the reason">${JW_SVG}<span>${esc(x.tag)}</span></button>`).join('');
   return chips ? `<div class="job-chips">${chips}</div>` : '';
 }
+// MIL group tile (owner, 2026-11-20): one sign per job of the group that has a problem - "E-797 · ENTRY". Click =
+// that job's reason (or the list, when it has more than one).
+function groupChipsHtml(groupJobs) {
+  const chips = (groupJobs || []).map(j => {
+    let warns = [];
+    try { warns = jobWarnings(j); } catch (e) { warns = []; }
+    if (!warns.length) return '';
+    const tags = [...new Set(warns.map(x => x.tag))].join(' · ');
+    const click = warns.length === 1 ? `openJobWarning(${j.id}, '${warns[0].key}')` : `openGroupJobWarnings(${j.id})`;
+    return `<button type="button" class="jw-chip jw-chip-grp" onclick="event.stopPropagation(); ${click}" title="E-${j.id}: ${esc(warns.map(x => x.title).join(', '))} - click for the reason">${JW_SVG}<span>E-${j.id} · ${esc(tags)}</span></button>`;
+  }).join('');
+  return chips ? `<div class="job-chips">${chips}</div>` : '';
+}
+function openGroupJobWarnings(id) {
+  const j = (jobs || []).find(x => x && x.id === id);
+  const warns = j ? jobWarnings(j) : [];
+  if (!warns.length) return;
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:420px;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">${JW_SVG.replace('width="17" height="15"', 'width="34" height="30"')}<div><div style="font-weight:800;color:#e10600;font-size:15px;">${warns.length} problems on this job</div><div style="font-size:12px;color:var(--text2);">E-${j.id} &middot; ${esc(j.name || '')}</div></div></div>
+    <div style="display:flex;flex-direction:column;gap:6px;">${warns.map(x => `<button type="button" class="row-hover-red" onclick="closeModal(); openJobWarning(${j.id}, '${x.key}')" style="text-align:left;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px;cursor:pointer;font-family:inherit;font-size:13px;"><b style="color:#e10600;">${esc(x.tag)}</b> &middot; ${esc(x.title)}<div style="font-size:12px;color:var(--text2);margin-top:2px;">${esc(x.text)}</div></button>`).join('')}</div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal(); openEdit(${j.id})">Open job card</button><button class="btn btn-primary" onclick="closeModal()">OK</button></div>
+  </div>`);
+}
 function openJobWarning(id, key) {
   const j = (jobs || []).find(x => x && x.id === id);
   const x = j && jobWarnings(j).find(w => w.key === key);
@@ -11056,7 +11081,7 @@ function renderJobRowCompact(j, opts) {
             ${(done && canWastageAdjust() && !_finalizedJobIds.has(j.id)) ? `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;${jobHasManualMatch(j)?'':'opacity:0.35;'}" onclick="event.stopPropagation();openAdjustModal(${j.id})" title="${jobHasManualMatch(j)?'Matching manual consumption available — click to adjust':'No matching manual consumption for this paper type/size'}">&#9881; Adjust</button>` : ''}
             ${(_finalizedJobIds.has(j.id) && canWastageAdjust() && view === 'finalized') ? `<button class="btn btn-sm" style="background:#1a1a18;border-color:#1a1a18;color:#fff;font-weight:700;" onclick="event.stopPropagation();removeAdjustment(${j.id})" title="Remove adjustment and move back to Delivered">&#8634; Un-adjust</button>` : ''}
           </div>
-          ${isGroupTile ? '' : jobChipsHtml(j)}
+          ${isGroupTile ? ((opts && opts.groupChips) || '') : jobChipsHtml(j)}
           ${(()=>{ const d = jobDaysInProduction(j); const y = jobYieldParts(j); if (d === '—' && !y) return ''; return `
             <div class="job-day-stats" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right;">
               ${d !== '—' ? `<div style="line-height:1.15;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;">Day</div><div style="font-size:15px;font-weight:700;color:${isDeadlinePassed(j)?'#dc2626':'var(--text)'};">${esc(d)}</div></div>` : ''}
@@ -11638,7 +11663,7 @@ function renderJobCard(j, opts) {
       : `<div class="tile-ribbon" title="Click a step to move this job">${ribbon}</div>`}
     ${facts ? `<div class="tile-facts">${facts}</div>` : ''}
     ${clientPreview ? '' : overIssueBannerHtml(j)}
-    ${clientPreview || isGroupTile ? '' : jobChipsHtml(j)}
+    ${clientPreview ? '' : isGroupTile ? ((opts && opts.groupChips) || '') : jobChipsHtml(j)}
     ${clientDeliveriesBreakdown(j, clientPreview)}
     ${clientPreview ? '' : wastageAdjBanner(j.id)}
     ${clientPreview ? '' : `<div class="tile-actions">
@@ -36417,7 +36442,7 @@ function renderGroupTile(groupName, groupJobs, hitIds) {
     ref: '',
     bno: '',
   } : repr;
-  let html = renderJobCard(displaySource, { isGroupTile: true })
+  let html = renderJobCard(displaySource, { isGroupTile: true, groupChips: groupChipsHtml(groupJobs) })
     // .tile-head content is a flat sequence of spans / small labels — no
     // nested divs — so a lazy match to the first </div> is safe here.
     .replace(/<div class="tile-head">[\s\S]*?<\/div>/, `<div class="tile-head">${badges}</div>`)
@@ -36469,7 +36494,7 @@ function renderGroupTileCompact(groupName, groupJobs, hitIds) {
     ref: '',
     bno: '',
   } : repr;
-  let html = renderJobRowCompact(displaySource, { isGroupTile: true })
+  let html = renderJobRowCompact(displaySource, { isGroupTile: true, groupChips: groupChipsHtml(groupJobs) })
     // .job-id-row content is flat spans only.
     .replace(/<div class="job-id-row">[\s\S]*?<\/div>/, `<div class="job-id-row">${badges}</div>`)
     // .job-actions contains only <button> children.
