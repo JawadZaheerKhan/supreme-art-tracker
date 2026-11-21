@@ -14537,13 +14537,28 @@ async function openInvEdit(id) {
       <label class="form-label">Supplier</label>
       ${invComboHtml({ id: 'inv-supplier', options: invDistinct('supplier'), value: it.supplier || '', placeholder: 'New supplier', manageField: 'supplier' })}
     </div>
+    ${canRenamePaper() ? '' : `<div style="font-size:11.5px;color:var(--text2);margin:-4px 0 6px;">&#128274; Paper Type, Size and GSM can only be changed by an admin.</div>`}
     ${balanceSection}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveInvEdit(${id})">Save Changes</button>
     </div>
   </div>`);
+  // Paper Type / Size / GSM: an admin's own row (owner, 2026-11-21) - locked for everyone else.
+  if (!canRenamePaper()) {
+    // Paper Type is a combo (hidden value + a select + a "new" text box): lock what can be typed or picked.
+    const pt = document.getElementById('inv-paper-type');
+    const ptGroup = pt && pt.closest('.form-group');
+    const els = [...(ptGroup ? ptGroup.querySelectorAll('select, input:not([type=hidden]), button') : []), document.getElementById('inv-size'), document.getElementById('inv-gsm')];
+    for (const el of els) {
+      if (!el) continue;
+      if ('readOnly' in el) el.readOnly = true;
+      el.disabled = true; el.title = 'Only an admin can change this';
+      el.style.background = 'var(--bg2)'; el.style.cursor = 'not-allowed';
+    }
+  }
 }
+function canRenamePaper() { return isSuperAdmin() || hasPerm('inv_btn_rename_paper'); }
 // Quick +/- adjustment for Current Balance. sign: +1 to add, -1 to subtract.
 // Reads the "Adjust by" field, applies to inv-balance, clears the adjust field.
 // User still clicks Save Changes to commit; this just does the arithmetic.
@@ -14569,6 +14584,17 @@ async function saveInvEdit(id) {
     supplier:   (document.getElementById('inv-supplier').value || '').trim(),
   };
   if (!data.paper_type) { await alertDialog({ title: 'Paper type is required', kind: 'warn' }); return; }
+  // The paper renamed (admin): it changes everywhere - say so first (owner, 2026-11-21).
+  const was = inventoryAll.find(x => x.id === id);
+  const nrm = v => String(v == null ? '' : v).trim().toLowerCase();
+  const renamed = !!was && (nrm(was.paper_type) !== nrm(data.paper_type) || nrm(was.size) !== nrm(data.size) || nrm(was.gsm) !== nrm(data.gsm));
+  if (renamed) {
+    if (!canRenamePaper()) { await alertDialog({ title: 'Only an admin can change the paper', message: 'Paper Type, Size and GSM are locked for your role.', kind: 'warn' }); return; }
+    const nm = (o) => [o.paper_type, o.size, o.gsm ? o.gsm + 'gsm' : ''].filter(Boolean).join(' ');
+    const ok = await confirmDialog({ title: 'Change this paper everywhere?', confirmText: 'Change it',
+      message: `${nm(was)}${was.is_offcut ? ' (offcut)' : ''}\n→ ${nm(data)}${was.is_offcut ? ' (offcut)' : ''}\n\nEvery stock entry, History, report, job card (Size line) and issued list of this item will show the new paper. No stock moves.` });
+    if (!ok) return;
+  }
   // Balance correction. Field is in PACKETS / REAMS for usability,
   // but the DB column stores sheets — so convert before sending. Only fire
   // the correction transaction if the rounded sheet count actually changed.
@@ -14606,7 +14632,8 @@ async function saveInvEdit(id) {
   try {
     await api('PUT', `/api/inventory/${id}`, data);
     await loadInventory();
-    closeModal(); notify('Item updated');
+    if (renamed) { try { await loadJobs(); } catch (e) { /* the job cards refresh on their own later */ } }
+    closeModal(); notify(renamed ? 'Paper changed everywhere' : 'Item updated');
   } catch(e) {
     // 409 = stale balance. Show a friendly message + the actual current value
     // so the user can redo with fresh numbers. The form auto-closes; they
@@ -45165,6 +45192,7 @@ const ACC_INVENTORY_TAB_ROWS = [
   { key: 'inv_btn_add_import',      type: 'action' },
   { key: 'inv_btn_reverse',         type: 'action-30day' },
   { key: 'inv_btn_edit_paper',      type: 'action' },
+  { key: 'inv_btn_rename_paper',    type: 'action' },
   { key: 'inv_btn_dismiss_pending', type: 'action' },
   { key: 'inv_btn_batches',         type: 'button' },
   { key: 'inv_btn_print_sticker',   type: 'action' },
