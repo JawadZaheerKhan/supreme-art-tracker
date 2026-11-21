@@ -4161,6 +4161,13 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       <span style="color:var(--text2);font-size:12px;">to</span>
       <input type="date" id="products-dto" class="filter" onchange="setProductsDateCustom()" style="padding:6px;">
     </span>
+    <style>
+      /* Products "No rate" filter (owner, 2026-11-21) - amber; filled while on. */
+      #products-norate-btn { border: 1.5px solid #f59e0b; background: #fffbeb; color: #92400e; font: inherit; font-size: 13px; font-weight: 700; padding: 6px 12px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+      #products-norate-btn:hover { background: #fef3c7; }
+      #products-norate-btn.is-on { background: #f59e0b; color: #fff; }
+    </style>
+    <button type="button" id="products-norate-btn" onclick="toggleProductsNoRate()" title="Show only the products with no Rate saved - click again for all">&#9888; No rate <span id="products-norate-n"></span></button>
     <span id="products-count" style="margin-left:auto;font-size:12px;color:var(--text2);align-self:center;"></span>
   </div>
   <div id="products-grid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(260px, 1fr));gap:14px;padding:4px 2px;"></div>
@@ -35300,7 +35307,18 @@ function companyInfoLine(j) {
 // cartons × each job's own effective rate) / Avg Rate, with the default
 // Rate editable inline for delivery_write holders. Click a tile for its
 // full shipment history across every job with that name.
-let productsFilter = loadPersistedFilters('products', { search: '', code: '', company: '', type: '', dateRange: '', dfrom: '', dto: '' });
+let productsFilter = loadPersistedFilters('products', { search: '', code: '', company: '', type: '', dateRange: '', dfrom: '', dto: '', noRate: false });
+// "No rate" filter (owner, 2026-11-21): products with no Rate saved on their tile (none, or 0).
+function productSavedRate(g) {
+  const row = productRates.find(r => String(r.product || '').trim().toLowerCase() === g.key);
+  const v = row ? Number(row.rate) : null;
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+function toggleProductsNoRate() {
+  productsFilter.noRate = !productsFilter.noRate;
+  _persistProductsFilter();
+  refilterProductsGrid();
+}
 let __productGroupsAll = [];
 let __productGroupsCache = [];
 let productSpecials = [];
@@ -35407,13 +35425,25 @@ function refilterProductsGrid() {
   // Item Code (owner, 2026-10-09): a product shows when any of its jobs'
   // Code contains it; spaces ignored on both sides.
   const codeNeedle = String(productsFilter.code || '').toLowerCase().replace(/\s+/g, '');
-  const filtered = __productGroupsAll.filter(g => {
+  // No rate: only for someone who can see rates (the tile's Rate row) - otherwise it is off.
+  const canNoRate = hasPerm('products_btn_rate', 'view');
+  const noRate = canNoRate && !!productsFilter.noRate;
+  const base = __productGroupsAll.filter(g => {
     if (type && g.type !== type) return false;
     if (codeNeedle && !(g.jobs || []).some(j => searchMatch(j.jobcode, codeNeedle))) return false;
     if (company && ![...g.companies].some(c => c.toLowerCase() === company)) return false;
     if (search && !searchMatch([g.name, ...g.companies].join(' '), search)) return false;
     return true;
   });
+  const nrBtn = document.getElementById('products-norate-btn');
+  if (nrBtn) {
+    nrBtn.style.display = canNoRate ? '' : 'none';
+    nrBtn.classList.toggle('is-on', noRate);
+    const n = base.filter(g => productSavedRate(g) === null).length;   // within the other filters picked
+    const nEl = document.getElementById('products-norate-n');
+    if (nEl) nEl.textContent = '(' + n + ')';
+  }
+  const filtered = noRate ? base.filter(g => productSavedRate(g) === null) : base;
   filtered.sort((a, b) => b.revenue - a.revenue || b.cartons - a.cartons || a.name.localeCompare(b.name));
   __productGroupsCache = filtered;
   const grid = document.getElementById('products-grid');
