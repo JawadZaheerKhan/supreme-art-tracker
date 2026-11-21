@@ -13193,13 +13193,42 @@ app.put('/api/inventory/:id', requirePermission('inv_btn_edit'), async (req, res
       }
     }
 
+    // The paper itself renamed (owner, 2026-11-21 - "25x18" was really 26x18): every stock row, issue, History and
+    // report already follows (they point at the item), but two texts are saved ON the jobs - the card's Size / GSM
+    // line and the paper name in its issued list. They follow too. A Size line someone typed by hand (not the old
+    // paper's own text) is left alone.
+    let jobsFollowed = 0, issuedFollowed = 0;
+    if (item) {
+      const o = before[0];
+      const norm = v => String(v == null ? '' : v).trim().toLowerCase();
+      if (norm(o.paper_type) !== norm(item.paper_type) || norm(o.size) !== norm(item.size) || norm(o.gsm) !== norm(item.gsm)) {
+        const sizeTxt = it => `${it.size || ''}${it.size && it.gsm ? ' / ' : ''}${it.gsm ? it.gsm + 'gsm' : ''}`;
+        const paperTxt = it => [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : ''].filter(Boolean).join(' ');
+        if (sizeTxt(o) && sizeTxt(item)) {
+          const r1 = await sql`
+            UPDATE jobs SET size = ${sizeTxt(item)}, updated_at = NOW()
+             WHERE inventory_item_id = ${item.id} AND lower(trim(COALESCE(size, ''))) = ${sizeTxt(o).toLowerCase()}
+            RETURNING id`;
+          jobsFollowed = r1.length;
+        }
+        const r2 = await sql`
+          UPDATE jobs SET issued_items = (
+            SELECT jsonb_agg(CASE WHEN e->>'item_id' = ${String(item.id)} THEN jsonb_set(e, '{paper}', to_jsonb(${paperTxt(item)}::text)) ELSE e END ORDER BY ord)
+              FROM jsonb_array_elements(issued_items) WITH ORDINALITY AS t(e, ord)), updated_at = NOW()
+           WHERE jsonb_typeof(issued_items) = 'array'
+             AND EXISTS (SELECT 1 FROM jsonb_array_elements(issued_items) x WHERE x->>'item_id' = ${String(item.id)})
+          RETURNING id`;
+        issuedFollowed = r2.length;
+      }
+    }
     if (item) {
       const label = `${item.paper_type}${item.size?' '+item.size:''}${item.gsm?' '+item.gsm+'gsm':''}${item.brand?' · '+item.brand:''}`;
       const fieldChanges = diffFields(before[0], { paper_type, size, gsm, brand, reorder_threshold, supplier }, INVENTORY_DIFF_FIELDS);
+      const follow = (jobsFollowed || issuedFollowed) ? ` · followed on ${jobsFollowed} job card${jobsFollowed === 1 ? '' : 's'} (Size line) and ${issuedFollowed} issued list${issuedFollowed === 1 ? '' : 's'}` : '';
       await logAudit(sql, req, {
         action: 'inventory.update', entityType: 'inventory', entityId: item.id,
-        summary: `Edited paper item: ${label}${fieldChanges.length ? ' — ' + fieldChanges.join('; ') : ''}`,
-        metadata: { changes: fieldChanges },
+        summary: `Edited paper item: ${label}${fieldChanges.length ? ' — ' + fieldChanges.join('; ') : ''}${follow}`,
+        metadata: { changes: fieldChanges, jobs_followed: jobsFollowed, issued_followed: issuedFollowed },
       });
     }
     // Re-fetch so the returned row reflects any balance correction above.
