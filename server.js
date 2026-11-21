@@ -14372,7 +14372,9 @@ app.get('/api/inventory/:id/transactions', requireAuth, async (req, res) => {
       transactions: txs,
       current_balance: currentBalance,
       item_ids: memberIds,
-      brands: members.map(x => x.brand).filter(Boolean),
+      // An item with no brand counts as its own brand ("no brand") - leaving it out hid the Brand column on a paper
+      // with one branded item and one without, so its History showed only the total (owner, 2026-11-21, 26x18).
+      brands: members.map(x => x.brand || 'no brand'),
       // Each brand's own balance and when it was deleted: a deleted brand's
       // entries stay in this History, so its stock counts in "After" up to
       // the moment it was deleted (owner, 2026-10-23).
