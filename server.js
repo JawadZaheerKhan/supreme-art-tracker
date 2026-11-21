@@ -6025,20 +6025,28 @@ async function jobMainPaperOverIssue(sql, job) {
   if (total <= 0) return null;
   const sameGroup = (a, b) => (a.paper_type || '') === (b.paper_type || '') && (a.size || '') === (b.size || '')
     && String(a.gsm || '') === String(b.gsm || '') && !!a.is_offcut === !!b.is_offcut;
-  let secSheets = 0;
+  // Every 2nd / 3rd paper is its own need and its own issue - even when it is the SAME paper as the 1st (owner,
+  // 2026-11-21, E-1172: 1st 8 -> 5.5 packets with a 2nd paper of 2.5 of the same board, each issued fresh; the 1st's
+  // extra 2.5 used to hide because the paper was counted as one). Its share comes off the 1st paper's need, and what
+  // went out FOR it (its issued_items rows, else its issued_sheets) comes off the 1st paper's issued.
+  let secSheets = 0, sameGroupExtraIssued = 0;
   for (const e of EXTRA_PAPERS) {
     const sec = p[e.key];
     if (sec && sec.inventory_item_id && parseFloat(sec.packets) > 0) {
       const secItem = (await sql`SELECT * FROM inventory_items WHERE id = ${sec.inventory_item_id}`)[0];
-      if (secItem && !sameGroup(secItem, anchor)) secSheets += Math.round(parseFloat(sec.packets) * packetSize(secItem.paper_type || ''));
+      if (!secItem) continue;
+      secSheets += Math.round(parseFloat(sec.packets) * packetSize(secItem.paper_type || ''));
+      if (sameGroup(secItem, anchor)) sameGroupExtraIssued += parseInt(sec.issued_sheets, 10) || 0;
     }
   }
+  const extraTx = new Set((Array.isArray(job.issued_items) ? job.issued_items : [])
+    .filter(x => x && EXTRA_SOURCES.has(x.source) && x.tx_id).map(x => Number(x.tx_id)));
   const topupSheets = (Array.isArray(p.packets_topups) ? p.packets_topups : [])
     .filter(t => t && t.status === 'approved' && t.source !== 'over-issue-reconcile' && !t.paper)
     .reduce((a, t) => a + Math.round((parseFloat(t.qty) || 0) * ps), 0);
   const needed = Math.max(0, total - secSheets) + topupSheets;
   const rows = await sql`
-    SELECT t.item_id, t.change, i.brand
+    SELECT t.id, t.item_id, t.change, i.brand
       FROM inventory_transactions t JOIN inventory_items i ON i.id = t.item_id
      WHERE t.job_id = ${job.id}
        AND t.reason = ANY(${OVER_ISSUE_LEDGER_REASONS})
@@ -6049,10 +6057,19 @@ async function jobMainPaperOverIssue(sql, job) {
        AND COALESCE(i.gsm::text, '') = ${String(anchor.gsm || '')}
        AND COALESCE(i.is_offcut, false) = ${!!anchor.is_offcut}`;
   const byItem = new Map();
+  let extraByTx = 0;
   for (const r of rows) {
+    if (extraTx.has(Number(r.id))) { extraByTx += -(Number(r.change) || 0); continue; }   // the 2nd / 3rd paper's own issue
     const e = byItem.get(r.item_id) || { item_id: r.item_id, brand: r.brand || null, sheets: 0 };
     e.sheets += -(Number(r.change) || 0);
     byItem.set(r.item_id, e);
+  }
+  // An extra paper's issue with no row link (older issued lists): its issued_sheets come off the biggest brand.
+  let extraLeft = Math.max(0, sameGroupExtraIssued - extraByTx);
+  for (const e of [...byItem.values()].sort((a, b) => b.sheets - a.sheets)) {
+    if (!(extraLeft > 0)) break;
+    const take = Math.min(extraLeft, Math.max(0, e.sheets));
+    e.sheets -= take; extraLeft -= take;
   }
   const issued = [...byItem.values()].reduce((a, e) => a + e.sheets, 0);
   const settled = (Array.isArray(p.over_issue_decisions) ? p.over_issue_decisions : []).reduce((a, d) => a + (Number(d && d.total_sheets) || 0), 0)
@@ -8064,7 +8081,27 @@ async function performIssueStockUnlocked(sql, req, id, body) {
     // well, since that is the figure the rest of the app quotes back.
     summary: `Issued ${packetsWithSheets(totalIssued, ps, unit)} of ${paperList} for Job E-${id}: ${job.name}${fullyIssued ? '' : ` · partial (${fmtPackets(remaining, ps)} ${unit} / ${remaining.toLocaleString()} sheets still needed)`}${job.cut_size && job.offcut_size ? ` · cut to ${job.cut_size}, ${packetsWithSheets(totalIssued, ps, unit)} of ${job.offcut_size} offcut returned` : ''}${stayAtCtp ? ' · issued while at CTP — goes straight to Printing when plates finish' : ''}`,
   });
-  return { job: updated[0] };
+  // After an issue (owner, 2026-11-21, E-1172): the 1st paper may now hold more than it needs - e.g. part of its need
+  // moved to a 2nd / 3rd paper that was just issued fresh. Same check as a packets edit; skipped while a decision is
+  // already waiting (this issue's own over-issue, or an earlier one). Never fails the issue itself.
+  let finalJob = updated[0];
+  try {
+    const jp = (finalJob && finalJob.particulars) || {};
+    if (finalJob && !jp.over_issue_pending && (finalJob.issuance_status === 'issued' || finalJob.issuance_status === 'ctp')) {
+      const oi = await jobMainPaperOverIssue(sql, finalJob);
+      if (oi) {
+        const np = { ...jp, over_issue_pending: overIssuePendingFrom(oi, req.user && req.user.email, 'after-issue') };
+        const upd = await sql`UPDATE jobs SET particulars = ${JSON.stringify(np)} WHERE id = ${id} RETURNING *`;
+        if (upd[0]) finalJob = upd[0];
+        await logAudit(sql, req, {
+          action: 'job.over_issue.raised', entityType: 'job', entityId: id,
+          summary: `Job E-${id}: 1st paper holds more than it now needs - ${oi.issued.toLocaleString()} sheets went out for it, it needs ${oi.needed.toLocaleString()}; ${oi.overSheets.toLocaleString()} sheets (${+(oi.overSheets / oi.ps).toFixed(2)} ${oi.unit}) extra waiting for a decision (Use in job / Add to Offcut / Send Back).`,
+          metadata: { issued_sheets: oi.issued, needed_sheets: oi.needed, over_sheets: oi.overSheets },
+        });
+      }
+    }
+  } catch (e) { console.error('over-issue check after issue failed:', e.message); }
+  return { job: finalJob };
 }
 
 app.post('/api/jobs/:id/issue-stock', requireAnyBtn(['inv_btn_stock_out', 'inv_btn_offcut_issuance']), async (req, res) => {
