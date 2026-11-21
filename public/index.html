@@ -14465,7 +14465,13 @@ function openInvAddOffcut() {
         <input type="number" id="inv-opening" placeholder="0" min="0" oninput="invOpeningSync('sheets')">
       </div>
     </div>
-    <div class="form-group"><label class="form-label">Opening Notes</label><input type="text" id="inv-opening-notes" placeholder="e.g. From leftover run E-88"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Reason</label>
+        <select id="inv-open-reason" onchange="offcutJobBoxSync('inv-open-reason', 'inv-open-job-wrap')" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;">${STOCK_IN_REASONS.offcut.map(([v, l], i) => `<option value="${v}"${i === 0 ? ' selected' : ''}>${l}</option>`).join('')}</select>
+      </div>
+      ${offcutJobBoxHtml('inv-open-job-wrap', 'inv-open-job')}
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="inv-opening-notes" placeholder="optional"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" style="background:#0891b2;border-color:#0e7490;color:#fff;" onclick="saveInvAddOffcut()">Add Offcut</button>
@@ -14484,9 +14490,15 @@ async function saveInvAddOffcut() {
     opening_balance: parseInt(document.getElementById('inv-opening').value, 10) || 0,
     opening_notes:   document.getElementById('inv-opening-notes').value.trim(),
     is_offcut: true,
+    // Same as an offcut Stock In (owner, 2026-11-21): Left over (with its job) or Adjustment; no challan.
+    opening_reason: (document.getElementById('inv-open-reason') || {}).value || 'left-over',
+    opening_job: String((document.getElementById('inv-open-job') || {}).value || '').trim().replace(/^E-?\s*/i, ''),
   };
   if (!data.paper_type) { await alertDialog({ title: 'Paper type is required', kind: 'warn' }); return; }
   if (!data.size)       { await alertDialog({ title: 'Offcut size is required', kind: 'warn' }); return; }
+  if (data.opening_balance > 0 && data.opening_reason === 'left-over' && !/^\d+$/.test(data.opening_job)) {
+    await alertDialog({ title: 'Enter the job number', message: 'Left over: type the E-number of the job it was left over from (e.g. 1007).', kind: 'warn' }); return;
+  }
   showSaving(true);
   try {
     const saved = await api('POST', '/api/inventory', data);
@@ -14741,15 +14753,20 @@ function openInvAddStock(id) {
         <input type="number" id="stock-qty" placeholder="0" min="1" oninput="stockQtySync('sheets', ${ps})">
       </div>
     </div>
-    <div class="form-row">
+    ${it.is_offcut ? `<div class="form-row">
+      <div class="form-group"><label class="form-label">Reason</label>
+        <select id="stock-reason" onchange="stockInReasonChanged()" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;">${stockReasonOptionsHtml(STOCK_IN_REASONS, it)}</select>
+      </div>
+      ${offcutJobBoxHtml('stock-job-wrap', 'stock-job')}
+    </div>` : `<div class="form-row">
       <div class="form-group"><label class="form-label">Challan No. <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input type="text" id="stock-challan" placeholder="e.g. CH-2026-042"></div>
       <div class="form-group"><label class="form-label">Reason</label>
         <select id="stock-reason" onchange="stockInReasonChanged()">${stockReasonOptionsHtml(STOCK_IN_REASONS, it)}</select>
       </div>
-    </div>
+    </div>`}
     <div id="stock-batch-wrap"></div>
     ${stockEntryDateHtml('stock-date')}
-    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stock-notes" placeholder="e.g. Delivered by XYZ Suppliers"></div>
+    <div class="form-group"><label class="form-label">Notes</label><input type="text" id="stock-notes" placeholder="${it.is_offcut ? 'optional' : 'e.g. Delivered by XYZ Suppliers'}"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" style="background:#166534;border-color:#166534;color:#fff;" onclick="saveInvAddStock(${id})">Add</button>
@@ -14775,12 +14792,18 @@ async function saveInvAddStock(id) {
   if (!qty || qty <= 0) { await alertDialog({ title: 'Quantity must be a positive number', kind: 'warn' }); return; }
   const entryDate = await readStockEntryDate('stock-date');
   if (entryDate === false) return;
+  // Offcut: no challan; a Left over names the job it came from (owner, 2026-11-21).
+  const jobEl = document.getElementById('stock-job');
+  const isLeftOver = !!jobEl && document.getElementById('stock-reason').value === 'left-over';
+  const jobNo = isLeftOver ? String(jobEl.value || '').trim().replace(/^E-?\s*/i, '') : '';
+  if (isLeftOver && !/^\d+$/.test(jobNo)) { await alertDialog({ title: 'Enter the job number', message: 'Left over: type the E-number of the job it was left over from (e.g. 1007).', kind: 'warn' }); return; }
   const data = {
     change: qty,
     entry_date: entryDate,
     reason: document.getElementById('stock-reason').value,
     notes:  document.getElementById('stock-notes').value.trim(),
-    challan_no: (document.getElementById('stock-challan').value || '').trim() || null,
+    challan_no: ((document.getElementById('stock-challan') || {}).value || '').trim() || null,
+    job_card: jobNo || undefined,
     // Only a delivery opens / adds to a batch; a return or adjustment counts in the 1st.
     batch: document.getElementById('stock-reason').value === 'delivery' ? (parseInt((document.getElementById('stock-batch') || {}).value, 10) || null) : null,
   };
@@ -17387,6 +17410,16 @@ function txBatchHtml(t) {
 function stockInReasonChanged() {
   const w = document.getElementById('stock-batch-wrap');
   if (w) w.style.display = document.getElementById('stock-reason').value === 'delivery' ? '' : 'none';
+  offcutJobBoxSync('stock-reason', 'stock-job-wrap');
+}
+// Offcut stock in (owner, 2026-11-21): "Left over" asks for the job it was left over from; Adjustment does not.
+function offcutJobBoxSync(reasonId, wrapId) {
+  const r = document.getElementById(reasonId), w = document.getElementById(wrapId);
+  if (r && w) w.style.display = r.value === 'left-over' ? '' : 'none';
+}
+// The job number box (E-number) for an offcut Left over.
+function offcutJobBoxHtml(wrapId, inputId) {
+  return `<div class="form-group" id="${wrapId}"><label class="form-label">Job No. *</label><input type="text" id="${inputId}" placeholder="left over from, e.g. 1007" inputmode="numeric" title="The job it was left over from - shows in the Offcut report's Job column"></div>`;
 }
 // Bulk rows: the batch box once a paper is picked.
 async function bulkInRefreshBatch(idx) {

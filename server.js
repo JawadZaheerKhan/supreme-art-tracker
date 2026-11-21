@@ -5247,7 +5247,7 @@ app.get('/api/jobs/:id/paper-reversals', requireAuth, async (req, res) => {
         FROM inventory_transactions r
         JOIN inventory_transactions o ON o.id = r.reverses_tx_id
         LEFT JOIN inventory_items i ON i.id = r.item_id
-       WHERE o.job_id = ${id}
+       WHERE o.job_id = ${id} AND o.change < 0   -- an issue undone; not a stock-in that names the job (an offcut left over)
       UNION ALL
       SELECT 'offcut' AS kind, r.id, r.created_at, r.user_email, r.actor_name, r.change, r.paired_tx_id AS reverses_tx_id, o.created_at AS issued_at,
              i.paper_type, i.size, i.gsm, i.brand, COALESCE(i.is_offcut, false) AS offcut
@@ -12955,10 +12955,24 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    let { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes, supplier, is_offcut } = req.body;
+    let { paper_type, size, gsm, brand, reorder_threshold, opening_balance, opening_notes, supplier, is_offcut, opening_reason, opening_job } = req.body;
     if (!paper_type) return res.status(400).json({ error: 'paper_type is required' });
     const isOffcut = !!is_offcut;
     if (!userHasBtn(req.user, isOffcut ? 'inv_btn_add_offcut' : 'inv_btn_add_paper')) return res.status(403).json({ error: 'Not allowed' });
+    // Add Offcut = an offcut stock-in (owner, 2026-11-21): its quantity has a reason - Left over (from a job: its
+    // number, a real job) or Adjustment - like Stock In on an offcut; no challan.
+    let openReason = 'opening-balance', openJobId = null;
+    if (isOffcut && parseSheets(opening_balance) > 0) {
+      openReason = opening_reason === 'adjustment' ? 'adjustment' : 'left-over';
+      if (openReason === 'left-over') {
+        const m = String(opening_job || '').trim().match(/^E?-?\s*(\d+)$/i);
+        if (!m) return res.status(400).json({ error: 'Left over: enter the job number it was left over from (e.g. 1007).' });
+        const [jr] = await sql`SELECT id FROM jobs WHERE id = ${parseInt(m[1], 10)} AND deleted_at IS NULL`;
+        if (!jr) return res.status(400).json({ error: `Job ${String(opening_job).trim()} was not found - enter its E-number (e.g. 1007).` });
+        openJobId = jr.id;
+      }
+    }
+    const openNotes = opening_notes || (openReason === 'opening-balance' ? 'Opening balance' : null);
     // Brand is stored uppercase for consistency — Ningbo / ningbo / NINGBO
     // all save as NINGBO. The case-insensitive duplicate check below still
     // catches dupes against the existing data even if old rows aren't
@@ -12977,7 +12991,7 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
     const restored = await restoreDeletedItem(sql, { paper_type, size, gsm, brand, isOffcut });
     if (restored) {
       if (opening > 0) {
-        await applyInventoryChange(sql, { itemId: restored.id, change: +opening, reason: 'opening-balance', jobId: null, notes: opening_notes || 'Opening balance', user: req.user });
+        await applyInventoryChange(sql, { itemId: restored.id, change: +opening, reason: openReason, jobId: openJobId, notes: openNotes, user: req.user });
       }
       await logAudit(sql, req, { action: 'inventory.restore', entityType: 'inventory', entityId: restored.id,
         summary: `Restored deleted paper item: ${label}${opening > 0 ? ` (opening ${opening.toLocaleString()} sheets)` : ''}` });
@@ -13024,13 +13038,13 @@ app.post('/api/inventory', requireInventoryWriter, async (req, res) => {
       await applyInventoryChange(sql, {
         itemId: item.id,
         change: +opening,
-        reason: 'opening-balance',
-        jobId: null,
-        notes: opening_notes || 'Opening balance',
+        reason: openReason,
+        jobId: openJobId,
+        notes: openNotes,
         user: req.user,
       });
       const refreshed = await sql`SELECT * FROM inventory_items WHERE id = ${item.id}`;
-      await logAudit(sql, req, { action: 'inventory.create', entityType: 'inventory', entityId: item.id, summary: `Added paper item: ${label} (opening ${opening.toLocaleString()} sheets)` });
+      await logAudit(sql, req, { action: 'inventory.create', entityType: 'inventory', entityId: item.id, summary: `Added ${isOffcut ? 'offcut' : 'paper'} item: ${label} (${openReason === 'opening-balance' ? 'opening' : openReason === 'left-over' ? `left over from Job E-${openJobId}:` : 'adjustment:'} ${opening.toLocaleString()} sheets)` });
       return res.json(refreshed[0]);
     }
     await logAudit(sql, req, { action: 'inventory.create', entityType: 'inventory', entityId: item.id, summary: `Added paper item: ${label}` });
@@ -13450,6 +13464,12 @@ app.post('/api/inventory/:id/transactions', requireInventoryWriter, async (req, 
         const rows = await sql`SELECT * FROM jobs WHERE id = ${candidate} AND deleted_at IS NULL`;
         if (rows[0]) { jobId = candidate; jobRow = rows[0]; }
       }
+    }
+    // Offcut Stock In "Left over" (owner, 2026-11-21): the job it was left over from - a real job, it fills the Offcut
+    // report's Job column. No challan on an offcut stock-in.
+    // (The Stock In form asks for it; Bulk Stock In has no job box - a left over without one still saves.)
+    if (delta > 0 && sourceItem.is_offcut && reason === 'left-over' && String(job_card || '').trim() && !jobId) {
+      return res.status(400).json({ error: `Job ${String(job_card).trim()} was not found - enter its E-number (e.g. 1007).` });
     }
 
     // Overdraw guard for stock-outs. Balance may not go negative.
