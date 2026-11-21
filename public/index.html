@@ -12798,10 +12798,35 @@ function jhWithReversals(audit, revs) {
   jhRevTx = new Set(all.filter(r => r.kind !== 'offcut').map(r => Number(r.reverses_tx_id)));
   jhSentTx = new Map();
   for (const r of all.filter(r => r.kind === 'offcut')) jhSentTx.set(Number(r.reverses_tx_id), (jhSentTx.get(Number(r.reverses_tx_id)) || 0) + Math.abs(+r.change || 0));
-  const list = all.filter(r => r.kind !== 'offcut');
-  if (!list.length) return rows;
-  const revOf = new Map(list.map(r => [Number(r.reverses_tx_id), r]));
+  // Edit paper (owner, 2026-11-21): the wrong paper's issue was reversed only to move it to the right paper - not paper
+  // coming back. Its "Paper edited" line says so; the issue it moved says "(paper changed to ... on ...)", and no
+  // separate "Issue reversed" line. The paper is named as it is NOW (a later rename shows).
+  const edited = new Map();
+  for (const a of rows) {
+    const m = a && a.action === 'job.paper_edited' && a.metadata;
+    if (m && m.tx_id) edited.set(Number(m.tx_id), a);
+  }
+  const invNow = typeof inventoryAll !== 'undefined' ? inventoryAll : [];
+  const nameNow = id => { const it = invNow.find(i => i.id === Number(id)); return it ? jhPaperLabel(it) + (it.is_offcut ? ' (offcut)' : '') : ''; };
+  for (let k = 0; k < rows.length; k++) {
+    const a = rows[k];
+    if (!a || a.action !== 'job.paper_edited') continue;
+    const m = a.metadata || {};
+    let s = String(a.summary || '').replace(/ \((?:Job E-\d+)?\)/, '');
+    const to = nameNow(m.to_item_id), from = nameNow(m.from_item_id);
+    if (to && from) s = s.replace(/ moved from .*? to .*?( · |$)/, ` moved from ${from} to ${to}$1`);
+    rows[k] = { ...a, summary: s };
+  }
+  const list = all.filter(r => r.kind !== 'offcut' && !edited.has(Number(r.reverses_tx_id)));
   const day = t => fmtDMY(localDateISO(new Date(t)));
+  for (let k = 0; k < rows.length; k++) {
+    const a = rows[k];
+    const ids = a && a.metadata && Array.isArray(a.metadata.tx_ids) ? a.metadata.tx_ids.map(Number) : [];
+    const ed = jhIsIssueEntry(a) ? ids.map(x => edited.get(x)).find(Boolean) : null;
+    if (ed) { const to = nameNow(ed.metadata && ed.metadata.to_item_id); rows[k] = { ...a, summary: `${a.summary || ''} (paper changed${to ? ' to ' + to : ''} on ${day(ed.created_at)})` }; }
+  }
+  if (!list.length) return rows.sort((x, y) => new Date(y.created_at) - new Date(x.created_at));
+  const revOf = new Map(list.map(r => [Number(r.reverses_tx_id), r]));
   for (let k = 0; k < rows.length; k++) {
     const a = rows[k];
     const ids = a && a.metadata && Array.isArray(a.metadata.tx_ids) ? a.metadata.tx_ids.map(Number) : [];

@@ -13834,7 +13834,8 @@ app.post('/api/inventory/transactions/:id/change-paper', requirePermission('inv_
       const meta = { tx_id: tx.id, reversal_tx_id: revId, new_tx_id: newTx, from_item_id: tx.item_id, to_item_id: newId, sheets, card };
       await logAudit(sql, req, { action: 'inventory.edit_paper', entityType: 'inventory', entityId: tx.item_id, summary, metadata: meta });
       await logAudit(sql, req, { action: 'inventory.edit_paper', entityType: 'inventory', entityId: newId, summary, metadata: meta });
-      if (tx.job_id) await logAudit(sql, req, { action: 'job.paper_edited', entityType: 'job', entityId: tx.job_id, summary, metadata: meta });
+      // The job's own History needs no "(Job E-..)" - it showed as an empty "()" there.
+      if (tx.job_id) await logAudit(sql, req, { action: 'job.paper_edited', entityType: 'job', entityId: tx.job_id, summary: summary.replace(` (Job E-${tx.job_id})`, ''), metadata: meta });
       res.json({ ok: true, new_tx_id: newTx, reversal_tx_id: revId, card });
     } finally { await releaseOpLocks(sql, held); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
