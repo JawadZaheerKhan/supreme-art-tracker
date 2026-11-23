@@ -6619,21 +6619,16 @@ function jobWarnDetect(j) {
   if (anyDate && !out.some(x => x.key === 'ready_empty')) out.push(anyDate);   // one READY sign, not two
   return out;
 }
-// What the tile shows: today's warnings, plus any found before that nobody ignored yet - a sign stays until it is
-// ignored, even once the figures are put right (owner, 2026-11-18). Ignored = hidden for the figures it had.
+// What the tile shows: the warnings the job's figures show right now. Once the figures are put right the sign goes off
+// by itself (owner, 2026-11-23 - it used to stay until someone pressed Ignore). Ignored = hidden for the figures it had.
 function jobWarnings(j) {
-  if (!jobWarnInScope(j) && !jobWarnDeliveredNoReady(j) && !(j && j.warn_raised && j.warn_raised.deliv_no_ready)) return [];
+  if (!jobWarnInScope(j) && !jobWarnDeliveredNoReady(j)) return [];
   const ign = (j.warn_ignored && typeof j.warn_ignored === 'object') ? j.warn_ignored : {};
   const raised = (j.warn_raised && typeof j.warn_raised === 'object') ? j.warn_raised : {};
   const isIgn = (k, sig) => ign[k] && String(ign[k].sig) === String(sig);
   const now = jobWarnDetect(j).filter(x => !isIgn(x.key, x.sig));
   jobWarnSave(j, now, raised);
-  const out = now.map(x => ({ ...x, at: raised[x.key] && String(raised[x.key].sig) === String(x.sig) ? raised[x.key].at : null }));
-  for (const [k, r] of Object.entries(raised)) {
-    if (!r || out.some(x => x.key === k) || isIgn(k, r.sig)) continue;
-    out.push({ key: k, tag: r.tag || '!', title: r.title || 'Warning', text: r.text || '', sig: r.sig, at: r.at, fixed: true });
-  }
-  return out;
+  return now.map(x => ({ ...x, at: raised[x.key] && String(raised[x.key].sig) === String(x.sig) ? raised[x.key].at : null }));
 }
 // Saves each new warning on the job once (it stays until ignored).
 const _jobWarnSent = new Set();
@@ -6685,7 +6680,6 @@ function openJobWarning(id, key) {
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:380px;">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">${JW_SVG.replace('width="17" height="15"', 'width="34" height="30"')}<div><div style="font-weight:800;color:#e10600;font-size:15px;">${esc(x.title)}</div><div style="font-size:12px;color:var(--text2);">E-${j.id} &middot; ${esc(j.name || '')}</div></div></div>
     <div style="font-size:14px;line-height:1.45;padding:8px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;">${esc(x.text)}</div>
-    ${x.fixed ? '<div style="font-size:12.5px;color:#166534;font-weight:700;margin-top:6px;">&#10003; Looks fixed now - press Ignore to clear it.</div>' : ''}
     ${x.at ? `<div style="font-size:11.5px;color:var(--text2);margin-top:4px;">Found on ${esc(fmtDMYT12(x.at))}</div>` : ''}
     <div class="modal-actions">
       ${seeBtn('job_btn_warning_ignore') ? `<button class="btn" data-acc="job_btn_warning_ignore" ${canIgnore ? '' : 'disabled'} onclick="ignoreJobWarning(${j.id}, '${x.key}')" title="Hide this warning on this job - it comes back if the figures change">Ignore</button>` : ''}
