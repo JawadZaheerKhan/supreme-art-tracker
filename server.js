@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-23-products';   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-23-plates';   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -728,6 +728,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, wastage, production & MIL and stock tiles with date filters (view only)', levels: { ceo: 'view' } },
   products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
   products_btn_name:    { label: 'Product name — rename a product on its tile (new and duplicated jobs take the new name; the Job Name box offers product names)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'hidden' } },
+  inv_btn_plate_store:  { label: 'Plate Store — blank plates per size (View: see the stock, its history and the Plate Register; Edit: Stock In / Stock Out and the sizes)', levels: { admin: 'yes', store_manager: 'yes', production_manager: 'view', ceo: 'view' } },
   products_btn_new:     { label: 'New / edit product — + New Product (a product without a job card), its details on a tile (company, item code, No. of Colors, UPS) and Delete for a product with no jobs', levels: { admin: 'yes', finance: 'yes' } },
 
   // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
@@ -2017,6 +2018,66 @@ async function initDb() {
         updated_at  TIMESTAMPTZ DEFAULT NOW()
       )
     `;
+    // Plates (owner, 2026-11-23). plate_sizes = the Plate Store: blank plates per size, each size for its machines
+    // (CD102, SM74, SORMZ, GTO, SM52 ...). plates = the plates made - one per colour of a product, named (Cyan,
+    // Magenta, Yellow, Black or a special name), of one size; active until scrapped (damaged, worn ...). plate_events
+    // = the Plate Register (made / reused / scrapped, per job and product). plate_stock_tx = the Plate Store ledger.
+    await sql`
+      CREATE TABLE IF NOT EXISTS plate_sizes (
+        id         SERIAL PRIMARY KEY,
+        name       TEXT NOT NULL,
+        machines   TEXT[] NOT NULL DEFAULT '{}',
+        low_at     INTEGER NOT NULL DEFAULT 0,
+        balance    INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        deleted_at TIMESTAMPTZ
+      )`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS plate_stock_tx (
+        id         SERIAL PRIMARY KEY,
+        size_id    INTEGER NOT NULL,
+        change     INTEGER NOT NULL,
+        reason     TEXT NOT NULL,
+        job_id     INTEGER,
+        plate_id   INTEGER,
+        notes      TEXT,
+        challan_no TEXT,
+        user_email TEXT,
+        actor_name TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS plates (
+        id              SERIAL PRIMARY KEY,
+        product_key     TEXT NOT NULL,
+        product_name    TEXT,
+        color_name      TEXT NOT NULL,
+        size_id         INTEGER,
+        status          TEXT NOT NULL DEFAULT 'active',
+        made_at         TIMESTAMPTZ DEFAULT NOW(),
+        made_job_id     INTEGER,
+        made_by         TEXT,
+        scrapped_at     TIMESTAMPTZ,
+        scrap_reason    TEXT,
+        scrapped_by     TEXT,
+        scrapped_job_id INTEGER,
+        replaced_by     INTEGER
+      )`;
+    await sql`CREATE INDEX IF NOT EXISTS plates_product_idx ON plates (product_key)`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS plate_events (
+        id          SERIAL PRIMARY KEY,
+        plate_id    INTEGER,
+        product_key TEXT,
+        job_id      INTEGER,
+        action      TEXT NOT NULL,
+        reason      TEXT,
+        size_id     INTEGER,
+        by_name     TEXT,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      )`;
+    await sql`CREATE INDEX IF NOT EXISTS plate_events_product_idx ON plate_events (product_key)`;
+    await sql`CREATE INDEX IF NOT EXISTS plate_events_job_idx ON plate_events (job_id)`;
     await sql`
       CREATE TABLE IF NOT EXISTS finance.company_settings (
         id          SERIAL PRIMARY KEY,
@@ -8415,6 +8476,282 @@ async function verifyPapercutPin(sql, rawPin) {
   return { operator: op };
 }
 
+// ── Plates (owner, 2026-11-23) ───────────────────────────────
+// A product's plates: one per colour, named, of one size (the size is the machine's - CD102, SM74, SORMZ, GTO, SM52).
+// CTP makes them at the Station (Plates screen) - each new plate takes one blank plate of its size out of the Plate
+// Store - or reuses the set on a repeat job; a damaged plate is removed and remade on its own screen (Damaged Plate).
+// Every step is a row in the Plate Register (plate_events).
+const PLATE_REASONS = { first: 'First set', damaged: 'Damaged', scratched: 'Scratched', worn: 'Worn out', artwork: 'Artwork changed', lost: 'Lost', size: 'New machine size', other: 'Other' };
+const PLATE_OUT_REASONS = { 'damaged-blank': 'Damaged blank', wasted: 'Wasted at CTP', test: 'Test plate', adjustment: 'Adjustment' };
+const plateNorm = s => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, '');
+// The size a machine prints with: a size whose machines name it (SM74 covers SM74-1 and SM74-2).
+function plateSizeForMachine(sizes, machine) {
+  const m = plateNorm(machine);
+  if (!m) return null;
+  return (sizes || []).find(s => (s.machines || []).some(x => { const n = plateNorm(x); return n && (m === n || m.startsWith(n) || n.startsWith(m)); })) || null;
+}
+// CTP's PIN (a machine with the CTP role) or a Manager PIN.
+async function verifyCtpPin(sql, rawPin) {
+  const pin = String(rawPin || '').trim();
+  if (!validPin(pin)) return { status: 400, error: 'Enter a 3-digit PIN' };
+  const op = (await sql`SELECT id, name, roles, stage_index, stage_indices, is_manager, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`)[0];
+  if (!op) return { status: 401, error: 'PIN not recognized' };
+  if (!op.is_manager && !rolesOf(op).includes('ctp')) return { status: 403, error: 'This PIN is not a CTP station.' };
+  return { operator: op };
+}
+// One blank plate out of the store (balance may go below zero - the stock in was not entered yet; it shows red).
+async function plateStockOut(sql, req, sizeId, { jobId, plateId, reason, notes }) {
+  if (!sizeId) return;
+  await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, plate_id, notes, user_email, actor_name)
+            VALUES (${sizeId}, -1, ${reason}, ${jobId || null}, ${plateId || null}, ${notes || null}, ${(req.user && req.user.email) || null}, ${(req.user && req.user.station_actor) || null})`;
+  await sql`UPDATE plate_sizes SET balance = balance - 1 WHERE id = ${sizeId}`;
+}
+async function makePlate(sql, req, { productKey, productName, colorName, sizeId, jobId, reason, by }) {
+  const [pl] = await sql`
+    INSERT INTO plates (product_key, product_name, color_name, size_id, made_job_id, made_by)
+    VALUES (${productKey}, ${productName}, ${colorName}, ${sizeId || null}, ${jobId || null}, ${by})
+    RETURNING *`;
+  await sql`INSERT INTO plate_events (plate_id, product_key, job_id, action, reason, size_id, by_name)
+            VALUES (${pl.id}, ${productKey}, ${jobId || null}, 'made', ${reason || 'first'}, ${sizeId || null}, ${by})`;
+  await plateStockOut(sql, req, sizeId, { jobId, plateId: pl.id, reason: 'plate-made', notes: `${colorName} plate for ${productName}${jobId ? ' (Job E-' + jobId + ')' : ''}` });
+  return pl;
+}
+async function scrapPlate(sql, plate, { reason, jobId, by }) {
+  await sql`UPDATE plates SET status = 'scrapped', scrapped_at = NOW(), scrap_reason = ${reason}, scrapped_by = ${by}, scrapped_job_id = ${jobId || null} WHERE id = ${plate.id}`;
+  await sql`INSERT INTO plate_events (plate_id, product_key, job_id, action, reason, size_id, by_name)
+            VALUES (${plate.id}, ${plate.product_key}, ${jobId || null}, 'scrapped', ${reason}, ${plate.size_id}, ${by})`;
+}
+// The product a job belongs to (aliases and tile names resolved) - its plates are the product's.
+async function plateProductOfJob(sql, job) {
+  const key = await productKeyOf(sql, job.name);
+  const [pn] = await sql`SELECT name FROM finance.product_names WHERE key = ${key}`;
+  return { key, name: (pn && pn.name) || String(job.name || '').trim() };
+}
+const plateWho = req => (req.user && req.user.station_actor) || (req.user && req.user.email) || 'unknown';
+
+// Sizes (the Plate Store) - read by everyone signed in (the Station needs them).
+app.get('/api/plates/sizes', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json(await sql`SELECT * FROM plate_sizes WHERE deleted_at IS NULL ORDER BY name`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/plates/sizes', requirePermission('inv_btn_plate_store'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const name = String((req.body && req.body.name) || '').trim().slice(0, 80);
+    if (!name) return res.status(400).json({ error: 'Name the plate size (e.g. SM74 · 745 x 605).' });
+    const machines = (Array.isArray(req.body.machines) ? req.body.machines : String(req.body.machines || '').split(','))
+      .map(x => String(x).trim()).filter(Boolean).slice(0, 20);
+    const low = Math.max(0, parseInt(req.body.low_at, 10) || 0);
+    const [row] = await sql`INSERT INTO plate_sizes (name, machines, low_at) VALUES (${name}, ${machines}, ${low}) RETURNING *`;
+    await logAudit(sql, req, { action: 'plate_size.create', entityType: 'plate_size', entityId: row.id, summary: `Plate size added: ${name} (machines: ${machines.join(', ') || '—'})` });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/plates/sizes/:id', requirePermission('inv_btn_plate_store'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const [before] = await sql`SELECT * FROM plate_sizes WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!before) return res.status(404).json({ error: 'Plate size not found' });
+    const name = String((req.body && req.body.name) || before.name).trim().slice(0, 80);
+    const machines = req.body.machines === undefined ? before.machines
+      : (Array.isArray(req.body.machines) ? req.body.machines : String(req.body.machines || '').split(',')).map(x => String(x).trim()).filter(Boolean).slice(0, 20);
+    const low = req.body.low_at === undefined ? before.low_at : Math.max(0, parseInt(req.body.low_at, 10) || 0);
+    const [row] = await sql`UPDATE plate_sizes SET name = ${name}, machines = ${machines}, low_at = ${low} WHERE id = ${id} RETURNING *`;
+    await logAudit(sql, req, { action: 'plate_size.update', entityType: 'plate_size', entityId: id, summary: `Plate size edited: ${before.name} -> ${name} (machines: ${machines.join(', ') || '—'}, low at ${low})` });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Stock In (plates received) / Stock Out (a damaged blank, wasted at CTP, a test plate, adjustment).
+app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const sizeId = parseInt(req.body && req.body.size_id, 10);
+    const qty = parseInt(req.body && req.body.qty, 10);
+    const dir = req.body && req.body.direction === 'out' ? 'out' : 'in';
+    if (!(qty > 0)) return res.status(400).json({ error: 'Enter how many plates.' });
+    const [s] = await sql`SELECT * FROM plate_sizes WHERE id = ${sizeId} AND deleted_at IS NULL`;
+    if (!s) return res.status(404).json({ error: 'Plate size not found' });
+    const reason = dir === 'in' ? 'stock-in' : (PLATE_OUT_REASONS[req.body.reason] ? req.body.reason : 'adjustment');
+    const change = dir === 'in' ? qty : -qty;
+    const notes = String(req.body.notes || '').trim().slice(0, 300) || null;
+    const challan = dir === 'in' ? (String(req.body.challan_no || '').trim().slice(0, 60) || null) : null;
+    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, notes, challan_no, user_email) VALUES (${sizeId}, ${change}, ${reason}, ${notes}, ${challan}, ${req.user.email})`;
+    const [row] = await sql`UPDATE plate_sizes SET balance = balance + ${change} WHERE id = ${sizeId} RETURNING *`;
+    await logAudit(sql, req, { action: 'plate_stock.' + dir, entityType: 'plate_size', entityId: sizeId,
+      summary: `Plate Store ${dir === 'in' ? 'Stock In' : 'Stock Out'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name}${dir === 'out' ? ' (' + PLATE_OUT_REASONS[reason] + ')' : ''}${challan ? ' · challan ' + challan : ''} · balance ${row.balance}` });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.get('/api/plates/stock-tx', requirePermission('inv_btn_plate_store', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const sizeId = parseInt(req.query.size_id, 10);
+    res.json(await sql`
+      SELECT t.*, j.name AS job_name FROM plate_stock_tx t LEFT JOIN jobs j ON j.id = t.job_id
+       WHERE (${Number.isFinite(sizeId) ? sizeId : null}::int IS NULL OR t.size_id = ${Number.isFinite(sizeId) ? sizeId : null})
+       ORDER BY t.created_at DESC, t.id DESC LIMIT 500`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// The Plate Register: every plate made / reused / scrapped.
+app.get('/api/plates/register', requirePermission('inv_btn_plate_store', 'view'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const day = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d || '')); return m ? new Date(businessWallClockToMs(+m[1], +m[2], +m[3], 0, 0)).toISOString() : null; };
+    const from = day(req.query.from), toStart = day(req.query.to);
+    const to = toStart ? new Date(new Date(toStart).getTime() + 86400000).toISOString() : null;
+    res.json(await sql`
+      SELECT e.*, p.color_name, p.product_name, s.name AS size_name, j.name AS job_name
+        FROM plate_events e
+        LEFT JOIN plates p ON p.id = e.plate_id
+        LEFT JOIN plate_sizes s ON s.id = e.size_id
+        LEFT JOIN jobs j ON j.id = e.job_id
+       WHERE (${from}::timestamptz IS NULL OR e.created_at >= ${from}::timestamptz)
+         AND (${to}::timestamptz IS NULL OR e.created_at < ${to}::timestamptz)
+       ORDER BY e.created_at DESC, e.id DESC LIMIT 2000`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// One product's plates (its tile): the plates in use and its whole register.
+app.get('/api/plates/product/:key', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const key = String(req.params.key || '').trim().toLowerCase();
+    const [plates, events] = await Promise.all([
+      sql`SELECT p.*, s.name AS size_name FROM plates p LEFT JOIN plate_sizes s ON s.id = p.size_id WHERE p.product_key = ${key} ORDER BY p.status, s.name, p.id`,
+      sql`SELECT e.*, p.color_name, s.name AS size_name FROM plate_events e LEFT JOIN plates p ON p.id = e.plate_id LEFT JOIN plate_sizes s ON s.id = e.size_id WHERE e.product_key = ${key} ORDER BY e.created_at DESC, e.id DESC`,
+    ]);
+    res.json({ plates, events });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Station - a job's plates: its product, the sizes, the size of its machine, the product's plates in use, and what
+// was done for this job already.
+app.get('/api/station/plates/job/:id', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const [job] = await sql`SELECT id, name, client, machine, particulars FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const prod = await plateProductOfJob(sql, job);
+    const sizes = await sql`SELECT * FROM plate_sizes WHERE deleted_at IS NULL ORDER BY name`;
+    const [pm] = await sql`SELECT colors FROM finance.products WHERE key = ${prod.key}`;
+    const plates = await sql`SELECT p.*, s.name AS size_name FROM plates p LEFT JOIN plate_sizes s ON s.id = p.size_id WHERE p.product_key = ${prod.key} AND p.status = 'active' ORDER BY p.size_id, p.id`;
+    const done = await sql`SELECT e.*, p.color_name, s.name AS size_name FROM plate_events e LEFT JOIN plates p ON p.id = e.plate_id LEFT JOIN plate_sizes s ON s.id = e.size_id WHERE e.job_id = ${id} ORDER BY e.id`;
+    const colors = String((((job.particulars || {}).no_of_colors) || {}).quantity || (pm && pm.colors) || '').trim();
+    const sz = plateSizeForMachine(sizes, job.machine);
+    res.json({ job: { id: job.id, name: job.name, client: job.client, machine: job.machine }, product: prod, colors, sizes, size_id: sz ? sz.id : null, plates, done });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Station - every plate in use, by product (the Damaged Plate screen).
+app.get('/api/station/plates/active', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json(await sql`SELECT p.*, s.name AS size_name FROM plates p LEFT JOIN plate_sizes s ON s.id = p.size_id WHERE p.status = 'active' ORDER BY p.product_name, s.name, p.id`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Station - make plates for a job: the names (one per colour), the size. A new set for artwork / a new size can
+// first scrap the product's plates in use of that size (replace_all).
+app.post('/api/station/plates/make', requireStationUser, async (req, res) => {
+  try {
+    if (!canProcessStation(req.user)) return res.status(403).json({ error: 'View-only: your role cannot save at the station.' });
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyCtpPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    await withStationActor(sql, req, v.operator);
+    const id = parseInt(req.body.job_id, 10);
+    const [job] = await sql`SELECT id, name FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const sizeId = parseInt(req.body.size_id, 10);
+    const [size] = await sql`SELECT * FROM plate_sizes WHERE id = ${sizeId} AND deleted_at IS NULL`;
+    if (!size) return res.status(400).json({ error: 'Pick the plate size.' });
+    const names = (Array.isArray(req.body.names) ? req.body.names : []).map(x => String(x || '').trim().replace(/\s+/g, ' ').slice(0, 60)).filter(Boolean);
+    if (!names.length) return res.status(400).json({ error: 'Name each plate (Cyan, Magenta, Yellow, Black or its own colour).' });
+    if (names.length > 16) return res.status(400).json({ error: 'Too many plates.' });
+    const reason = PLATE_REASONS[req.body.reason] ? req.body.reason : 'first';
+    const prod = await plateProductOfJob(sql, job);
+    const by = plateWho(req);
+    let scrapped = 0;
+    if (req.body.replace_all) {
+      const old = await sql`SELECT * FROM plates WHERE product_key = ${prod.key} AND size_id = ${sizeId} AND status = 'active'`;
+      for (const p of old) { await scrapPlate(sql, p, { reason, jobId: id, by }); scrapped++; }
+    }
+    const made = [];
+    for (const n of names) made.push(await makePlate(sql, req, { productKey: prod.key, productName: prod.name, colorName: n, sizeId, jobId: id, reason, by }));
+    await logAudit(sql, req, { action: 'job.plates_made', entityType: 'job', entityId: id,
+      summary: `Plates made: ${names.length} ${size.name} (${names.join(', ')}) for ${prod.name}${scrapped ? ` · the old ${scrapped} scrapped (${PLATE_REASONS[reason]})` : ''} · by ${by}` });
+    const [after] = await sql`SELECT balance FROM plate_sizes WHERE id = ${sizeId}`;
+    res.json({ ok: true, made: made.length, scrapped, balance: after ? after.balance : null });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Station - a repeat job prints with the product's plates in use of that size.
+app.post('/api/station/plates/reuse', requireStationUser, async (req, res) => {
+  try {
+    if (!canProcessStation(req.user)) return res.status(403).json({ error: 'View-only: your role cannot save at the station.' });
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyCtpPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    await withStationActor(sql, req, v.operator);
+    const id = parseInt(req.body.job_id, 10);
+    const [job] = await sql`SELECT id, name FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const sizeId = parseInt(req.body.size_id, 10);
+    const prod = await plateProductOfJob(sql, job);
+    const plates = await sql`SELECT * FROM plates WHERE product_key = ${prod.key} AND size_id = ${sizeId} AND status = 'active'`;
+    if (!plates.length) return res.status(400).json({ error: 'This product has no plates of that size - make them.' });
+    const by = plateWho(req);
+    for (const p of plates) {
+      await sql`INSERT INTO plate_events (plate_id, product_key, job_id, action, reason, size_id, by_name) VALUES (${p.id}, ${prod.key}, ${id}, 'reused', NULL, ${p.size_id}, ${by})`;
+    }
+    await logAudit(sql, req, { action: 'job.plates_reused', entityType: 'job', entityId: id, summary: `Old plates used: ${plates.length} (${plates.map(p => p.color_name).join(', ')}) of ${prod.name} · by ${by}` });
+    res.json({ ok: true, reused: plates.length });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Station - Damaged Plate: remove a plate and make its new one (same colour, same size; one blank out of the store).
+app.post('/api/station/plates/replace', requireStationUser, async (req, res) => {
+  try {
+    if (!canProcessStation(req.user)) return res.status(403).json({ error: 'View-only: your role cannot save at the station.' });
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyCtpPin(sql, req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    await withStationActor(sql, req, v.operator);
+    const plateId = parseInt(req.body.plate_id, 10);
+    const [p] = await sql`SELECT * FROM plates WHERE id = ${plateId} AND status = 'active'`;
+    if (!p) return res.status(404).json({ error: 'That plate is not in use any more.' });
+    const reason = PLATE_REASONS[req.body.reason] && req.body.reason !== 'first' ? req.body.reason : 'damaged';
+    let jobId = null;
+    if (req.body.job_id) {
+      const m = String(req.body.job_id).trim().match(/^E?-?\s*(\d+)$/i);
+      const [j] = m ? await sql`SELECT id FROM jobs WHERE id = ${parseInt(m[1], 10)} AND deleted_at IS NULL` : [];
+      if (!j) return res.status(400).json({ error: 'Job not found - enter its E-number or leave it empty.' });
+      jobId = j.id;
+    }
+    const by = plateWho(req);
+    await scrapPlate(sql, p, { reason, jobId, by });
+    const remake = req.body.remake !== false;
+    let np = null;
+    if (remake) {
+      np = await makePlate(sql, req, { productKey: p.product_key, productName: p.product_name, colorName: p.color_name, sizeId: p.size_id, jobId, reason, by });
+      await sql`UPDATE plates SET replaced_by = ${np.id} WHERE id = ${p.id}`;
+    }
+    await logAudit(sql, req, { action: 'plate.replaced', entityType: 'plate', entityId: p.id,
+      summary: `Plate ${remake ? 'replaced' : 'removed'}: ${p.color_name} of ${p.product_name} (${PLATE_REASONS[reason]})${jobId ? ' · Job E-' + jobId : ''} · by ${by}` });
+    res.json({ ok: true, new_plate_id: np ? np.id : null });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // ── Line Clearance Log (owner, 2026-11-11) ──────────────────
 // QA's PIN only. Everything is typed by QA - nothing filled in for him.
 async function verifyQaPin(sql, rawPin) {
@@ -11107,6 +11444,9 @@ app.post('/api/products/rename', requirePermission('products_btn_name'), async (
       if (!hasSpecials.length) await sql`UPDATE finance.product_specials SET product_key = ${toKey} WHERE product_key = ${from}`;
       await sql`DELETE FROM finance.product_names WHERE key = ${from}`;
     }
+    // Its plates and their register go with it (owner, 2026-11-23).
+    await sql`UPDATE plates SET product_key = ${toKey}, product_name = ${to} WHERE product_key = ${from}`;
+    if (toKey !== from) await sql`UPDATE plate_events SET product_key = ${toKey} WHERE product_key = ${from}`;
     // Its details (company, code, colours, UPS) go with it too, unless the new name already has its own.
     if (toKey !== from) {
       const hasDetails = await sql`SELECT 1 FROM finance.products WHERE key = ${toKey}`;

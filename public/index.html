@@ -4120,6 +4120,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="btn ceo-hide" onclick="openBulkStockOut()" style="background:#DC2626;color:#fff;border-color:#DC2626;">&#128228; Stock Out (Bulk)</button>
     <button class="btn" data-acc="inv_btn_print_sticker" onclick="openInvSticker(0)" title="Print a pallet sticker with every detail typed by hand - no Stock In needed">&#128424; Print Sticker</button>
     <button class="btn" id="inv-brands-btn" data-acc="inv_btn_brands" data-acc-need="view" onclick="openInvBrands()" title="Every brand and supplier - fix a spelling, or change an item's brand / supplier">&#127991; Brands &amp; Suppliers</button>
+    <button class="btn" id="inv-plates-btn" data-acc="inv_btn_plate_store" data-acc-need="view" onclick="openPlateStore()" title="Blank plates per size, Stock In, and the Plate Register (every plate made, reused or removed)">&#129513; Plate Store</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -35550,7 +35551,7 @@ function productTileHtml(g, i) {
     ${noJob ? `<div style="margin-top:4px;"><span style="display:inline-block;font-size:10.5px;font-weight:800;color:#fff;background:#dc2626;border-radius:999px;padding:1px 8px;letter-spacing:.03em;">NO JOB YET</span></div>` : ''}
     ${productCodesLine(g)}
     <div style="font-size:12px;color:var(--text2);margin-top:4px;">${esc(companies) || '&mdash;'}</div>
-    ${detailBits || canDetails ? `<div style="font-size:12px;color:var(--text);margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${detailBits}${canDetails ? `<button type="button" data-acc="products_btn_new" onclick="event.stopPropagation(); openProductDetailsModal(${i})" title="Company, item code, No. of Colors, UPS - a new job card with this name fills them in" style="border:1px solid var(--border);background:#fff;border-radius:5px;padding:0 6px;font-size:11px;cursor:pointer;color:var(--text2);">&#9998; Details</button>` : ''}${noJob && canDetails ? `<button type="button" data-acc="products_btn_new" onclick="event.stopPropagation(); deleteProductNoJobs(${i})" title="Delete this product - it has no jobs" style="border:1px solid #fca5a5;background:#fff;border-radius:5px;padding:0 6px;font-size:11px;cursor:pointer;color:#b91c1c;">Delete</button>` : ''}</div>` : ''}
+    ${true ? `<div style="font-size:12px;color:var(--text);margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${detailBits}<button type="button" onclick="event.stopPropagation(); openProductPlates(${i})" title="This product's plates - which colours, made when, and every change" style="border:1px solid #c7d2fe;background:#eef2ff;border-radius:5px;padding:0 6px;font-size:11px;cursor:pointer;color:#1e3a8a;">&#129513; Plates</button>${canDetails ? `<button type="button" data-acc="products_btn_new" onclick="event.stopPropagation(); openProductDetailsModal(${i})" title="Company, item code, No. of Colors, UPS - a new job card with this name fills them in" style="border:1px solid var(--border);background:#fff;border-radius:5px;padding:0 6px;font-size:11px;cursor:pointer;color:var(--text2);">&#9998; Details</button>` : ''}${noJob && canDetails ? `<button type="button" data-acc="products_btn_new" onclick="event.stopPropagation(); deleteProductNoJobs(${i})" title="Delete this product - it has no jobs" style="border:1px solid #fca5a5;background:#fff;border-radius:5px;padding:0 6px;font-size:11px;cursor:pointer;color:#b91c1c;">Delete</button>` : ''}</div>` : ''}
     <div style="display:grid;grid-template-columns:repeat(${statCols},1fr);gap:8px;margin-top:10px;font-size:12px;">
       <div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Jobs</div><div style="font-weight:700;">${g.jobs.length}</div></div>
       <div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Cartons</div><div style="font-weight:700;">${g.cartons.toLocaleString()}</div></div>
@@ -35760,6 +35761,162 @@ async function saveRenameProduct(i) {
     notify(`Renamed to "${to}"`);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+// ── Plate Store + Plate Register (owner, 2026-11-23) ───────────────────
+// Blank plates per size (each for its machines); a plate made at the CTP Station takes one out by itself. The
+// Register lists every plate made, reused or removed, with its job, product, colour, size, reason and who.
+let plateStoreTab = 'store', plateSizesCache = [], plateRegRows = null, plateRegFrom = '', plateRegTo = '', plateRegQ = '';
+const PLATE_REASON_TXT = { first: 'First set', damaged: 'Damaged', scratched: 'Scratched', worn: 'Worn out', artwork: 'Artwork changed', lost: 'Lost', size: 'New machine size', other: 'Other' };
+const PLATE_TX_TXT = { 'stock-in': 'Stock In', 'plate-made': 'Plate made', 'damaged-blank': 'Damaged blank', wasted: 'Wasted at CTP', test: 'Test plate', adjustment: 'Adjustment' };
+async function openPlateStore(tab) {
+  plateStoreTab = tab || plateStoreTab || 'store';
+  if (!plateRegFrom) { const t = localDateISO(); plateRegFrom = t.slice(0, 8) + '01'; plateRegTo = t; }
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width:1000px !important;">
+    <h2>&#129513; Plates</h2>
+    <div style="display:flex;gap:8px;margin-bottom:10px;">
+      <button class="btn ${plateStoreTab === 'store' ? 'btn-primary' : ''}" onclick="openPlateStore('store')">Plate Store</button>
+      <button class="btn ${plateStoreTab === 'register' ? 'btn-primary' : ''}" onclick="openPlateStore('register')">Plate Register</button>
+    </div>
+    <div id="plate-store-body">Loading…</div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
+  </div>`);
+  if (plateStoreTab === 'store') await renderPlateStore(); else await loadPlateRegister();
+}
+async function renderPlateStore() {
+  const el = document.getElementById('plate-store-body'); if (!el) return;
+  try { plateSizesCache = await api('GET', '/api/plates/sizes'); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
+  const can = isSuperAdmin() || hasPerm('inv_btn_plate_store', 'yes');
+  const rows = plateSizesCache.map(z => {
+    const low = z.balance < 0 || (z.low_at > 0 && z.balance <= z.low_at);
+    return `<tr>
+      <td style="padding:7px 8px;font-weight:700;">${esc(z.name)}</td>
+      <td style="padding:7px 8px;">${(z.machines || []).map(esc).join(', ') || '&mdash;'}</td>
+      <td style="padding:7px 8px;text-align:right;font-weight:800;color:${low ? '#b91c1c' : '#166534'};">${z.balance.toLocaleString()}${z.balance < 0 ? ' <span style="font-size:11px;">(stock in missing)</span>' : low ? ' <span style="font-size:11px;">(low)</span>' : ''}</td>
+      <td style="padding:7px 8px;text-align:right;">${z.low_at || '&mdash;'}</td>
+      <td style="padding:7px 8px;text-align:right;white-space:nowrap;">
+        ${can ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;" onclick="plateStockForm(${z.id}, 'in')">+ Stock In</button>
+        <button class="btn btn-sm" onclick="plateStockForm(${z.id}, 'out')">&minus; Stock Out</button>` : ''}
+        <button class="btn btn-sm" onclick="plateStockHistory(${z.id})">History</button>
+        ${can ? `<button class="btn btn-sm" onclick="plateSizeForm(${z.id})">Edit</button>` : ''}
+      </td></tr>`;
+  }).join('');
+  el.innerHTML = `<div style="font-size:12.5px;color:var(--text2);margin-bottom:8px;">Blank plates per size. Every plate CTP makes takes one of its machine's size out by itself.</div>
+    <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="background:var(--bg2);"><th style="text-align:left;padding:7px 8px;">Size</th><th style="text-align:left;padding:7px 8px;">Machines</th><th style="text-align:right;padding:7px 8px;">In stock</th><th style="text-align:right;padding:7px 8px;">Low at</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" style="padding:14px;text-align:center;color:var(--text3);">No plate sizes yet.</td></tr>'}</tbody>
+    </table>
+    ${can ? `<button class="btn" style="margin-top:10px;" onclick="plateSizeForm(0)">+ Add plate size</button>` : ''}`;
+}
+async function plateSizeForm(id) {
+  const z = plateSizesCache.find(x => x.id === id) || { name: '', machines: [], low_at: 0 };
+  const name = await promptDialog({ title: id ? 'Edit plate size' : 'Add plate size', message: 'Size name (e.g. SM74 · 745 x 605)', defaultValue: z.name, confirmText: 'Next' });
+  if (name == null || !String(name).trim()) return;
+  const machines = await promptDialog({ title: 'Machines for ' + String(name).trim(), message: 'The machines that print with this size - comma separated (e.g. SM74-1, SM74-2)', defaultValue: (z.machines || []).join(', '), confirmText: 'Next' });
+  if (machines == null) return;
+  const low = await promptDialog({ title: 'Low stock sign', message: 'Show it in red when this many or fewer are left (0 = no sign)', defaultValue: String(z.low_at || 0), confirmText: 'Save' });
+  if (low == null) return;
+  showSaving(true);
+  try {
+    const body = { name: String(name).trim(), machines: String(machines), low_at: parseInt(low, 10) || 0 };
+    if (id) await api('PUT', `/api/plates/sizes/${id}`, body); else await api('POST', '/api/plates/sizes', body);
+    await openPlateStore('store');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function plateStockForm(id, dir) {
+  const z = plateSizesCache.find(x => x.id === id); if (!z) return;
+  const qty = await promptDialog({ title: `${dir === 'in' ? 'Stock In' : 'Stock Out'} · ${z.name}`, message: 'How many plates?', confirmText: 'Next' });
+  if (qty == null) return;
+  const n = parseInt(qty, 10);
+  if (!(n > 0)) { notify('Enter how many plates'); return; }
+  let reason = null, challan = null;
+  if (dir === 'out') {
+    const r = await promptDialog({ title: 'Why?', message: '1 = Damaged blank · 2 = Wasted at CTP · 3 = Test plate · 4 = Adjustment', defaultValue: '1', confirmText: 'Next' });
+    if (r == null) return;
+    reason = ({ 1: 'damaged-blank', 2: 'wasted', 3: 'test', 4: 'adjustment' })[String(r).trim()] || 'adjustment';
+  } else {
+    challan = await promptDialog({ title: 'Challan No.', message: 'optional', confirmText: 'Next' });
+    if (challan == null) return;
+  }
+  const notes = await promptDialog({ title: 'Notes', message: 'optional', confirmText: 'Save' });
+  if (notes == null) return;
+  showSaving(true);
+  try {
+    await api('POST', '/api/plates/stock', { size_id: id, qty: n, direction: dir, reason, challan_no: challan, notes });
+    notify(`${dir === 'in' ? '+' : '-'}${n} ${z.name} plates`);
+    await openPlateStore('store');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function plateStockHistory(id) {
+  const z = plateSizesCache.find(x => x.id === id); if (!z) return;
+  const el = document.getElementById('plate-store-body'); if (!el) return;
+  el.innerHTML = 'Loading…';
+  let rows = [];
+  try { rows = await api('GET', `/api/plates/stock-tx?size_id=${id}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
+  el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;"><b>${esc(z.name)} &middot; history</b><button class="btn btn-sm" onclick="renderPlateStore()">&lsaquo; Back</button></div>
+    <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
+      <thead><tr><th style="text-align:left;padding:6px 8px;">When</th><th style="text-align:right;padding:6px 8px;">Change</th><th style="text-align:left;padding:6px 8px;">Reason</th><th style="text-align:left;padding:6px 8px;">Job</th><th style="text-align:left;padding:6px 8px;">Challan</th><th style="text-align:left;padding:6px 8px;">Notes</th><th style="text-align:left;padding:6px 8px;">By</th></tr></thead>
+      <tbody>${rows.map(t => `<tr><td style="padding:5px 8px;white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}</td>
+        <td style="padding:5px 8px;text-align:right;font-weight:800;color:${t.change > 0 ? '#166534' : '#b91c1c'};">${t.change > 0 ? '+' : ''}${t.change}</td>
+        <td style="padding:5px 8px;">${esc(PLATE_TX_TXT[t.reason] || t.reason)}</td>
+        <td style="padding:5px 8px;">${t.job_id ? 'E-' + t.job_id : '&mdash;'}</td>
+        <td style="padding:5px 8px;">${esc(t.challan_no || '') || '&mdash;'}</td>
+        <td style="padding:5px 8px;">${esc(t.notes || '')}</td>
+        <td style="padding:5px 8px;">${esc(t.actor_name || String(t.user_email || '').split('@')[0] || '')}</td></tr>`).join('') || '<tr><td colspan="7" style="padding:12px;text-align:center;color:var(--text3);">Nothing yet.</td></tr>'}</tbody>
+    </table></div>`;
+}
+async function loadPlateRegister() {
+  const el = document.getElementById('plate-store-body'); if (!el) return;
+  el.innerHTML = 'Loading…';
+  try { plateRegRows = await api('GET', `/api/plates/register?from=${plateRegFrom}&to=${plateRegTo}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
+  renderPlateRegister();
+}
+function renderPlateRegister() {
+  const el = document.getElementById('plate-store-body'); if (!el) return;
+  const q = String(plateRegQ || '').trim().toLowerCase();
+  const rows = (plateRegRows || []).filter(e => !q || [e.product_name, e.color_name, e.size_name, e.job_id ? 'e-' + e.job_id : '', e.by_name].join(' ').toLowerCase().includes(q));
+  const made = rows.filter(e => e.action === 'made').length, reused = rows.filter(e => e.action === 'reused').length, removed = rows.filter(e => e.action === 'scrapped').length;
+  const act = a => a === 'made' ? '<b style="color:#1e3a8a;">Made</b>' : a === 'reused' ? '<span style="color:#166534;font-weight:700;">Reused</span>' : '<b style="color:#b91c1c;">Removed</b>';
+  el.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
+      <div><div class="dash-flbl">From</div><input type="date" class="filter" value="${plateRegFrom}" onchange="plateRegFrom = this.value; loadPlateRegister()"></div>
+      <div><div class="dash-flbl">To</div><input type="date" class="filter" value="${plateRegTo}" onchange="plateRegTo = this.value; loadPlateRegister()"></div>
+      <div><div class="dash-flbl">Search</div><input type="search" class="filter" value="${esc(plateRegQ)}" placeholder="product, colour, size, E-job" oninput="plateRegQ = this.value; renderPlateRegister()"></div>
+      <div style="margin-left:auto;font-size:13px;"><b style="color:#1e3a8a;">${made}</b> made &middot; <b style="color:#166534;">${reused}</b> reused &middot; <b style="color:#b91c1c;">${removed}</b> removed</div>
+    </div>
+    <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
+      <thead><tr><th style="text-align:left;padding:6px 8px;">When</th><th style="text-align:left;padding:6px 8px;">Job</th><th style="text-align:left;padding:6px 8px;">Product</th><th style="text-align:left;padding:6px 8px;">Plate</th><th style="text-align:left;padding:6px 8px;">Size</th><th style="text-align:left;padding:6px 8px;">What</th><th style="text-align:left;padding:6px 8px;">Reason</th><th style="text-align:left;padding:6px 8px;">By</th></tr></thead>
+      <tbody>${rows.map(e => `<tr><td style="padding:5px 8px;white-space:nowrap;">${esc(fmtDMYT12(e.created_at))}</td>
+        <td style="padding:5px 8px;">${e.job_id ? 'E-' + e.job_id : '&mdash;'}</td>
+        <td style="padding:5px 8px;">${esc(e.product_name || e.job_name || '')}</td>
+        <td style="padding:5px 8px;font-weight:700;">${esc(e.color_name || '')}</td>
+        <td style="padding:5px 8px;">${esc(e.size_name || '')}</td>
+        <td style="padding:5px 8px;">${act(e.action)}</td>
+        <td style="padding:5px 8px;">${esc(PLATE_REASON_TXT[e.reason] || e.reason || '') || '&mdash;'}</td>
+        <td style="padding:5px 8px;">${esc(e.by_name || '')}</td></tr>`).join('') || '<tr><td colspan="8" style="padding:12px;text-align:center;color:var(--text3);">No plates in this period.</td></tr>'}</tbody>
+    </table></div>`;
+}
+// A product's plates (its tile): the plates in use per size, and its register.
+async function openProductPlates(i) {
+  const g = __productGroupsCache[i]; if (!g) return;
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width:900px !important;">
+    <h2>&#129513; Plates &middot; ${esc(g.name)}</h2><div id="product-plates-body">Loading…</div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div></div>`);
+  const el = document.getElementById('product-plates-body');
+  let d;
+  try { d = await api('GET', `/api/plates/product/${encodeURIComponent(g.key)}`); } catch (e) { if (el) el.textContent = 'Error: ' + e.message; return; }
+  if (!el) return;
+  const active = d.plates.filter(p => p.status === 'active');
+  const bySize = new Map();
+  for (const pl of active) { const k = pl.size_name || '—'; if (!bySize.has(k)) bySize.set(k, []); bySize.get(k).push(pl); }
+  const act = a => a === 'made' ? 'Made' : a === 'reused' ? 'Reused' : 'Removed';
+  el.innerHTML = `<div style="font-weight:800;margin-bottom:6px;">In use</div>
+    ${bySize.size ? [...bySize.entries()].map(([sz, list]) => `<div style="margin-bottom:8px;"><span style="font-size:12px;color:var(--text2);font-weight:700;">${esc(sz)}:</span> ${list.map(pl => `<span title="Made ${esc(fmtDMY(pl.made_at))}${pl.made_job_id ? ' on E-' + pl.made_job_id : ''} by ${esc(pl.made_by || '')}" style="display:inline-block;padding:4px 10px;margin:2px;border-radius:999px;background:#e0e7ff;color:#1e3a8a;font-weight:800;font-size:12.5px;">${esc(pl.color_name)}</span>`).join('')}</div>`).join('') : '<div style="color:var(--text3);margin-bottom:8px;">No plates made yet - CTP makes them on the Station\'s Plates screen.</div>'}
+    <div style="font-weight:800;margin:10px 0 6px;">Register</div>
+    <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
+      <thead><tr><th style="text-align:left;padding:6px 8px;">When</th><th style="text-align:left;padding:6px 8px;">Job</th><th style="text-align:left;padding:6px 8px;">Plate</th><th style="text-align:left;padding:6px 8px;">Size</th><th style="text-align:left;padding:6px 8px;">What</th><th style="text-align:left;padding:6px 8px;">Reason</th><th style="text-align:left;padding:6px 8px;">By</th></tr></thead>
+      <tbody>${d.events.map(e => `<tr><td style="padding:5px 8px;white-space:nowrap;">${esc(fmtDMYT12(e.created_at))}</td><td style="padding:5px 8px;">${e.job_id ? 'E-' + e.job_id : '&mdash;'}</td><td style="padding:5px 8px;font-weight:700;">${esc(e.color_name || '')}</td><td style="padding:5px 8px;">${esc(e.size_name || '')}</td><td style="padding:5px 8px;">${act(e.action)}</td><td style="padding:5px 8px;">${esc(PLATE_REASON_TXT[e.reason] || e.reason || '') || '&mdash;'}</td><td style="padding:5px 8px;">${esc(e.by_name || '')}</td></tr>`).join('') || '<tr><td colspan="7" style="padding:12px;text-align:center;color:var(--text3);">Nothing yet.</td></tr>'}</tbody>
+    </table></div>`;
 }
 // ── + New Product / Details / Delete (owner, 2026-11-23) ─────────────
 // A product without a job card: name, company, item code, No. of Colors, UPS, Rate. Its tile shows in red (no job)
@@ -42414,6 +42571,8 @@ function stationRender() {
   else if (stationView === 'lc-report') root.innerHTML = stationLcReportHtml();
   else if (stationView === 'qa-ops') root.innerHTML = stationQaOpsHtml();
   else if (stationView === 'qa-pending') root.innerHTML = stationQaPendingHtml();
+  else if (stationView === 'plates') root.innerHTML = stationPlatesHtml();
+  else if (stationView === 'plates-damaged') root.innerHTML = stationDamagedPlatesHtml();
   else root.innerHTML = stationQueueHtml();
 }
 
@@ -43652,8 +43811,191 @@ function stationQueueHtml() {
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
     ${stationStageBanner(stIdx)}
+    ${stIdx === 0 ? `<div style="display:flex;gap:10px;flex-wrap:wrap;padding:10px 16px 0;">
+      <button class="btn" style="padding:11px 18px;font-size:15px;font-weight:800;background:#1e3a8a;border-color:#1e3a8a;color:#fff;" onclick="stationOpenPlates()">&#129513; Plates</button>
+      <button class="btn" style="padding:11px 18px;font-size:15px;font-weight:800;background:#b91c1c;border-color:#b91c1c;color:#fff;" onclick="stationOpenDamagedPlates()">&#9888; Damaged Plate</button>
+    </div>` : ''}
     ${searchBox}
     <div class="station-queue">${rows}</div>`;
+}
+// ── Plates at the CTP Station (owner, 2026-11-23) ─────────────────────
+// Plates screen: pick a job at CTP -> its product's plates of the job's machine size: make them (one per colour,
+// named), or use the old ones on a repeat job, or make a new set (artwork changed ...). Each new plate takes one
+// blank plate of its size out of the Plate Store. Damaged Plate screen (its own): pick a plate in use -> remove it
+// and make the new one. Everything lands in the Plate Register.
+let stationPlatesJob = null, stationPlateRows = [], stationPlatesQ = '', stationPlatesSize = null, stationPlatesNewSet = false;
+let stationPlatesActive = null, stationDamagedPick = null, stationDamagedQ = '';
+const PLATE_CMYK = ['Cyan', 'Magenta', 'Yellow', 'Black'];
+const PLATE_REASON_LABELS = { first: 'First set', damaged: 'Damaged', scratched: 'Scratched', worn: 'Worn out', artwork: 'Artwork changed', lost: 'Lost', size: 'New machine size', other: 'Other' };
+function stationPlatesHead(title, back) {
+  const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
+  return `<div class="station-head">
+      <div><div class="station-who">${who}</div><div class="station-where">${title}</div></div>
+      <div style="display:flex;gap:8px;"><button class="btn" onclick="${back}">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+    </div>`;
+}
+function stationOpenPlates() { stationView = 'plates'; stationPlatesJob = null; stationPlatesQ = ''; stationRender(); }
+function stationPlatesBackToQueue() { stationView = 'queue'; stationRender(); }
+function stationPlatesQueue() {
+  return (jobs || []).filter(j => !isDone(j) && !isBlocked(j) && !isNewJob(j) && (j.stage_index || 0) === 0).reverse();
+}
+// "4" -> 4 plates, "4+1" -> 5.
+function plateCountOf(colors) {
+  const nums = String(colors || '').match(/\d+/g);
+  return nums ? Math.min(16, nums.reduce((a, n) => a + (parseInt(n, 10) || 0), 0)) : 0;
+}
+async function stationPlatesPickJob(id) {
+  try {
+    const d = await api('GET', `/api/station/plates/job/${id}`);
+    stationPlatesJob = d;
+    stationPlatesSize = d.size_id || (d.sizes[0] && d.sizes[0].id) || null;
+    stationPlatesNewSet = false;
+    stationPlatesResetRows();
+    stationRender();
+  } catch (e) { notify('Error: ' + e.message); }
+}
+function stationPlatesResetRows() {
+  const d = stationPlatesJob;
+  const n = plateCountOf(d && d.colors) || 4;
+  stationPlateRows = Array.from({ length: n }, (_, k) => (n >= 4 && k < 4) ? PLATE_CMYK[k] : '');
+}
+function stationPlatesSetSize(v) { stationPlatesSize = parseInt(v, 10) || null; stationPlatesNewSet = false; stationRender(); }
+function stationPlateRowSet(k, v) { stationPlateRows[k] = v; }
+function stationPlateRowDel(k) { stationPlateRows.splice(k, 1); stationRender(); }
+function stationPlateRowAdd(name) {
+  const k = stationPlateRows.findIndex(x => !String(x || '').trim());
+  if (name && k >= 0) stationPlateRows[k] = name; else stationPlateRows.push(name || '');
+  stationRender();
+}
+function stationPlatesHtml() {
+  const d = stationPlatesJob;
+  if (!d) {
+    const q = String(stationPlatesQ || '').trim();
+    let list = stationPlatesQueue();
+    if (q) list = (jobs || []).filter(j => stationJobMatches(j, q));
+    const rows = list.length ? list.map(j => `<button class="station-job" onclick="stationPlatesPickJob(${j.id})">
+        <div class="station-job-number"><div class="sj-id">#${j.id}</div></div>
+        <div class="sj-main"><div class="sj-name">${esc(j.name)}</div><div class="sj-sub">${esc(j.client || '')}${j.machine ? ' · ' + esc(j.machine) : ''}</div></div>
+        <div class="sj-go">›</div></button>`).join('') : `<div class="empty">${q ? 'No job matches.' : 'No job at CTP right now - search a job number.'}</div>`;
+    return stationPlatesHead('&#129513; Plates &middot; pick a job', 'stationPlatesBackToQueue()')
+      + stationSearchBarHtml('station-plates-search', stationPlatesQ, '\u{1F50D} Job no., name or item code\u2026', 'stationPlatesQ = this.value; stationRender(); setTimeout(() => { const e = document.getElementById(\'station-plates-search\'); if (e) { e.focus(); e.setSelectionRange(e.value.length, e.value.length); } }, 0)', "stationPlatesQ = ''; stationRender()")
+      + `<div class="station-queue">${rows}</div>`;
+  }
+  const sizeOpts = (d.sizes || []).map(z => `<option value="${z.id}" ${z.id === stationPlatesSize ? 'selected' : ''}>${esc(z.name)}${(z.machines || []).length ? ' (' + esc(z.machines.join(', ')) + ')' : ''}</option>`).join('');
+  const inUse = (d.plates || []).filter(x => x.size_id === stationPlatesSize);
+  const otherSizes = (d.plates || []).filter(x => x.size_id !== stationPlatesSize);
+  const chip = (t, bg) => `<span style="display:inline-block;padding:6px 12px;border-radius:999px;background:${bg || '#e0e7ff'};color:#1e3a8a;font-weight:800;font-size:14px;margin:3px;">${esc(t)}</span>`;
+  const doneHtml = (d.done || []).length ? `<div style="margin:10px 0;padding:10px 12px;background:#f0fdf4;border:1px solid #86efac;border-radius:10px;font-size:14px;">
+      <b style="color:#166534;">Done for this job:</b> ${d.done.map(e => `${e.action === 'made' ? 'Made' : e.action === 'reused' ? 'Used old' : 'Removed'} ${esc(e.color_name || '')}${e.size_name ? ' (' + esc(e.size_name) + ')' : ''}`).join(' &middot; ')}</div>` : '';
+  const form = (reasonPick) => `
+    <div style="margin-top:12px;padding:12px;border:2px solid #1e3a8a;border-radius:12px;background:#fff;">
+      <div style="font-size:15px;font-weight:800;margin-bottom:6px;">${reasonPick ? 'New set of plates' : 'Make the plates'} &middot; one per colour</div>
+      ${reasonPick ? `<div style="margin-bottom:8px;"><label style="font-weight:700;">Why a new set? </label><select id="st-plate-reason" style="font-size:15px;padding:6px 8px;">${['artwork', 'worn', 'damaged', 'size', 'other'].map(r => `<option value="${r}">${PLATE_REASON_LABELS[r]}</option>`).join('')}</select> <span style="font-size:12.5px;color:var(--text2);">the old ${inUse.length} are removed</span></div>` : ''}
+      ${stationPlateRows.map((v, k) => `<div style="display:flex;gap:8px;align-items:center;margin:6px 0;">
+        <span style="width:26px;font-weight:800;color:#1e3a8a;">${k + 1}.</span>
+        <input type="text" value="${esc(v)}" placeholder="colour name (e.g. Pantone 485, Gold, Varnish)" oninput="stationPlateRowSet(${k}, this.value)" style="flex:1;font-size:16px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;">
+        <button class="btn" onclick="stationPlateRowDel(${k})" style="padding:8px 12px;">&times;</button></div>`).join('')}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">
+        ${PLATE_CMYK.map(c => `<button class="btn" onclick="stationPlateRowAdd('${c}')" style="padding:7px 12px;">${c}</button>`).join('')}
+        <button class="btn" onclick="stationPlateRowAdd('')" style="padding:7px 12px;">+ Another colour</button>
+      </div>
+      <button class="btn btn-primary" onclick="stationPlatesMake(${reasonPick ? 'true' : 'false'})" style="margin-top:12px;width:100%;padding:13px;font-size:17px;font-weight:800;background:#1e3a8a;border-color:#1e3a8a;">&#10003; Save plates</button>
+    </div>`;
+  let body;
+  if (!(d.sizes || []).length) body = '<div class="empty">No plate sizes in the Plate Store yet - the store keeper / admin adds them (Inventory &rarr; Plate Store).</div>';
+  else if (inUse.length && !stationPlatesNewSet) body = `
+    <div style="margin-top:10px;font-size:15px;font-weight:800;">This product's plates (${inUse.length}):</div>
+    <div style="margin:4px 0 10px;">${inUse.map(x => chip(x.color_name)).join('')}</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-primary" onclick="stationPlatesReuse()" style="flex:1 1 220px;padding:14px;font-size:17px;font-weight:800;background:#166534;border-color:#166534;">&#10003; Use these plates</button>
+      <button class="btn" onclick="stationPlatesNewSet = true; stationPlatesResetRows(); stationRender();" style="flex:1 1 220px;padding:14px;font-size:16px;font-weight:700;">Make a new set</button>
+    </div>
+    <div style="font-size:12.5px;color:var(--text2);margin-top:6px;">One plate damaged? Use the <b>Damaged Plate</b> screen.</div>`;
+  else body = (otherSizes.length && !inUse.length ? `<div style="margin-top:10px;padding:8px 12px;background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;font-size:13.5px;">This product has plates in another size (${[...new Set(otherSizes.map(x => x.size_name))].map(esc).join(', ')}) - this job needs this size, so make them.</div>` : '')
+    + form(!!(inUse.length && stationPlatesNewSet));
+  return stationPlatesHead('&#129513; Plates', 'stationPlatesJob = null; stationRender();') + `
+    <div style="padding:12px 16px;">
+      <div style="font-size:18px;font-weight:800;">#${d.job.id} &middot; ${esc(d.job.name || '')}</div>
+      <div style="font-size:13.5px;color:var(--text2);">${esc(d.job.client || '')}${d.job.machine ? ' &middot; machine ' + esc(d.job.machine) : ''}${d.colors ? ' &middot; colours ' + esc(d.colors) : ''}</div>
+      ${doneHtml}
+      ${(d.sizes || []).length ? `<div style="margin-top:10px;"><label style="font-weight:800;font-size:15px;">Plate size </label><select onchange="stationPlatesSetSize(this.value)" style="font-size:16px;padding:8px 10px;border-radius:8px;">${sizeOpts}</select>${d.size_id && d.size_id !== stationPlatesSize ? ' <span style="color:#b45309;font-weight:700;">(not this job\'s machine size)</span>' : ''}</div>` : ''}
+      ${body}
+    </div>`;
+}
+async function stationPlatesMake(newSet) {
+  const d = stationPlatesJob;
+  const names = stationPlateRows.map(x => String(x || '').trim()).filter(Boolean);
+  if (!names.length) { notify('Name each plate'); return; }
+  const reasonEl = document.getElementById('st-plate-reason');
+  const otherSize = (d.plates || []).some(x => x.size_id !== stationPlatesSize);
+  const reason = newSet ? (reasonEl ? reasonEl.value : 'artwork') : (otherSize ? 'size' : 'first');
+  showSaving(true);
+  try {
+    const r = await api('POST', '/api/station/plates/make', { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '', job_id: d.job.id, size_id: stationPlatesSize, names, reason, replace_all: !!newSet });
+    notify(`${r.made} plates saved${r.scrapped ? ' · old ' + r.scrapped + ' removed' : ''}${r.balance != null && r.balance < 0 ? ' · Plate Store shows minus - stock in missing' : ''}`);
+    await stationPlatesPickJob(d.job.id);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function stationPlatesReuse() {
+  const d = stationPlatesJob;
+  showSaving(true);
+  try {
+    const r = await api('POST', '/api/station/plates/reuse', { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '', job_id: d.job.id, size_id: stationPlatesSize });
+    notify(`Old plates used (${r.reused})`);
+    await stationPlatesPickJob(d.job.id);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// Damaged Plate screen
+async function stationOpenDamagedPlates() {
+  stationView = 'plates-damaged'; stationPlatesActive = null; stationDamagedPick = null; stationDamagedQ = '';
+  stationRender();
+  try { stationPlatesActive = await api('GET', '/api/station/plates/active'); } catch (e) { stationPlatesActive = []; notify('Error: ' + e.message); }
+  if (stationView === 'plates-damaged') stationRender();
+}
+function stationDamagedPlatesHtml() {
+  const head = stationPlatesHead('&#9888; Damaged Plate', stationDamagedPick ? 'stationDamagedPick = null; stationRender();' : 'stationPlatesBackToQueue()');
+  if (stationPlatesActive == null) return head + '<div class="empty">Loading…</div>';
+  if (stationDamagedPick) {
+    const pl = stationPlatesActive.find(x => x.id === stationDamagedPick);
+    if (!pl) { stationDamagedPick = null; return head; }
+    return head + `<div style="padding:14px 16px;">
+      <div style="font-size:18px;font-weight:800;">${esc(pl.color_name)} plate</div>
+      <div style="font-size:14px;color:var(--text2);margin-bottom:12px;">${esc(pl.product_name || '')} &middot; ${esc(pl.size_name || '')}</div>
+      <div style="margin:8px 0;"><label style="font-weight:800;">What happened? </label><select id="st-dmg-reason" style="font-size:16px;padding:8px;">${['damaged', 'scratched', 'worn', 'lost', 'artwork', 'other'].map(r => `<option value="${r}">${PLATE_REASON_LABELS[r]}</option>`).join('')}</select></div>
+      <div style="margin:8px 0;"><label style="font-weight:800;">Job No. </label><input id="st-dmg-job" type="text" inputmode="numeric" placeholder="on which job (optional)" style="font-size:16px;padding:8px;width:220px;"></div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:15px;margin:10px 0;"><input type="checkbox" id="st-dmg-remake" checked style="width:20px;height:20px;"> Make the new ${esc(pl.color_name)} plate now (1 blank ${esc(pl.size_name || '')} plate out of the store)</label>
+      <button class="btn btn-primary" onclick="stationDamagedSave()" style="width:100%;padding:14px;font-size:17px;font-weight:800;background:#b91c1c;border-color:#b91c1c;">Remove this plate</button>
+    </div>`;
+  }
+  const q = String(stationDamagedQ || '').trim().toLowerCase();
+  const byProduct = new Map();
+  for (const x of stationPlatesActive) {
+    if (q && !String(x.product_name || '').toLowerCase().includes(q)) continue;
+    const k = x.product_key;
+    if (!byProduct.has(k)) byProduct.set(k, { name: x.product_name, plates: [] });
+    byProduct.get(k).plates.push(x);
+  }
+  const list = [...byProduct.values()].map(g => `<div style="padding:10px 12px;border:1px solid var(--border);border-radius:10px;margin:8px 0;background:#fff;">
+      <div style="font-weight:800;font-size:15px;margin-bottom:4px;">${esc(g.name || '')}</div>
+      <div>${g.plates.map(x => `<button class="btn" onclick="stationDamagedPick = ${x.id}; stationRender();" style="margin:3px;padding:8px 12px;font-weight:700;">${esc(x.color_name)} <span style="font-size:11px;color:var(--text2);">${esc(x.size_name || '')}</span></button>`).join('')}</div></div>`).join('');
+  return head + stationSearchBarHtml('station-dmg-search', stationDamagedQ, '\u{1F50D} Product name\u2026', 'stationDamagedQ = this.value; stationRender(); setTimeout(() => { const e = document.getElementById(\'station-dmg-search\'); if (e) { e.focus(); e.setSelectionRange(e.value.length, e.value.length); } }, 0)', "stationDamagedQ = ''; stationRender()")
+    + `<div style="padding:0 16px 16px;">${list || '<div class="empty">No plates in use yet - they show here once made on the Plates screen.</div>'}</div>`;
+}
+async function stationDamagedSave() {
+  const pl = (stationPlatesActive || []).find(x => x.id === stationDamagedPick);
+  if (!pl) return;
+  const reason = (document.getElementById('st-dmg-reason') || {}).value || 'damaged';
+  const job = String((document.getElementById('st-dmg-job') || {}).value || '').trim();
+  const remake = !!(document.getElementById('st-dmg-remake') || {}).checked;
+  showSaving(true);
+  try {
+    await api('POST', '/api/station/plates/replace', { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '', plate_id: pl.id, reason, job_id: job || null, remake });
+    notify(remake ? `${pl.color_name} plate replaced` : `${pl.color_name} plate removed`);
+    await stationOpenDamagedPlates();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 // Station search, both the operator's queue and the manager's Search tab -
 // the same rules as the Jobs tab search (owner, 2026-10-09): job name,
@@ -45445,6 +45787,7 @@ const ACC_INVENTORY_TAB_ROWS = [
   { key: 'inv_btn_rename_paper',    type: 'action' },
   { key: 'inv_btn_dismiss_pending', type: 'action' },
   { key: 'inv_btn_batches',         type: 'button' },
+  { key: 'inv_btn_plate_store',     type: 'button' },
   { key: 'inv_btn_print_sticker',   type: 'action' },
   { key: 'inv_btn_brands',          type: 'button' },
 ];
