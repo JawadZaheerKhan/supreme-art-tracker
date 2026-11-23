@@ -4167,6 +4167,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
       #products-norate-btn:hover { background: #fef3c7; }
       #products-norate-btn.is-on { background: #f59e0b; color: #fff; }
     </style>
+    <button type="button" id="products-new-btn" class="btn btn-primary" data-acc="products_btn_new" onclick="openNewProductModal()" style="display:none;white-space:nowrap;" title="Add a product without a job card - name, company, code, colours, UPS and rate">+ New Product</button>
     <button type="button" id="products-norate-btn" onclick="toggleProductsNoRate()" title="Show only the products with no Rate saved - click again for all">&#9888; No rate <span id="products-norate-n"></span></button>
     <span id="products-count" style="margin-left:auto;font-size:12px;color:var(--text2);align-self:center;"></span>
   </div>
@@ -8387,7 +8388,15 @@ async function loadProductNames() {
     _pnAliases = new Map((d.aliases || []).map(a => [String(a.alias || '').trim().toLowerCase(), String(a.canonical || '').trim()]));
     _pnNames = new Map((d.names || []).map(n => [String(n.key || '').trim().toLowerCase(), String(n.name || '').trim()]));
   } catch (e) { console.error('Product names not loaded', e); }
+  await loadProductsMaster();
 }
+// Products added without a job card, and every product's details (owner, 2026-11-23): company, item code, No. of
+// Colors, UPS - by the product key. Read by everyone who makes job cards: a new job with the name fills them in.
+let productsMaster = [];
+async function loadProductsMaster() {
+  try { productsMaster = await api('GET', '/api/products'); } catch (e) { productsMaster = []; }
+}
+function productMasterOf(key) { return (productsMaster || []).find(p => p.key === key) || null; }
 // The product a job name belongs to: { key, name } with the name as it is set now.
 function productOfName(jobName) {
   const own = String(jobName || '').trim();
@@ -8404,6 +8413,8 @@ function productNameForNewJob(typed) {
   if (!t) return t;
   const p = productOfName(t);
   if (_pnAliases.has(t.toLowerCase()) || _pnNames.has(p.key)) return p.name;
+  const pm = productMasterOf(p.key);   // a product added on the Products tab (no job yet): as it was written there
+  if (pm) return pm.name;
   const same = (jobs || []).find(j => String(j.name || '').trim().toLowerCase() === p.key);
   return same ? productOfName(same.name).name : t;
 }
@@ -8415,6 +8426,7 @@ function productNamesDatalistHtml() {
     if (p.key && !seen.has(p.key)) seen.set(p.key, p.name);
   }
   for (const [k, n] of _pnNames) if (!seen.has(k)) seen.set(k, n);
+  for (const p of (productsMaster || [])) if (p.key && !seen.has(p.key)) seen.set(p.key, _pnNames.get(p.key) || p.name);   // products with no job yet
   return '<datalist id="product-names-dl">' + [...seen.values()].sort((a, b) => a.localeCompare(b)).map(n => `<option value="${esc(n)}">`).join('') + '</datalist>';
 }
 async function loadProductAliases() {
@@ -35388,10 +35400,28 @@ function buildProductGroups() {
       if (p.rate !== null && c > 0) g.revenue += c * p.rate;
     }
   }
+  // Products added without a job card (owner, 2026-11-23): a tile with no jobs (red) - by the date it was added when a
+  // date filter is on. Every tile carries its saved details (company, code, colours, UPS) when it has them.
+  for (const pm of (productsMaster || [])) {
+    if (!pm || !pm.key) continue;
+    if (!groups.has(pm.key)) {
+      if (bounds) {
+        const at = pm.created_at ? new Date(pm.created_at).getTime() : null;
+        if (at === null || (bounds.from !== null && at < bounds.from) || (bounds.to !== null && at > bounds.to)) continue;
+      }
+      const nm = _pnNames.get(pm.key) || pm.name;
+      groups.set(pm.key, { key: pm.key, name: nm, companies: new Set(), jobs: [], cartons: 0, revenue: 0, type: detectProductType(nm) });
+    }
+    const g = groups.get(pm.key);
+    g.master = pm;
+    if (pm.company) g.companies.add(companyNameOf(pm.company));
+  }
   return [...groups.values()];
 }
 function renderProductsTab() {
   __productGroupsAll = buildProductGroups();
+  const newBtn = document.getElementById('products-new-btn');
+  if (newBtn) newBtn.style.display = seeBtn('products_btn_new') ? '' : 'none';
   const companySel = document.getElementById('products-company-filter');
   if (productsFilter.company) productsFilter.company = companyNameOf(productsFilter.company);   // a saved "ferozsons" pick
   if (companySel) {
@@ -35482,6 +35512,8 @@ function setProductsDateCustom() {
 // on hover. Nothing when no job carries a code.
 function productCodesLine(g) {
   const seen = new Set(), codes = [];
+  const mc = String((g.master && g.master.code) || '').trim();   // the code saved on the product first
+  if (mc) { seen.add(mc.toLowerCase()); codes.push(mc); }
   for (const j of [...(g.jobs || [])].sort((a, b) => b.id - a.id)) {
     const c = String(j.jobcode || '').trim();
     if (c && !seen.has(c.toLowerCase())) { seen.add(c.toLowerCase()); codes.push(c); }
@@ -35504,7 +35536,15 @@ function productTileHtml(g, i) {
   const canSeeRate = hasPerm('products_btn_rate', 'view');
   const canSeeRevenue = hasPerm('products_btn_revenue', 'view');
   const statCols = canSeeRevenue ? 4 : 2;
-  return `<div style="border:1px solid var(--border);border-radius:10px;padding:14px;background:#fff;cursor:pointer;" onclick="openProductHistoryModal(${i})" title="Click to view shipment history">
+  // No job yet (owner, 2026-11-23): the tile in red, with what was saved for it and its Edit / Delete.
+  const noJob = !g.jobs.length;
+  const m = g.master || {};
+  const canDetails = seeBtn('products_btn_new');
+  const detailBits = [m.colors ? `<b>Colors:</b> ${esc(m.colors)}` : '', m.ups ? `<b>UPS:</b> ${esc(m.ups)}` : ''].filter(Boolean).join(' &middot; ');
+  const tileStyle = noJob
+    ? 'border:2px solid #dc2626;border-radius:10px;padding:13px;background:#fef2f2;cursor:pointer;box-shadow:0 0 0 3px rgba(220,38,38,.10);'
+    : 'border:1px solid var(--border);border-radius:10px;padding:14px;background:#fff;cursor:pointer;';
+  return `<div class="${noJob ? 'pt-nojob' : ''}" style="${tileStyle}" onclick="openProductHistoryModal(${i})" title="${noJob ? 'No job card yet - a new job with this name joins this tile' : 'Click to view shipment history'}">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
       <div style="font-weight:700;font-size:14px;color:var(--text);flex:1;min-width:0;word-break:break-word;">${esc(g.name)}${seeBtn('products_btn_name') ? ` <button type="button" onclick="event.stopPropagation(); openRenameProductModal(${i})" title="Rename this product - new and duplicated jobs take the new name" style="border:none;background:none;padding:0 2px;cursor:pointer;color:var(--text2);font-size:13px;vertical-align:middle;">&#9998;</button>` : ''}${g.type ? ` <span style="font-size:10px;font-weight:700;background:#eef2ff;color:#3730a3;padding:1px 6px;border-radius:999px;vertical-align:middle;white-space:nowrap;">${esc(g.type)}</span>` : ''}</div>
       ${canSeeRate ? `<span onclick="event.stopPropagation()" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text2);white-space:nowrap;">
@@ -35513,8 +35553,10 @@ function productTileHtml(g, i) {
         ${canEditRate ? `<button type="button" onclick="event.stopPropagation(); openAddToProductModal(${i})" title="Add another product's jobs (past and future) into this one" style="width:20px;height:20px;line-height:1;padding:0;border:1px solid var(--border);border-radius:5px;background:#fff;color:var(--text2);font-weight:700;cursor:pointer;">&plus;</button>` : ''}
       </span>` : ''}
     </div>
+    ${noJob ? `<div style="margin-top:4px;"><span style="display:inline-block;font-size:10.5px;font-weight:800;color:#fff;background:#dc2626;border-radius:999px;padding:1px 8px;letter-spacing:.03em;">NO JOB YET</span></div>` : ''}
     ${productCodesLine(g)}
     <div style="font-size:12px;color:var(--text2);margin-top:4px;">${esc(companies) || '&mdash;'}</div>
+    ${detailBits || canDetails ? `<div style="font-size:12px;color:var(--text);margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${detailBits}${canDetails ? `<button type="button" data-acc="products_btn_new" onclick="event.stopPropagation(); openProductDetailsModal(${i})" title="Company, item code, No. of Colors, UPS - a new job card with this name fills them in" style="border:1px solid var(--border);background:#fff;border-radius:5px;padding:0 6px;font-size:11px;cursor:pointer;color:var(--text2);">&#9998; Details</button>` : ''}${noJob && canDetails ? `<button type="button" data-acc="products_btn_new" onclick="event.stopPropagation(); deleteProductNoJobs(${i})" title="Delete this product - it has no jobs" style="border:1px solid #fca5a5;background:#fff;border-radius:5px;padding:0 6px;font-size:11px;cursor:pointer;color:#b91c1c;">Delete</button>` : ''}</div>` : ''}
     <div style="display:grid;grid-template-columns:repeat(${statCols},1fr);gap:8px;margin-top:10px;font-size:12px;">
       <div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Jobs</div><div style="font-weight:700;">${g.jobs.length}</div></div>
       <div><div style="color:var(--text3);font-size:10px;text-transform:uppercase;">Cartons</div><div style="font-weight:700;">${g.cartons.toLocaleString()}</div></div>
@@ -35724,6 +35766,129 @@ async function saveRenameProduct(i) {
     notify(`Renamed to "${to}"`);
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
+}
+// ── + New Product / Details / Delete (owner, 2026-11-23) ─────────────
+// A product without a job card: name, company, item code, No. of Colors, UPS, Rate. Its tile shows in red (no job)
+// until a job card with that name is made; a new job card with the name fills company / code / colours / UPS.
+function productFormHtml(v, opts) {
+  const f = (id, label, val, extra) => `<div class="form-group" style="flex:1 1 150px;min-width:0;"><label class="form-label">${label}</label><input type="text" id="${id}" value="${esc(val || '')}" ${extra || ''}></div>`;
+  return `${companyNamesDatalistHtml()}
+    ${opts.withName ? `<div class="form-group"><label class="form-label">Product name (Job Name) *</label><input type="text" id="np-name" maxlength="200" placeholder="e.g. panadol 500mg tab u/c" list="product-names-dl" autocomplete="off">${productNamesDatalistHtml()}</div>` : ''}
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      ${f('np-company', 'Company', v.company, 'list="company-names-dl" autocomplete="off" placeholder="e.g. ferozsons"')}
+      ${f('np-code', 'Item Code', v.code, 'placeholder="e.g. 4000004120"')}
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      ${f('np-colors', 'No. of Colors', v.colors, 'placeholder="e.g. 4"')}
+      ${f('np-ups', 'UPS', v.ups, 'inputmode="numeric" placeholder="e.g. 6"')}
+      ${opts.withRate ? f('np-rate', 'Rate', v.rate, 'type="number" min="0" step="any" placeholder="e.g. 4.5"').replace('type="text" ', '') : ''}
+    </div>`;
+}
+function productFormValues() {
+  const g = id => String((document.getElementById(id) || {}).value || '').trim();
+  return { name: g('np-name'), company: g('np-company'), code: g('np-code'), colors: g('np-colors'), ups: g('np-ups'), rate: g('np-rate') };
+}
+function openNewProductModal() {
+  if (!seeBtn('products_btn_new')) return;
+  const withRate = hasPerm('products_btn_rate', 'yes');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:560px;">
+    <h2>+ New Product</h2>
+    <div style="font-size:12.5px;color:var(--text2);margin-bottom:10px;">A product without a job card. Its tile shows in <b style="color:#dc2626;">red</b> until a job card with this name is made - then the job joins it, and a new job card with this name fills in the company, code, colours and UPS.</div>
+    ${productFormHtml({}, { withName: true, withRate })}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" data-acc="products_btn_new" onclick="saveNewProduct()">Add Product</button>
+    </div>
+  </div>`);
+  setTimeout(() => { const el = document.getElementById('np-name'); if (el) el.focus(); }, 50);
+}
+async function saveNewProduct() {
+  const v = productFormValues();
+  if (!v.name) { await alertDialog({ title: 'Product name required', message: 'Type the product name (the job name).', kind: 'warn' }); return; }
+  const rate = v.rate === '' ? null : parseFloat(v.rate);
+  if (rate !== null && (!Number.isFinite(rate) || rate < 0)) { await alertDialog({ title: 'Enter a valid rate', kind: 'warn' }); return; }
+  showSaving(true);
+  try {
+    const row = await api('POST', '/api/products', { name: v.name, company: v.company, code: v.code, colors: v.colors, ups: v.ups });
+    if (rate !== null && hasPerm('products_btn_rate', 'yes')) {
+      const existing = productRates.find(r => String(r.product || '').trim().toLowerCase() === row.key);
+      if (existing) await api('PUT', `/api/product-rates/${existing.id}`, { product: row.name, rate });
+      else await api('POST', '/api/product-rates', { product: row.name, rate });
+      await loadProductRates();
+    }
+    await loadProductsMaster();
+    closeModal();
+    renderProductsTab();
+    notify(row.jobs ? `"${row.name}" saved - it already has ${row.jobs} job${row.jobs === 1 ? '' : 's'}, the details are on its tile` : `Product "${row.name}" added`);
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// A tile's details. A product from job cards with nothing saved yet starts from its newest job.
+function openProductDetailsModal(i) {
+  const g = __productGroupsCache[i];
+  if (!g || !seeBtn('products_btn_new')) return;
+  let v = g.master || null;
+  if (!v) {
+    const j = [...(g.jobs || [])].sort((a, b) => b.id - a.id)[0] || {};
+    v = { company: j.client || '', code: j.jobcode || '', colors: String((((j.particulars || {}).no_of_colors) || {}).quantity || ''), ups: j.ups || '' };
+  }
+  const can = hasPerm('products_btn_new', 'yes');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:560px;">
+    <h2>Product details</h2>
+    <div style="font-size:13px;font-weight:700;margin-bottom:4px;">${esc(g.name)}</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">${g.master ? '' : 'Filled from its newest job - save to keep them. '}A new job card with this name fills these in.</div>
+    ${productFormHtml(v, { withName: false, withRate: false })}
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">${can ? 'Cancel' : 'Close'}</button>
+      ${can ? `<button class="btn btn-primary" onclick="saveProductDetails(${i})">Save</button>` : ''}
+    </div>
+  </div>`);
+  if (!can) document.querySelectorAll('#modal-root input, .modal input').forEach(el => { el.disabled = true; });
+}
+async function saveProductDetails(i) {
+  const g = __productGroupsCache[i];
+  if (!g) return;
+  const v = productFormValues();
+  showSaving(true);
+  try {
+    await api('PUT', `/api/products/${encodeURIComponent(g.key)}`, { name: g.name, company: v.company, code: v.code, colors: v.colors, ups: v.ups });
+    await loadProductsMaster();
+    closeModal();
+    renderProductsTab();
+    notify('Product details saved');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+async function deleteProductNoJobs(i) {
+  const g = __productGroupsCache[i];
+  if (!g || g.jobs.length) return;
+  const ok = await confirmDialog({ title: `Delete "${g.name}"?`, danger: true, confirmText: 'Delete',
+    message: 'This product has no jobs. It is removed from the Products tab, with its rate and special colours.' });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/products/${encodeURIComponent(g.key)}`);
+    await Promise.all([loadProductsMaster(), loadProductRates(), loadProductSpecials(), loadProductNames()]);
+    renderProductsTab();
+    notify('Product deleted');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// New job card (owner, 2026-11-23): the name of a saved product fills its company, item code, No. of Colors and UPS -
+// only boxes still empty, so nothing typed is overwritten.
+function productAutofillJob() {
+  const nameEl = document.getElementById('f-name');
+  if (!nameEl) return;
+  const p = productOfName(nameEl.value);
+  const pm = p.key ? productMasterOf(p.key) : null;
+  if (!pm) return;
+  const fill = (id, val) => { const el = document.getElementById(id); if (el && val && !String(el.value || '').trim()) { el.value = val; return true; } return false; };
+  let n = 0;
+  n += fill('f-client', pm.company);
+  n += fill('f-jobcode', pm.code);
+  n += fill('p-ctp-colors', pm.colors);
+  if (fill('f-ups', pm.ups)) { n++; try { jobCartonQtySync(); } catch (e) { /* the carton qty fills on its own later */ } }
+  if (n) notify(`Filled from the product: ${[pm.company && 'company', pm.code && 'code', pm.colors && 'colors', pm.ups && 'UPS'].filter(Boolean).join(', ')}`);
 }
 async function saveProductRateInline(i, valueStr) {
   const g = __productGroupsCache[i];
@@ -39025,6 +39190,9 @@ function openAdd() {
   if (typeof updateStockHint3 === 'function') updateStockHint3();
   renderCutPreview();
   initSpecialsEditor();
+  // A saved product's name fills its company, code, colours and UPS (owner, 2026-11-23).
+  const fName = document.getElementById('f-name');
+  if (fName) fName.addEventListener('change', productAutofillJob);
 }
 
 // Given a source job code like "SA-2026-001" or "10400", figure out the next
@@ -45330,6 +45498,7 @@ const ACC_PRODUCTS_TAB_ROWS = [
   { key: 'products_btn_revenue', type: 'button' },
   { key: 'products_btn_specials', type: 'button' },
   { key: 'products_btn_name',    type: 'action' },
+  { key: 'products_btn_new',     type: 'action' },
 ];
 // Station tab: one View/Hidden row for the whole tab.
 const ACC_STATION_TAB_ROWS = [

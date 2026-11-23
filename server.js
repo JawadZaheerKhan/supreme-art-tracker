@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-21-rename-paper';   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-23-products';   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -499,7 +499,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_edit_paper', 'inv_btn_rename_paper', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_edit_paper', 'inv_btn_rename_paper', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'products_btn_new', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -728,6 +728,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, wastage, production & MIL and stock tiles with date filters (view only)', levels: { ceo: 'view' } },
   products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
   products_btn_name:    { label: 'Product name — rename a product on its tile (new and duplicated jobs take the new name; the Job Name box offers product names)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'hidden' } },
+  products_btn_new:     { label: 'New / edit product — + New Product (a product without a job card), its details on a tile (company, item code, No. of Colors, UPS) and Delete for a product with no jobs', levels: { admin: 'yes', finance: 'yes' } },
 
   // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
   // every role until a Super Admin turns it on, except Procurement, whose tab
@@ -1995,6 +1996,23 @@ async function initDb() {
       CREATE TABLE IF NOT EXISTS finance.product_names (
         key         TEXT PRIMARY KEY,
         name        TEXT NOT NULL,
+        updated_by  TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    // A product added on the Products tab without a job card (owner, 2026-11-23), and the details of any product:
+    // company, item code, No. of Colors, UPS. key = the product's lowercased name, the same key its tile, rate and
+    // special colours use. A new job card with this name fills these in.
+    await sql`
+      CREATE TABLE IF NOT EXISTS finance.products (
+        key         TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        company     TEXT,
+        code        TEXT,
+        colors      TEXT,
+        ups         TEXT,
+        created_by  TEXT,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
         updated_by  TEXT,
         updated_at  TIMESTAMPTZ DEFAULT NOW()
       )
@@ -11089,6 +11107,13 @@ app.post('/api/products/rename', requirePermission('products_btn_name'), async (
       if (!hasSpecials.length) await sql`UPDATE finance.product_specials SET product_key = ${toKey} WHERE product_key = ${from}`;
       await sql`DELETE FROM finance.product_names WHERE key = ${from}`;
     }
+    // Its details (company, code, colours, UPS) go with it too, unless the new name already has its own.
+    if (toKey !== from) {
+      const hasDetails = await sql`SELECT 1 FROM finance.products WHERE key = ${toKey}`;
+      if (!hasDetails.length) await sql`UPDATE finance.products SET key = ${toKey}, name = ${to}, updated_by = ${req.user.email}, updated_at = NOW() WHERE key = ${from}`;
+    } else {
+      await sql`UPDATE finance.products SET name = ${to}, updated_by = ${req.user.email}, updated_at = NOW() WHERE key = ${from}`;
+    }
     await sql`
       INSERT INTO finance.product_names (key, name, updated_by, updated_at)
       VALUES (${toKey}, ${to}, ${req.user.email}, NOW())
@@ -11098,6 +11123,96 @@ app.post('/api/products/rename', requirePermission('products_btn_name'), async (
       summary: `Product renamed: "${from}" -> "${to}" (new and duplicated jobs take the new name)`,
     });
     res.json({ ok: true, key: toKey, name: to });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Products without a job card (owner, 2026-11-23) ────────────────
+// + New Product on the Products tab: name, company, item code, No. of Colors, UPS (the Rate is the tile's own Rate,
+// saved through /api/product-rates). Read by everyone who makes job cards - a new job with the name fills them in.
+// Its tile shows with no jobs (in red) until a job card with that name is made; then the job joins it.
+const PRODUCT_FIELDS = ['company', 'code', 'colors', 'ups'];
+const productText = (v, max = 200) => { const s = String(v == null ? '' : v).trim().replace(/\s+/g, ' '); return s ? s.slice(0, max) : null; };
+// A name folded into another product (an alias) belongs to that product.
+async function productKeyOf(sql, name) {
+  const own = String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  if (!own) return '';
+  const [a] = await sql`SELECT canonical FROM finance.product_aliases WHERE alias = ${own}`;
+  return a ? String(a.canonical || '').trim().toLowerCase() : own;
+}
+// Jobs that sit on a product's tile: their own name is the product's, or a name folded into it.
+async function productJobCount(sql, key) {
+  const [{ n }] = await sql`
+    SELECT COUNT(*)::int AS n FROM jobs j
+     WHERE j.deleted_at IS NULL
+       AND (lower(btrim(j.name)) = ${key}
+            OR lower(btrim(j.name)) IN (SELECT alias FROM finance.product_aliases WHERE lower(btrim(canonical)) = ${key}))`;
+  return n;
+}
+app.get('/api/products', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json(await sql`SELECT key, name, company, code, colors, ups, created_at, updated_at FROM finance.products ORDER BY name ASC`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/products', requirePermission('products_btn_new'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const name = productText(req.body && req.body.name);
+    if (!name) return res.status(400).json({ error: 'The product name is required.' });
+    const key = await productKeyOf(sql, name);
+    if ((await sql`SELECT 1 FROM finance.products WHERE key = ${key}`).length) return res.status(409).json({ error: `"${name}" is already in the products - change its details with the edit button on its tile.` });
+    const [pn] = await sql`SELECT name FROM finance.product_names WHERE key = ${key}`;
+    const v = Object.fromEntries(PRODUCT_FIELDS.map(f => [f, productText(req.body && req.body[f])]));
+    const [row] = await sql`
+      INSERT INTO finance.products (key, name, company, code, colors, ups, created_by, updated_by)
+      VALUES (${key}, ${(pn && pn.name) || name}, ${v.company}, ${v.code}, ${v.colors}, ${v.ups}, ${req.user.email}, ${req.user.email})
+      RETURNING *`;
+    const jobsNow = await productJobCount(sql, key);
+    await logAudit(sql, req, { action: 'product.create', entityType: 'product', entityId: key,
+      summary: `Product added: "${row.name}"${v.company ? ' · ' + v.company : ''}${v.code ? ' · code ' + v.code : ''}${v.colors ? ' · ' + v.colors + ' colors' : ''}${v.ups ? ' · ups ' + v.ups : ''}${jobsNow ? ` (already has ${jobsNow} job${jobsNow === 1 ? '' : 's'})` : ' (no job card yet)'}` });
+    res.json({ ...row, jobs: jobsNow });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// A tile's details - also the first save for a product that came from job cards (no row yet).
+app.put('/api/products/:key', requirePermission('products_btn_new'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const key = String(req.params.key || '').trim().toLowerCase();
+    const name = productText(req.body && req.body.name) || key;
+    if (!key) return res.status(400).json({ error: 'Which product?' });
+    const v = Object.fromEntries(PRODUCT_FIELDS.map(f => [f, productText(req.body && req.body[f])]));
+    const [before] = await sql`SELECT * FROM finance.products WHERE key = ${key}`;
+    const [row] = await sql`
+      INSERT INTO finance.products (key, name, company, code, colors, ups, created_by, updated_by)
+      VALUES (${key}, ${name}, ${v.company}, ${v.code}, ${v.colors}, ${v.ups}, ${req.user.email}, ${req.user.email})
+      ON CONFLICT (key) DO UPDATE SET company = EXCLUDED.company, code = EXCLUDED.code, colors = EXCLUDED.colors, ups = EXCLUDED.ups,
+                                      updated_by = EXCLUDED.updated_by, updated_at = NOW()
+      RETURNING *`;
+    const label = { company: 'Company', code: 'Code', colors: 'No. of Colors', ups: 'UPS' };
+    const changes = PRODUCT_FIELDS.filter(f => String((before && before[f]) || '') !== String(v[f] || '')).map(f => `${label[f]}: "${(before && before[f]) || '—'}" -> "${v[f] || '—'}"`);
+    if (changes.length) await logAudit(sql, req, { action: 'product.update', entityType: 'product', entityId: key, summary: `Product details: "${row.name}" — ${changes.join('; ')}` });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Delete - only a product with no jobs (one added by mistake). Its rate, special colours and name go with it.
+app.delete('/api/products/:key', requirePermission('products_btn_new'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const key = String(req.params.key || '').trim().toLowerCase();
+    const n = await productJobCount(sql, key);
+    if (n) return res.status(400).json({ error: `This product has ${n} job${n === 1 ? '' : 's'} - only a product with no jobs can be deleted.` });
+    const [row] = await sql`DELETE FROM finance.products WHERE key = ${key} RETURNING *`;
+    const rates = await sql`DELETE FROM finance.product_rates WHERE lower(btrim(product)) = ${key} RETURNING rate`;
+    await sql`DELETE FROM finance.product_specials WHERE product_key = ${key}`;
+    await sql`DELETE FROM finance.product_names WHERE key = ${key}`;
+    if (!row && !rates.length) return res.status(404).json({ error: 'Product not found' });
+    await logAudit(sql, req, { action: 'product.delete', entityType: 'product', entityId: key,
+      summary: `Product deleted (no jobs): "${(row && row.name) || key}"${rates.length ? ` · its rate ${rates[0].rate} removed` : ''}` });
+    res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
