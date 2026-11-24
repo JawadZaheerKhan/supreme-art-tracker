@@ -35885,9 +35885,10 @@ function plateUseForm(id) {
       <div class="form-group"><label class="form-label">Reason</label><select id="pl-reason" onchange="plateUseReasonSync()" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;"><option value="new-job">New job</option><option value="old-job">Old job</option><option value="damaged">Damaged</option><option value="adjustment">Adjustment</option></select></div>
     </div>
     <div class="form-row" id="pl-job-wrap">
-      <div class="form-group"><label class="form-label">Job No. *</label><input type="text" id="pl-job-no" inputmode="numeric" placeholder="e.g. 1558" oninput="plateUseJobName()"></div>
-      <div class="form-group"><label class="form-label">Job Name</label><input type="text" id="pl-job-name" placeholder="fills from the job number"></div>
+      <div class="form-group"><label class="form-label">Job No.</label><input type="text" id="pl-job-no" list="pl-job-no-dl" autocomplete="off" placeholder="pick or type, e.g. 1558" oninput="plateUseJobName()"></div>
+      <div class="form-group"><label class="form-label">Job Name</label><input type="text" id="pl-job-name" list="pl-job-name-dl" autocomplete="off" placeholder="pick or type" oninput="plateUseJobNo()"></div>
     </div>
+    ${plateJobDatalistsHtml()}
     <div class="form-group" id="pl-dmg-wrap" style="display:none;"><label class="form-label">Damaged by whom / reason *</label><input type="text" id="pl-dmg" placeholder="e.g. SM74 operator - scratched on the press"></div>
     ${stockEntryDateHtml('pl-date')}
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="pl-notes" placeholder="optional"></div>
@@ -35907,6 +35908,22 @@ function plateUseJobName() {
   const nm = document.getElementById('pl-job-name');
   if (nm && j) nm.value = j.name || '';
 }
+// Job No. / Job Name dropdowns (owner, 2026-11-24): the app's jobs - newest first, each number with its name; one
+// name each. Anything not in the list can still be typed.
+function plateJobDatalistsHtml() {
+  const list = [...(jobs || [])].filter(j => j && !j.deleted_at).sort((a, b) => b.id - a.id);
+  const names = [...new Set(list.map(j => String(j.name || '').trim()).filter(Boolean))];
+  return `<datalist id="pl-job-no-dl">${list.map(j => `<option value="${j.id}">${esc(j.name || '')}</option>`).join('')}</datalist>`
+    + `<datalist id="pl-job-name-dl">${names.map(n => `<option value="${esc(n)}"></option>`).join('')}</datalist>`;
+}
+// A job name picked: its newest job's number, when the number box is still empty.
+function plateUseJobNo() {
+  const nm = String((document.getElementById('pl-job-name') || {}).value || '').trim().toLowerCase();
+  const noEl = document.getElementById('pl-job-no');
+  if (!nm || !noEl || String(noEl.value || '').trim()) return;
+  const j = [...(jobs || [])].filter(x => x && String(x.name || '').trim().toLowerCase() === nm).sort((a, b) => b.id - a.id)[0];
+  if (j) noEl.value = String(j.id);
+}
 async function plateStockSave(id, dir) {
   const g = x => String((document.getElementById(x) || {}).value || '').trim();
   const qty = parseInt(g('pl-qty'), 10);
@@ -35919,7 +35936,7 @@ async function plateStockSave(id, dir) {
   if (dir === 'out') {
     if (reason === 'new-job' || reason === 'old-job') {
       body.job_no = g('pl-job-no').replace(/^E-?\s*/i, ''); body.job_name = g('pl-job-name');
-      if (!/^\d+$/.test(body.job_no)) { await alertDialog({ title: 'Enter the job number', kind: 'warn' }); return; }
+      if (!body.job_no && !body.job_name) { await alertDialog({ title: 'Enter the job', message: 'Pick or type the job number or the job name.', kind: 'warn' }); return; }
     }
     if (reason === 'old-job' || reason === 'damaged') {
       body.damaged_by = g('pl-dmg');
@@ -35949,7 +35966,7 @@ async function plateStockHistory(id) {
       <tbody>${rows.map(t => `<tr><td style="padding:5px 8px;white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}${t.recorded_at ? `<div style="font-size:10px;color:#92400e;font-weight:700;">LATE · entered ${esc(fmtDMY(t.recorded_at))}</div>` : ''}</td>
         <td style="padding:5px 8px;text-align:right;font-weight:800;color:${t.change > 0 ? '#166534' : '#b91c1c'};">${t.change > 0 ? '+' : ''}${t.change}</td>
         <td style="padding:5px 8px;">${esc(PLATE_TX_TXT[t.reason] || t.reason)}</td>
-        <td style="padding:5px 8px;">${t.job_id ? 'E-' + t.job_id + ((t.job_name || t.job_name_live) ? ' · ' + esc(t.job_name || t.job_name_live || '') : '') : '&mdash;'}</td>
+        <td style="padding:5px 8px;">${(t.job_id || t.job_no || t.job_name) ? [t.job_id ? 'E-' + t.job_id : esc(t.job_no || ''), esc(t.job_name || '')].filter(Boolean).join(' · ') : '&mdash;'}</td>
         <td style="padding:5px 8px;">${esc(t.damaged_by || '') || '&mdash;'}</td>
         <td style="padding:5px 8px;">${esc(t.challan_no || '') || '&mdash;'}</td>
         <td style="padding:5px 8px;">${esc(t.notes || '')}</td>

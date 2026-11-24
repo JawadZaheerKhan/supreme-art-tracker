@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-plate-store';   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-plate-jobno';   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -2072,6 +2072,8 @@ async function initDb() {
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS job_name TEXT`;
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS damaged_by TEXT`;
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ`;
+    // A job number typed that is not a job in the app (owner, 2026-11-24): kept as written.
+    await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS job_no TEXT`;
     await sql`
       CREATE TABLE IF NOT EXISTS plate_events (
         id          SERIAL PRIMARY KEY,
@@ -8604,15 +8606,16 @@ app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), async (r
     const entry = stockEntryInstant(req.body.entry_date);
     if (entry.error) return res.status(400).json({ error: entry.error });
     const txt = (v, n) => String(v == null ? '' : v).trim().slice(0, n) || null;
-    let jobId = null, jobName = null, damagedBy = null;
+    let jobId = null, jobName = null, jobNo = null, damagedBy = null;
     if (reason === 'new-job' || reason === 'old-job') {
-      const raw = txt(req.body.job_no, 20);
+      // A job of the app (picked from the list) links to it; a number / name typed that is not in the app is kept
+      // as written (owner, 2026-11-24).
+      const raw = txt(req.body.job_no, 40);
+      jobName = txt(req.body.job_name, 200);
+      if (!raw && !jobName) return res.status(400).json({ error: 'Enter the job number or the job name.' });
       const m = raw && raw.match(/^E?-?\s*(\d+)$/i);
-      if (!m) return res.status(400).json({ error: 'Enter the job number.' });
-      const [j] = await sql`SELECT id, name FROM jobs WHERE id = ${parseInt(m[1], 10)} AND deleted_at IS NULL`;
-      if (!j) return res.status(400).json({ error: `Job ${raw} was not found.` });
-      jobId = j.id;
-      jobName = txt(req.body.job_name, 200) || j.name;
+      const [j] = m ? await sql`SELECT id, name FROM jobs WHERE id = ${parseInt(m[1], 10)} AND deleted_at IS NULL` : [];
+      if (j) { jobId = j.id; jobName = jobName || j.name; } else jobNo = raw;
     }
     if (reason === 'old-job' || reason === 'damaged') {
       damagedBy = txt(req.body.damaged_by, 300);
@@ -8622,12 +8625,12 @@ app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), async (r
     const notes = txt(req.body.notes, 300);
     const challan = reason === 'delivery' ? txt(req.body.challan_no, 60) : null;
     const at = entry.at ? new Date(entry.at).toISOString() : null;
-    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_name, damaged_by, notes, challan_no, user_email, created_at, recorded_at)
-              VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobName}, ${damagedBy}, ${notes}, ${challan}, ${req.user.email},
+    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_no, job_name, damaged_by, notes, challan_no, user_email, created_at, recorded_at)
+              VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobNo}, ${jobName}, ${damagedBy}, ${notes}, ${challan}, ${req.user.email},
                       COALESCE(${at}::timestamptz, NOW()), CASE WHEN ${at}::timestamptz IS NULL THEN NULL ELSE NOW() END)`;
     const [row] = await sql`UPDATE plate_sizes SET balance = balance + ${change} WHERE id = ${sizeId} RETURNING *`;
     await logAudit(sql, req, { action: 'plate_stock.' + dir, entityType: 'plate_size', entityId: sizeId,
-      summary: `Plates ${dir === 'in' ? 'Stock In' : 'Use'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name} (${reasons[reason]})${jobId ? ' · Job E-' + jobId : ''}${damagedBy ? ' · ' + damagedBy : ''}${challan ? ' · challan ' + challan : ''}${entry.date ? ' · dated ' + entry.date + ' (late entry)' : ''} · balance ${row.balance}` });
+      summary: `Plates ${dir === 'in' ? 'Stock In' : 'Use'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name} (${reasons[reason]})${jobId ? ' · Job E-' + jobId : jobNo ? ' · Job ' + jobNo : ''}${jobName && !jobId ? ' ' + jobName : ''}${damagedBy ? ' · ' + damagedBy : ''}${challan ? ' · challan ' + challan : ''}${entry.date ? ' · dated ' + entry.date + ' (late entry)' : ''} · balance ${row.balance}` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
