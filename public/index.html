@@ -1189,6 +1189,8 @@
   .stock-hint.low { color: #d97706; font-weight: 600; }
   .stock-hint.out { color: #A32D2D; font-weight: 600; }
   .main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+  .store-subtabs { display: flex; gap: 6px; padding: 6px 12px; background: var(--bg2, #f5f5f3); border-bottom: 1px solid var(--border); }
+  .store-subtabs .btn.is-on { background: #7c1f1f; border-color: #7c1f1f; color: #fff; font-weight: 700; }
   /* Reports has wide tables (imports, stock movement, jobs report) that
      deserve more room on big monitors. Everything else — Jobs, Inventory,
      Users, Stickers — stays at 1100px because their card layouts look
@@ -3995,6 +3997,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn" data-mode="inventory" id="mode-inventory-btn" onclick="setMode('inventory')">Inventory</button>
     <button class="mode-btn" data-mode="carton-shippers" id="mode-carton-shippers-btn" onclick="setMode('carton-shippers')" style="display:none;">&#128230; Carton Shippers</button>
     <button class="mode-btn" data-mode="plates" id="mode-plates-btn" onclick="setMode('plates')" style="display:none;">&#129513; Plate Store</button>
+    <button class="mode-btn" data-mode="store" id="mode-store-btn" onclick="setMode('store')" style="display:none;">&#127980; Store</button>
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="openReportsTab()">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
@@ -4651,6 +4654,10 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 <!-- Carton Shippers (owner, 2026-10-14): carton shipper stock, Stock In, Issue and the In / Out log. -->
 <div class="main" id="plates-mode" style="display:none;">
   <div id="plates-root" style="max-width:1100px;margin:0 auto;padding:12px 16px;"></div>
+</div>
+<!-- Store (moved from the ERP, owner 2026-11-24): the ERP's store page, one section at a time. -->
+<div class="main" id="store-mode" style="display:none;max-width:none;padding:0;">
+  <div id="store-root"></div>
 </div>
 <div class="main" id="carton-shippers-mode" style="display:none;">
   <div id="carton-shippers-root"></div>
@@ -7003,11 +7010,12 @@ function tabAllowed(m) {
     case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
     case 'carton-shippers': return hasPerm('carton_tab_access', 'view');
     case 'plates':      return hasPerm('inv_btn_plate_store', 'view');   // Plate Store tab (owner, 2026-11-24)
+    case 'store':       return hasPerm('store_tab_access', 'view') && (hasPerm('store_sec_consumables', 'view') || hasPerm('store_sec_machinery', 'view'));   // Store (moved from the ERP, 2026-11-24)
     case 'mgr-operators': return mgrOpsUnlocked();
     default:            return true;
   }
 }
-const TAB_ORDER = ['jobs', 'dashboard', 'products', 'inventory', 'carton-shippers', 'plates', 'reports', 'stickers', 'station', 'users', 'client-view'];
+const TAB_ORDER = ['jobs', 'dashboard', 'products', 'inventory', 'carton-shippers', 'plates', 'store', 'reports', 'stickers', 'station', 'users', 'client-view'];
 function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 // ── CEO Dashboard ─────────────────────────────────────────────────
 // Owner, 2026-10-09: one place where the CEO sees everything, in small
@@ -8174,6 +8182,7 @@ function renderUserChip() {
   showTab('mode-inventory-btn', 'inventory');
   showTab('mode-carton-shippers-btn', 'carton-shippers');
   showTab('mode-plates-btn', 'plates');
+  showTab('mode-store-btn', 'store');
   showTab('mode-reports-btn', 'reports');
   showTab('mode-stickers-btn', 'stickers');
   showTab('mode-station-btn', 'station');
@@ -9080,6 +9089,8 @@ function setMode(m) {
   if (cartonEl) cartonEl.style.display = m === 'carton-shippers' ? 'block' : 'none';
   const platesEl = document.getElementById('plates-mode');
   if (platesEl) platesEl.style.display = m === 'plates' ? 'block' : 'none';
+  const storeEl = document.getElementById('store-mode');
+  if (storeEl) storeEl.style.display = m === 'store' ? 'block' : 'none';
   document.getElementById('reports-mode').style.display   = (m === 'reports' || m === 'mgr-dp') ? 'block' : 'none';
   document.body.classList.toggle('mgr-dp-on', m === 'mgr-dp');
   if (m === 'mgr-dp') { openReportsGroup('daily-production-group'); openDailyProduction(); }
@@ -9164,6 +9175,11 @@ function setMode(m) {
     exportBtn.style.display = 'none';
     if (refreshBtn) refreshBtn.style.display = 'none';
     openPlateStore();
+  } else if (m === 'store') {
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
+    enterStore();
   } else if (m === 'dashboard') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -46354,6 +46370,191 @@ async function setUsersSubTab(tab) {
 // Both states are enforced server-side regardless of what the client shows
 // (once wired up — see the comment on the new *_btn_* keys in server.js:
 // they're live in the register now but not yet read by any gate).
+// ── Store tab (moved from the ERP, owner 2026-11-24) ──
+// The ERP's store page (public/store/index.html) shown here the way the ERP shows it: one section at a time -
+// Inks & Consumables or the Parts Store - each the section's Access Register row. The page talks to /api/store/*.
+let storeSection = null;
+const STORE_SECTIONS = [
+  { id: 'consumables', label: 'Inks & Consumables', row: 'store_sec_consumables', icon: '&#127912;' },
+  { id: 'machinery', label: 'Parts Store', row: 'store_sec_machinery', icon: '&#9881;' },
+];
+function storeSectionsAllowed() { return STORE_SECTIONS.filter(s => isSuperAdmin() || hasPerm(s.row, 'view')); }
+function enterStore(section) {
+  const root = document.getElementById('store-root'); if (!root) return;
+  const allowed = storeSectionsAllowed();
+  if (!allowed.length) { root.innerHTML = '<div style="padding:24px;color:var(--text3);">No Store section is open for your role.</div>'; return; }
+  if (section && allowed.some(s => s.id === section)) storeSection = section;
+  if (!storeSection || !allowed.some(s => s.id === storeSection)) storeSection = allowed[0].id;
+  try { localStorage.setItem('storeSection', storeSection); } catch (e) {}
+  const v = encodeURIComponent(document.documentElement.dataset.build || String(Date.now()).slice(0, 7));
+  const src = `/store/index.html?module=${storeSection}&v=${v}`;
+  const tabs = allowed.length > 1 ? `<div class="store-subtabs">${allowed.map(s => `<button type="button" class="btn btn-sm${s.id === storeSection ? ' is-on' : ''}" onclick="enterStore('${s.id}')">${s.icon} ${esc(s.label)}</button>`).join('')}</div>` : '';
+  const frame = document.getElementById('store-frame');
+  if (frame && frame.dataset.section === storeSection) { storeFrameFit(); return; }   // already open - keep its place
+  root.innerHTML = `${tabs}<iframe id="store-frame" data-section="${storeSection}" src="${src}" title="Store" style="width:100%;border:0;display:block;background:#f5f5f3;"></iframe>`;
+  storeFrameFit();
+}
+// The store page fills the rest of the window (it has its own sidebar and scrolling).
+function storeFrameFit() {
+  const f = document.getElementById('store-frame'); if (!f) return;
+  const top = f.getBoundingClientRect().top;
+  f.style.height = Math.max(420, window.innerHeight - Math.max(0, top)) + 'px';
+}
+window.addEventListener('resize', () => { if (typeof mode !== 'undefined' && mode === 'store') storeFrameFit(); });
+try { const s = localStorage.getItem('storeSection'); if (s) storeSection = s; } catch (e) {}
+
+// Excel from the store page (as the ERP): it sends the rows here, this writes the .xlsx with the letterhead and the
+// report code (Issuance: STR/QR/008/B Inks & Consumables, STR/QR/008/A Parts Store).
+let _excelJsP = null;
+function storeLoadExcelJs() {
+  if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
+  if (!_excelJsP) _excelJsP = new Promise((ok, bad) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
+    s.onload = () => window.ExcelJS ? ok(window.ExcelJS) : bad(new Error('Excel library did not load'));
+    s.onerror = () => { _excelJsP = null; bad(new Error('Could not load the Excel library - check the internet and retry.')); };
+    document.head.appendChild(s);
+  });
+  return _excelJsP;
+}
+function storeReportLetterhead(from, to) {
+  const dd = d => String(d).split('-').reverse().join('/');
+  const date = from && to ? (from === to ? dd(from) : dd(from) + ' to ' + dd(to)) : from ? 'From ' + dd(from) : to ? 'Through ' + dd(to) : 'All dates';
+  return { date, logoUrl: '/logo-urdu.png', company: { name: 'SUPREME ART PRIVATE LIMITED' } };
+}
+async function storeAddStyledSheet(wb, spec) {
+  const THIN = { style: 'thin', color: { argb: 'FFDDDDDD' } };
+  const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
+  const nCols = spec.headers.length;
+  const headerRow = spec.letterhead ? 4 : 2;
+  const lastHeaderRow = headerRow + (spec.headerGroups && spec.headerGroups.length ? 1 : 0);
+  const freeze = spec.freezeCols == null ? 2 : spec.freezeCols;
+  const ws = wb.addWorksheet(String(spec.sheetName).slice(0, 31), {
+    views: [{ state: 'frozen', xSplit: freeze, ySplit: lastHeaderRow }],
+    pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+  });
+  if (!spec.letterhead) {
+    ws.mergeCells(1, 1, 1, nCols);
+    const title = ws.getCell(1, 1);
+    title.value = spec.title;
+    title.font = { bold: true, size: 13, color: { argb: 'FFFFFFFF' } };
+    title.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFA32D2D' } };
+    title.alignment = { horizontal: 'center', vertical: 'middle' };
+    ws.getRow(1).height = 22;
+  } else {
+    const h = spec.letterhead;
+    const merge = (row, start, end, value) => {
+      ws.mergeCells(row, start, row, end);
+      const c = ws.getCell(row, start);
+      c.value = value; c.font = { name: 'Times New Roman', size: 12 };
+      c.alignment = { vertical: 'middle', wrapText: true }; c.border = BORDER;
+      return c;
+    };
+    ws.mergeCells(1, 1, 2, 1);
+    if (nCols >= 5) {
+      const side = Math.max(1, Math.floor((nCols - 1) / 4));
+      const leftEnd = 1 + side, rightStart = nCols - side + 1;
+      [merge(3, 2, leftEnd, h.code || ''), merge(3, leftEnd + 1, rightStart - 1, 'Date: ' + h.date), merge(3, rightStart, nCols, h.issue ? 'Issue Status: ' + h.issue : '')]
+        .forEach(c => { c.alignment = { horizontal: 'center', vertical: 'middle', shrinkToFit: true }; });
+    } else {
+      const c = merge(3, 2, nCols, [h.code, 'Date: ' + h.date, h.issue ? 'Issue Status: ' + h.issue : ''].filter(Boolean).join('  |  '));
+      c.alignment = { horizontal: 'center', vertical: 'middle', shrinkToFit: true };
+    }
+    ws.getRow(1).height = 29;
+    const logoName = ws.getCell(3, 1);
+    logoName.value = h.company.name;
+    logoName.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FFA32D2D' } };
+    logoName.alignment = { horizontal: 'center', vertical: 'middle', shrinkToFit: true };
+    ws.getRow(2).height = 29;
+    ws.getRow(3).height = 20;
+    const r = await fetch(h.logoUrl);
+    if (!r.ok) throw new Error('Unable to load the company logo. Please retry the export.');
+    const blob = await r.blob();
+    const base64 = await new Promise((ok, bad) => { const fr = new FileReader(); fr.onload = () => ok(String(fr.result)); fr.onerror = bad; fr.readAsDataURL(blob); });
+    const imageId = wb.addImage({ base64, extension: 'png' });
+    const colPx = ((spec.colWidths && spec.colWidths[0]) || 14) * 7 + 5;
+    const logoW = Math.min(135, colPx - 12);
+    ws.addImage(imageId, { tl: { col: (colPx - logoW) / (2 * colPx), row: 0.14 }, ext: { width: logoW, height: Math.round(logoW * 292 / 600) } });
+    ws.mergeCells(1, 2, 2, nCols);
+    const title = ws.getCell(1, 2);
+    title.value = spec.title;
+    title.font = { name: 'Times New Roman', size: 16, bold: true, color: { argb: 'FFA32D2D' } };
+    title.alignment = { horizontal: 'center', vertical: 'middle' };
+    for (let row = 1; row <= 3; row++) for (let col = 1; col <= nCols; col++) ws.getCell(row, col).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3EEE4' } };
+    ws.pageSetup.paperSize = 9; ws.pageSetup.printTitlesRow = '1:4';
+    ws.headerFooter.oddFooter = '&L' + h.company.name + '&RPage &P of &N';
+  }
+  const header = ws.getRow(headerRow);
+  spec.headers.forEach((t, i) => {
+    const c = header.getCell(i + 1);
+    c.value = t; c.font = { bold: true, size: 11 };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3EEE4' } };
+    c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }; c.border = BORDER;
+  });
+  header.height = 26;
+  if (spec.headerGroups && spec.headerGroups.length) {
+    const grouped = new Set();
+    spec.headers.forEach((t, i) => { const c = ws.getCell(lastHeaderRow, i + 1); c.value = t; c.style = { ...header.getCell(i + 1).style }; });
+    for (const g of spec.headerGroups) {
+      ws.mergeCells(headerRow, g.start + 1, headerRow, g.start + g.span);
+      ws.getCell(headerRow, g.start + 1).value = g.label;
+      for (let i = g.start; i < g.start + g.span; i++) grouped.add(i);
+    }
+    spec.headers.forEach((_, i) => { if (!grouped.has(i)) ws.mergeCells(headerRow, i + 1, lastHeaderRow, i + 1); });
+    header.height = 36; ws.getRow(lastHeaderRow).height = 22;
+    ws.pageSetup.printTitlesRow = '1:' + lastHeaderRow;
+  }
+  for (const row of spec.rows) {
+    const r = ws.addRow(row);
+    r.eachCell({ includeEmpty: true }, (cell, col) => {
+      cell.border = BORDER;
+      cell.alignment = { horizontal: col <= 2 || (spec.leftCols && spec.leftCols.includes(col - 1)) ? 'left' : 'center', vertical: 'top', wrapText: true };
+      cell.font = { size: 10 };
+      if (spec.headerGroups && spec.headerGroups.length && typeof cell.value === 'number') {
+        cell.numFmt = '#,##0.######';
+        const label = spec.headers[col - 1];
+        if (label === 'In') cell.font = { size: 10, color: { argb: 'FF15803D' } };
+        if (label === 'Out' || label === 'Total out') cell.font = { size: 10, color: { argb: 'FFA32D2D' } };
+      }
+    });
+  }
+  ws.columns.forEach((col, i) => {
+    if (spec.colWidths) col.width = spec.colWidths[i] == null ? 12 : spec.colWidths[i];
+    else col.width = i === 0 ? 14 : i === 1 ? 22 : 11;
+  });
+  if (spec.letterhead) {
+    if (!(spec.headerGroups && spec.headerGroups.length)) ws.autoFilter = { from: { row: headerRow, column: 1 }, to: { row: headerRow + spec.rows.length, column: nCols } };
+    ws.pageSetup.printArea = 'A1:' + ws.getColumn(nCols).letter + ws.rowCount;
+  }
+  return ws;
+}
+window.addEventListener('message', async event => {
+  const f = document.getElementById('store-frame');
+  if (!f || event.source !== f.contentWindow || event.origin !== location.origin) return;
+  const m = event.data;
+  if (!m || m.type !== 'store-excel-export') return;
+  try {
+    const ExcelJS = await storeLoadExcelJs();
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Supreme Art Job Tracker'; wb.created = new Date();
+    const mod = storeSection || 'consumables';
+    const code = m.section === 'issuance' ? (mod === 'consumables' ? 'STR/QR/008/B' : 'STR/QR/008/A') : undefined;
+    await storeAddStyledSheet(wb, {
+      sheetName: String(m.title || 'Store').slice(0, 31), title: m.title, headers: m.headers || [], rows: m.rows || [],
+      freezeCols: m.headerGroups ? 3 : 1, headerGroups: m.headerGroups, colWidths: m.colWidths,
+      letterhead: { ...storeReportLetterhead(m.from || '', m.to || ''), code, issue: m.headerGroups ? '01' : undefined },
+    });
+    const buf = await wb.xlsx.writeBuffer();
+    const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = String(m.filename || 'Store').endsWith('.xlsx') ? m.filename : (m.filename || 'Store') + '.xlsx';
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    f.contentWindow.postMessage({ type: 'store-excel-result', ok: true }, event.origin);
+  } catch (e) {
+    f.contentWindow.postMessage({ type: 'store-excel-result', ok: false, error: (e && e.message) || 'Export failed. Please retry.' }, event.origin);
+  }
+});
+
 let _accRegTab = 'jobs';
 const ACC_REG_TABS = [
   ['jobs', 'Jobs'],
@@ -46362,6 +46563,7 @@ const ACC_REG_TABS = [
   ['inventory', 'Inventory'],
   ['carton-shippers', 'Carton Shippers'],
   ['plates', 'Plate Store'],
+  ['store', 'Store'],
   ['reports', 'Reports'],
   ['station', 'Station'],
   ['users', 'Users'],
@@ -46517,6 +46719,21 @@ const ACC_PLATES_TAB_ROWS = [
   { key: 'plate_btn_pickup',    type: 'action' },
   { key: 'plate_btn_delete',    type: 'action' },
 ];
+// Store tab (moved from the ERP, owner 2026-11-24): one row per grant the ERP's store had.
+const ACC_STORE_TAB_ROWS = [
+  { key: 'store_tab_access',         type: 'tab' },
+  { key: 'store_sec_consumables',    type: 'tab' },
+  { key: 'store_sec_machinery',      type: 'tab' },
+  { key: 'store_btn_edit',           type: 'action' },
+  { key: 'store_btn_stock_in',       type: 'action' },
+  { key: 'store_btn_stock_out',      type: 'action' },
+  { key: 'store_btn_reverse',        type: 'action' },
+  { key: 'store_btn_delete_history', type: 'action' },
+  { key: 'store_btn_part_delete',    type: 'action' },
+  { key: 'store_btn_reconcile',      type: 'action' },
+  { key: 'store_btn_settings',       type: 'action' },
+  { key: 'store_btn_orders',         type: 'action' },
+];
 const ACC_DASHBOARD_TAB_ROWS = [
   { key: 'dashboard_tab_access', type: 'tab' },
   { key: 'dash_btn_ignore_warning', type: 'action' },
@@ -46528,7 +46745,7 @@ const ACC_CLIENT_VIEW_TAB_ROWS = [
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { dashboard: ACC_DASHBOARD_TAB_ROWS, jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, 'carton-shippers': ACC_CARTON_TAB_ROWS, plates: ACC_PLATES_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
+const ACC_TAB_ROWS = { dashboard: ACC_DASHBOARD_TAB_ROWS, jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, 'carton-shippers': ACC_CARTON_TAB_ROWS, plates: ACC_PLATES_TAB_ROWS, store: ACC_STORE_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));

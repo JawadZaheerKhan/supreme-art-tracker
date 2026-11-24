@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-plate-buttons';   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-store';   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -499,7 +499,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_edit_paper', 'inv_btn_rename_paper', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'products_btn_new', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'plate_btn_add', 'plate_btn_stock_in', 'plate_btn_use', 'plate_btn_pickup', 'plate_btn_delete', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_edit_paper', 'inv_btn_rename_paper', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'products_btn_new', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'plate_btn_add', 'plate_btn_stock_in', 'plate_btn_use', 'plate_btn_pickup', 'plate_btn_delete', 'store_btn_edit', 'store_btn_stock_in', 'store_btn_stock_out', 'store_btn_reverse', 'store_btn_delete_history', 'store_btn_part_delete', 'store_btn_reconcile', 'store_btn_settings', 'store_btn_orders', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -745,6 +745,20 @@ const ROLE_PERMISSION_DEFAULTS = {
   carton_btn_stock_in: { label: 'Stock In — cartons received from a supplier', levels: { procurement: 'yes' } },
   carton_btn_issue:    { label: 'Issue — cartons given out for an E-Job, a manual job or other', levels: { procurement: 'yes' } },
   carton_btn_reverse:  { label: 'Reverse — undo a wrong carton entry', levels: { procurement: '30-day' }, extra: ['30-day'] },
+
+  // Access Register — Store tab (moved from the ERP, owner 2026-11-24): one row per grant the ERP's store had.
+  store_tab_access:          { label: 'Store tab — the raw material store (moved from the ERP)', levels: { admin: 'view', store_manager: 'view', ceo: 'view' } },
+  store_sec_consumables:     { label: 'Store — Inks & Consumables section', levels: { admin: 'view', store_manager: 'view', ceo: 'view' } },
+  store_sec_machinery:       { label: 'Store — Parts Store (Machinery) section', levels: { admin: 'view', store_manager: 'view', ceo: 'view' } },
+  store_btn_edit:            { label: 'Store — Add / Edit an item (photo, sticker P.O. / Invoice No., Issued To names)', levels: { admin: 'yes', store_manager: 'yes' } },
+  store_btn_stock_in:        { label: 'Store — Stock In (also Receive on an order)', levels: { admin: 'yes', store_manager: 'yes' } },
+  store_btn_stock_out:       { label: 'Store — Stock Out / Issue', levels: { admin: 'yes', store_manager: 'yes' } },
+  store_btn_reverse:         { label: 'Store — Reverse an entry (the quantity comes back)', levels: { admin: 'yes', store_manager: 'yes' } },
+  store_btn_delete_history:  { label: 'Store — Delete from History (the record only; the quantity stays)', levels: { admin: 'yes' } },
+  store_btn_part_delete:     { label: 'Store — Delete an item (to the Trash), Restore, remove from the Trash', levels: { admin: 'yes' } },
+  store_btn_reconcile:       { label: 'Store — "Does not add up": Reconcile / Ignore', levels: { admin: 'yes' } },
+  store_btn_settings:        { label: 'Store — Settings: categories, machines, suppliers & brands', levels: { admin: 'yes' } },
+  store_btn_orders:          { label: 'Store — Orders: book (also from a P.O.), change, cancel, delete', levels: { admin: 'yes', store_manager: 'yes' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
@@ -16854,6 +16868,9 @@ app.get('/api/admin/transfer-stats', async (req, res) => {
     });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
+
+// The Store - moved from the ERP (owner, 2026-11-24): its own routes and tables, see store-routes.js.
+require('./store-routes')(app, { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon });
 
 app.get('*', (req, res) => {
   // Deep links (/jobs, /station, …) fall through to here and get the app
