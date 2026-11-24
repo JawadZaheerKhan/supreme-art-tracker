@@ -35888,6 +35888,7 @@ function plateUseForm(id) {
       <div class="form-group"><label class="form-label">Job Name</label><input type="text" id="pl-job-name" list="pl-job-name-dl" autocomplete="off" placeholder="pick or type" oninput="plateUseJobNo()"></div>
     </div>
     ${plateJobDatalistsHtml()}
+    <div class="form-group" id="pl-plates-wrap" style="display:none;"></div>
     <div class="form-group" id="pl-dmg-wrap" style="display:none;"><label class="form-label">Damaged by whom / reason *</label><input type="text" id="pl-dmg" placeholder="e.g. SM74 operator - scratched on the press"></div>
     ${stockEntryDateHtml('pl-date')}
     <div class="form-group"><label class="form-label">Notes</label><input type="text" id="pl-notes" placeholder="optional"></div>
@@ -35900,12 +35901,14 @@ function plateUseReasonSync() {
   const show = (id, on) => { const e = document.getElementById(id); if (e) e.style.display = on ? '' : 'none'; };
   show('pl-job-wrap', r === 'new-job' || r === 'old-job');
   show('pl-dmg-wrap', r === 'old-job' || r === 'damaged');
+  plateUsePlatesSync();
 }
 function plateUseJobName() {
   const no = String((document.getElementById('pl-job-no') || {}).value || '').trim().replace(/^E-?\s*/i, '');
   const j = /^\d+$/.test(no) ? (jobs || []).find(x => x && x.id === parseInt(no, 10)) : null;
   const nm = document.getElementById('pl-job-name');
   if (nm && j) nm.value = j.name || '';
+  plateUsePlatesSync();
 }
 // Job No. / Job Name dropdowns (owner, 2026-11-24): the app's jobs - newest first, each number with its name; one
 // name each. Anything not in the list can still be typed.
@@ -35922,6 +35925,7 @@ function plateUseJobNo() {
   if (!nm || !noEl || String(noEl.value || '').trim()) return;
   const j = [...(jobs || [])].filter(x => x && String(x.name || '').trim().toLowerCase() === nm).sort((a, b) => b.id - a.id)[0];
   if (j) noEl.value = String(j.id);
+  plateUsePlatesSync();
 }
 async function plateStockSave(id, dir) {
   const g = x => String((document.getElementById(x) || {}).value || '').trim();
@@ -35936,6 +35940,7 @@ async function plateStockSave(id, dir) {
     if (reason === 'new-job' || reason === 'old-job') {
       body.job_no = g('pl-job-no').replace(/^E-?\s*/i, ''); body.job_name = g('pl-job-name');
       if (!body.job_no && !body.job_name) { await alertDialog({ title: 'Enter the job', message: 'Pick or type the job number or the job name.', kind: 'warn' }); return; }
+      if (reason === 'old-job') body.plate_names = [...document.querySelectorAll('.pl-plate-pick:checked')].map(x => x.value);
     }
     if (reason === 'old-job' || reason === 'damaged') {
       body.damaged_by = g('pl-dmg');
@@ -35972,6 +35977,70 @@ async function plateStockHistory(id) {
         <td style="padding:5px 8px;">${esc(t.actor_name || String(t.user_email || '').split('@')[0] || '')}</td></tr>`).join('') || '<tr><td colspan="8" style="padding:12px;text-align:center;color:var(--text3);">Nothing yet.</td></tr>'}</tbody>
     </table></div>`;
 }
+// A product's plates from its No. of Colors (owner, 2026-11-24): every product in the app was printed, so it has its
+// plates - 4 colours = Cyan, Magenta, Yellow, Black; 5 = CMYK + Spot 1; 6 = CMYK + Spot 1, Spot 2 ...; fewer than 4 =
+// Spot 1...; the "+1" of "4+1" is the inside leaflet's plate. Spot colours get their names later.
+// leaflet = the job's Inside Leaflet box is ticked: it has the leaflet's plate even when CTP wrote "5", not "4+1"
+// (owner, 2026-11-24 - he may forget the +1). Never two.
+function defaultPlateNames(colors, leaflet) {
+  const nums = String(colors || '').match(/\d+/g) || [];
+  const main = Math.min(16, parseInt(nums[0], 10) || 0);
+  let extra = Math.min(8, nums.slice(1).reduce((a, n) => a + (parseInt(n, 10) || 0), 0));
+  if (leaflet && !extra && main) extra = 1;
+  const out = [];
+  if (main >= 4) { out.push('Cyan', 'Magenta', 'Yellow', 'Black'); for (let k = 1; k <= main - 4; k++) out.push('Spot ' + k); }
+  else for (let k = 1; k <= main; k++) out.push('Spot ' + k);
+  for (let k = 1; k <= extra; k++) out.push(extra === 1 ? 'Inside Leaflet' : 'Inside Leaflet ' + k);
+  return out;
+}
+// A product's plate count and inside leaflet: its newest job's Plates box (else No. of Colors) and Inside Leaflet
+// tick; a product with no job: the No. of Colors saved on it.
+function productColorsOf(key, jobsOf) {
+  const list = (jobsOf || (jobs || []).filter(j => j && productOfName(j.name).key === key)).slice().sort((a, b) => b.id - a.id);
+  for (const j of list) {
+    const p = j.particulars || {};
+    const c = String(((p.plates || {}).quantity) || ((p.no_of_colors || {}).quantity) || '').trim();
+    if (c) return { colors: c, leaflet: String(((p.inside_leaflet || {}).quantity) || '').trim().toLowerCase() === 'yes' };
+  }
+  const pm = typeof productMasterOf === 'function' ? productMasterOf(key) : null;
+  return { colors: pm ? String(pm.colors || '').trim() : '', leaflet: false };
+}
+// Its plates by name: the ones CTP recorded (in use), else the set from its colours.
+const _productPlatesCache = new Map();
+async function productPlateNames(key, jobsOf) {
+  let real = _productPlatesCache.get(key);
+  if (!real) {
+    try { const d = await api('GET', `/api/plates/product/${encodeURIComponent(key)}`); real = d.plates.filter(p => p.status === 'active').map(p => p.color_name); }
+    catch (e) { real = []; }
+    _productPlatesCache.set(key, real);
+  }
+  if (real.length) return [...new Set(real)];
+  const c = productColorsOf(key, jobsOf);
+  return defaultPlateNames(c.colors, c.leaflet);
+}
+// Use -> Old job: which plates of the job (owner, 2026-11-24). Ticking them sets the quantity.
+async function plateUsePlatesSync() {
+  const wrap = document.getElementById('pl-plates-wrap');
+  if (!wrap) return;
+  const reason = (document.getElementById('pl-reason') || {}).value;
+  if (reason !== 'old-job') { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+  const no = String((document.getElementById('pl-job-no') || {}).value || '').trim().replace(/^E-?\s*/i, '');
+  const nm = String((document.getElementById('pl-job-name') || {}).value || '').trim();
+  const j = /^\d+$/.test(no) ? (jobs || []).find(x => x && x.id === parseInt(no, 10)) : null;
+  const name = (j && j.name) || nm;
+  if (!name) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+  const key = productOfName(name).key;
+  const names = await productPlateNames(key);
+  if (!names.length) { wrap.style.display = ''; wrap.innerHTML = '<div style="font-size:12px;color:var(--text2);">No. of Colors is not on this job - write the plates in Notes.</div>'; return; }
+  wrap.style.display = '';
+  wrap.innerHTML = `<label class="form-label">Which plates? <span style="font-weight:400;color:var(--text2);">(tick the ones made again)</span></label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;">${names.map((n, k) => `<label style="display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid var(--border);border-radius:999px;cursor:pointer;font-size:13px;font-weight:700;background:#fff;"><input type="checkbox" class="pl-plate-pick" value="${esc(n)}" onchange="plateUsePlatesQty()"> ${esc(n)}</label>`).join('')}</div>`;
+}
+function plateUsePlatesQty() {
+  const n = document.querySelectorAll('.pl-plate-pick:checked').length;
+  const q = document.getElementById('pl-qty');
+  if (q && n) q.value = String(n);
+}
 // Register (owner, 2026-11-24): every plate line's Stock In and Usage in a period, each with the columns it needs.
 async function loadPlateRegister() {
   const el = document.getElementById('plate-store-body'); if (!el) return;
@@ -35996,10 +36065,10 @@ function renderPlateRegister() {
   const date = t => `<span style="white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}</span>${t.recorded_at ? `<div style="font-size:10px;color:#92400e;font-weight:700;">LATE · entered ${esc(fmtDMY(t.recorded_at))}</div>` : ''}`;
   const head = isIn
     ? th('Date') + th('Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + th('Reason') + th('Challan No.') + th('Notes') + th('By')
-    : th('Date') + th('Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + th('Reason') + th('Job No.') + th('Job Name') + th('Damaged by / reason') + th('Notes') + th('By');
+    : th('Date') + th('Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + th('Reason') + th('Job No.') + th('Job Name') + th('Plates') + th('Damaged by / reason') + th('Notes') + th('By');
   const body = rows.map(t => '<tr style="border-bottom:1px solid var(--border);">' + (isIn
     ? td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td('+' + t.change, 'text-align:right;font-weight:800;color:#166534;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(t.challan_no || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t))
-    : td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td(String(Math.abs(t.change)), 'text-align:right;font-weight:800;color:#b91c1c;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(jobNo(t)) || dash, 'font-weight:700;') + td(esc(t.job_name || '') || dash) + td(esc(t.damaged_by || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t))) + '</tr>').join('');
+    : td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td(String(Math.abs(t.change)), 'text-align:right;font-weight:800;color:#b91c1c;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(jobNo(t)) || dash, 'font-weight:700;') + td(esc(t.job_name || '') || dash) + td(esc(t.plate_names || '') || dash, 'font-weight:700;color:#1e3a8a;') + td(esc(t.damaged_by || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t))) + '</tr>').join('');
   const sub = (id, label, n) => `<button class="btn btn-sm" style="${plateRegSub === id ? (id === 'in' ? 'background:#166534;border-color:#166534;color:#fff;' : 'background:#DC2626;border-color:#DC2626;color:#fff;') : ''}font-weight:700;" onclick="plateRegSub = '${id}'; renderPlateRegister()">${label} (${n})</button>`;
   el.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
       <div style="display:flex;gap:6px;">${sub('in', '+ Stock In', inCount)}${sub('use', 'Usage', useCount)}</div>
@@ -36027,13 +36096,30 @@ async function openProductPlates(i) {
   const bySize = new Map();
   for (const pl of active) { const k = pl.size_name || '—'; if (!bySize.has(k)) bySize.set(k, []); bySize.get(k).push(pl); }
   const act = a => a === 'made' ? 'Made' : a === 'reused' ? 'Reused' : 'Removed';
-  el.innerHTML = `<div style="font-weight:800;margin-bottom:6px;">In use</div>
-    ${bySize.size ? [...bySize.entries()].map(([sz, list]) => `<div style="margin-bottom:8px;"><span style="font-size:12px;color:var(--text2);font-weight:700;">${esc(sz)}:</span> ${list.map(pl => `<span title="Made ${esc(fmtDMY(pl.made_at))}${pl.made_job_id ? ' on E-' + pl.made_job_id : ''} by ${esc(pl.made_by || '')}" style="display:inline-block;padding:4px 10px;margin:2px;border-radius:999px;background:#e0e7ff;color:#1e3a8a;font-weight:800;font-size:12.5px;">${esc(pl.color_name)}</span>`).join('')}</div>`).join('') : '<div style="color:var(--text3);margin-bottom:8px;">No plates made yet - CTP makes them on the Station\'s Plates screen.</div>'}
-    <div style="font-weight:800;margin:10px 0 6px;">Register</div>
+  const chip = (t, title) => `<span title="${esc(title || '')}" style="display:inline-block;padding:4px 10px;margin:2px;border-radius:999px;background:#e0e7ff;color:#1e3a8a;font-weight:800;font-size:12.5px;">${esc(t)}</span>`;
+  // No plates recorded by CTP yet: the set from its colours (owner, 2026-11-24) - it was printed, so it has them.
+  const c = productColorsOf(g.key, g.jobs);
+  const fromColors = defaultPlateNames(c.colors, c.leaflet);
+  const setHtml = bySize.size
+    ? [...bySize.entries()].map(([sz, list]) => `<div style="margin-bottom:6px;"><span style="font-size:12px;color:var(--text2);font-weight:700;">${esc(sz)}:</span> ${list.map(pl => chip(pl.color_name, `Made ${fmtDMY(pl.made_at)}${pl.made_job_id ? ' on E-' + pl.made_job_id : ''} by ${pl.made_by || ''}`)).join('')}</div>`).join('')
+    : fromColors.length
+      ? `<div>${fromColors.map(n => chip(n)).join('')}</div><div style="font-size:11.5px;color:var(--text2);margin-top:3px;">${fromColors.length} plates from its ${c.leaflet && !/\+/.test(c.colors) ? c.colors + ' plates + inside leaflet' : 'No. of Colors ' + esc(c.colors)} - the spot colours get their names later.</div>`
+      : '<div style="color:var(--text3);">No. of Colors / Plates is not on its jobs yet.</div>';
+  const th = l => `<th style="text-align:left;padding:6px 8px;">${l}</th>`;
+  const td = v => `<td style="padding:5px 8px;">${v}</td>`;
+  const dash = '<span style="color:var(--text3)">&mdash;</span>';
+  const usage = Array.isArray(d.usage) ? d.usage : [];
+  el.innerHTML = `<div style="font-weight:800;margin-bottom:6px;">Plates</div>${setHtml}
+    <div style="font-weight:800;margin:12px 0 6px;">Plate usage <span style="font-weight:400;font-size:12px;color:var(--text2);">(Plate Store - Use)</span></div>
     <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
-      <thead><tr><th style="text-align:left;padding:6px 8px;">When</th><th style="text-align:left;padding:6px 8px;">Job</th><th style="text-align:left;padding:6px 8px;">Plate</th><th style="text-align:left;padding:6px 8px;">Size</th><th style="text-align:left;padding:6px 8px;">What</th><th style="text-align:left;padding:6px 8px;">Reason</th><th style="text-align:left;padding:6px 8px;">By</th></tr></thead>
-      <tbody>${d.events.map(e => `<tr><td style="padding:5px 8px;white-space:nowrap;">${esc(fmtDMYT12(e.created_at))}</td><td style="padding:5px 8px;">${e.job_id ? 'E-' + e.job_id : '&mdash;'}</td><td style="padding:5px 8px;font-weight:700;">${esc(e.color_name || '')}</td><td style="padding:5px 8px;">${esc(e.size_name || '')}</td><td style="padding:5px 8px;">${act(e.action)}</td><td style="padding:5px 8px;">${esc(PLATE_REASON_TXT[e.reason] || e.reason || '') || '&mdash;'}</td><td style="padding:5px 8px;">${esc(e.by_name || '')}</td></tr>`).join('') || '<tr><td colspan="7" style="padding:12px;text-align:center;color:var(--text3);">Nothing yet.</td></tr>'}</tbody>
-    </table></div>`;
+      <thead><tr>${th('Date')}${th('Job')}${th('Plates')}${th('Qty')}${th('Reason')}${th('Damaged by / reason')}${th('Plate size')}</tr></thead>
+      <tbody>${usage.map(t => `<tr>${td(esc(fmtDMYT12(t.created_at)))}${td(t.job_id ? 'E-' + t.job_id : esc(t.job_no || '') || dash)}${td(esc(t.plate_names || '') || dash)}${td(String(Math.abs(t.change)))}${td(esc(PLATE_TX_TXT[t.reason] || t.reason))}${td(esc(t.damaged_by || '') || dash)}${td(esc([t.size_name, t.size_brand].filter(Boolean).join(' · ')))}</tr>`).join('') || '<tr><td colspan="7" style="padding:12px;text-align:center;color:var(--text3);">No plates used for it yet.</td></tr>'}</tbody>
+    </table></div>
+    ${d.events.length ? `<div style="font-weight:800;margin:12px 0 6px;">CTP Station</div>
+    <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
+      <thead><tr>${th('When')}${th('Job')}${th('Plate')}${th('Size')}${th('What')}${th('Reason')}${th('By')}</tr></thead>
+      <tbody>${d.events.map(e => `<tr>${td(esc(fmtDMYT12(e.created_at)))}${td(e.job_id ? 'E-' + e.job_id : dash)}${td('<b>' + esc(e.color_name || '') + '</b>')}${td(esc(e.size_name || ''))}${td(act(e.action))}${td(esc(PLATE_REASON_TXT[e.reason] || e.reason || '') || dash)}${td(esc(e.by_name || ''))}</tr>`).join('')}</tbody>
+    </table></div>` : ''}`;
 }
 // ── + New Product / Details / Delete (owner, 2026-11-23) ─────────────
 // A product without a job card: name, company, item code, No. of Colors, UPS, Rate. Its tile shows in red (no job)
@@ -43973,8 +44059,8 @@ async function stationPlatesPickJob(id) {
 }
 function stationPlatesResetRows() {
   const d = stationPlatesJob;
-  const n = plateCountOf(d && d.colors) || 4;
-  stationPlateRows = Array.from({ length: n }, (_, k) => (n >= 4 && k < 4) ? PLATE_CMYK[k] : '');
+  const names = defaultPlateNames(d && d.colors, !!(d && d.leaflet));
+  stationPlateRows = names.length ? names : PLATE_CMYK.slice();
 }
 function stationPlatesSetSize(v) { stationPlatesSize = parseInt(v, 10) || null; stationPlatesNewSet = false; stationRender(); }
 function stationPlateRowSet(k, v) { stationPlateRows[k] = v; }

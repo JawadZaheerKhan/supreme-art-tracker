@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-plate-jobno';   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-plate-names';   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -2074,6 +2074,8 @@ async function initDb() {
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ`;
     // A job number typed that is not a job in the app (owner, 2026-11-24): kept as written.
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS job_no TEXT`;
+    // Which plates of the job a Use was for (owner, 2026-11-24): "Cyan, Spot 1".
+    await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS plate_names TEXT`;
     await sql`
       CREATE TABLE IF NOT EXISTS plate_events (
         id          SERIAL PRIMARY KEY,
@@ -8624,13 +8626,15 @@ app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), async (r
     const change = dir === 'in' ? qty : -qty;
     const notes = txt(req.body.notes, 300);
     const challan = reason === 'delivery' ? txt(req.body.challan_no, 60) : null;
+    const plateNames = dir === 'out' && Array.isArray(req.body.plate_names)
+      ? (req.body.plate_names.map(x => String(x || '').trim().slice(0, 40)).filter(Boolean).slice(0, 16).join(', ') || null) : null;
     const at = entry.at ? new Date(entry.at).toISOString() : null;
-    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_no, job_name, damaged_by, notes, challan_no, user_email, created_at, recorded_at)
-              VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobNo}, ${jobName}, ${damagedBy}, ${notes}, ${challan}, ${req.user.email},
+    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_no, job_name, damaged_by, plate_names, notes, challan_no, user_email, created_at, recorded_at)
+              VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobNo}, ${jobName}, ${damagedBy}, ${plateNames}, ${notes}, ${challan}, ${req.user.email},
                       COALESCE(${at}::timestamptz, NOW()), CASE WHEN ${at}::timestamptz IS NULL THEN NULL ELSE NOW() END)`;
     const [row] = await sql`UPDATE plate_sizes SET balance = balance + ${change} WHERE id = ${sizeId} RETURNING *`;
     await logAudit(sql, req, { action: 'plate_stock.' + dir, entityType: 'plate_size', entityId: sizeId,
-      summary: `Plates ${dir === 'in' ? 'Stock In' : 'Use'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name} (${reasons[reason]})${jobId ? ' · Job E-' + jobId : jobNo ? ' · Job ' + jobNo : ''}${jobName && !jobId ? ' ' + jobName : ''}${damagedBy ? ' · ' + damagedBy : ''}${challan ? ' · challan ' + challan : ''}${entry.date ? ' · dated ' + entry.date + ' (late entry)' : ''} · balance ${row.balance}` });
+      summary: `Plates ${dir === 'in' ? 'Stock In' : 'Use'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name} (${reasons[reason]})${jobId ? ' · Job E-' + jobId : jobNo ? ' · Job ' + jobNo : ''}${jobName && !jobId ? ' ' + jobName : ''}${plateNames ? ' · plates: ' + plateNames : ''}${damagedBy ? ' · ' + damagedBy : ''}${challan ? ' · challan ' + challan : ''}${entry.date ? ' · dated ' + entry.date + ' (late entry)' : ''} · balance ${row.balance}` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -8677,11 +8681,19 @@ app.get('/api/plates/product/:key', requireAuth, async (req, res) => {
     await dbReady;
     const sql = getDb();
     const key = String(req.params.key || '').trim().toLowerCase();
-    const [plates, events] = await Promise.all([
+    // Plates used from the Plate Store for this product's jobs (its own name or a name folded into it), or a typed
+    // job name that is the product's (owner, 2026-11-24).
+    const [plates, events, usage] = await Promise.all([
       sql`SELECT p.*, s.name AS size_name FROM plates p LEFT JOIN plate_sizes s ON s.id = p.size_id WHERE p.product_key = ${key} ORDER BY p.status, s.name, p.id`,
       sql`SELECT e.*, p.color_name, s.name AS size_name FROM plate_events e LEFT JOIN plates p ON p.id = e.plate_id LEFT JOIN plate_sizes s ON s.id = e.size_id WHERE e.product_key = ${key} ORDER BY e.created_at DESC, e.id DESC`,
+      sql`SELECT t.*, COALESCE(t.job_name, j.name) AS job_name, s.name AS size_name, s.brand AS size_brand
+            FROM plate_stock_tx t LEFT JOIN jobs j ON j.id = t.job_id LEFT JOIN plate_sizes s ON s.id = t.size_id
+           WHERE t.change < 0 AND t.reason <> 'plate-made'
+             AND (lower(btrim(COALESCE(j.name, t.job_name, ''))) = ${key}
+                  OR lower(btrim(COALESCE(j.name, t.job_name, ''))) IN (SELECT alias FROM finance.product_aliases WHERE lower(btrim(canonical)) = ${key}))
+           ORDER BY t.created_at DESC, t.id DESC LIMIT 500`,
     ]);
-    res.json({ plates, events });
+    res.json({ plates, events, usage });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Station - a job's plates: its product, the sizes, the size of its machine, the product's plates in use, and what
@@ -8698,9 +8710,12 @@ app.get('/api/station/plates/job/:id', requireStationUser, async (req, res) => {
     const [pm] = await sql`SELECT colors FROM finance.products WHERE key = ${prod.key}`;
     const plates = await sql`SELECT p.*, s.name AS size_name FROM plates p LEFT JOIN plate_sizes s ON s.id = p.size_id WHERE p.product_key = ${prod.key} AND p.status = 'active' ORDER BY p.size_id, p.id`;
     const done = await sql`SELECT e.*, p.color_name, s.name AS size_name FROM plate_events e LEFT JOIN plates p ON p.id = e.plate_id LEFT JOIN plate_sizes s ON s.id = e.size_id WHERE e.job_id = ${id} ORDER BY e.id`;
-    const colors = String((((job.particulars || {}).no_of_colors) || {}).quantity || (pm && pm.colors) || '').trim();
+    // Plates box first (what CTP wrote), else No. of Colors; Inside Leaflet ticked = its plate too (owner, 2026-11-24).
+    const jp = job.particulars || {};
+    const colors = String(((jp.plates || {}).quantity) || ((jp.no_of_colors || {}).quantity) || (pm && pm.colors) || '').trim();
+    const leaflet = String(((jp.inside_leaflet || {}).quantity) || '').trim().toLowerCase() === 'yes';
     const sz = plateSizeForMachine(sizes, job.machine);
-    res.json({ job: { id: job.id, name: job.name, client: job.client, machine: job.machine }, product: prod, colors, sizes, size_id: sz ? sz.id : null, plates, done });
+    res.json({ job: { id: job.id, name: job.name, client: job.client, machine: job.machine }, product: prod, colors, leaflet, sizes, size_id: sz ? sz.id : null, plates, done });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Station - every plate in use, by product (the Damaged Plate screen).
