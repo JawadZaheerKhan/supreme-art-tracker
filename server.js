@@ -732,33 +732,33 @@ const ROLE_PERMISSION_DEFAULTS = {
   // Plate Store buttons, each its own row (owner, 2026-11-24). They start with what each role had on the Plate Store row.
   plate_btn_add:      { label: 'Plate Store — + Add Plate, and Edit on a plate (size, machine, brand, supplier)', levels: { admin: 'yes', store_manager: 'yes' } },
   plate_btn_stock_in: { label: 'Plate Store — + Stock In (Delivery with its challan / Adjustment)', levels: { admin: 'yes', store_manager: 'yes', procurement: 'yes' } },
-  plate_btn_use: { label: "Store — CTCP plates: − Stock opens the plate Use (New job / Old job / Damaged / Adjustment; job, plates, damaged by)", levels: { procurement: 'yes' } },
+  plate_btn_use: { label: "CTCP Plate Use — − Stock on a plate opens the plate Use (New job / Old job / Damaged / Adjustment; job, plates, damaged by)", levels: { procurement: 'yes' } },
   plate_btn_pickup:   { label: 'Plate Store — In Process: Picked up (CTP took the plates back)', levels: { admin: 'yes', store_manager: 'yes' } },
-  plate_btn_delete: { label: "Store — CTCP plates: Reverse a CTP Station Use / Stock In (in the CTP Register; in the Store the Reverse row does it) - the stock comes back", levels: { procurement: 'yes' } },
+  plate_btn_delete: { label: "CTCP Plate Reverse — a CTP Station Use / Stock In in the CTP Register (in the Store the Reverse row does it); the stock comes back", levels: { procurement: 'yes' } },
   products_btn_new:     { label: 'New / edit product — + New Product (a product without a job card), its details on a tile (company, item code, No. of Colors, UPS) and Delete for a product with no jobs', levels: { admin: 'yes', finance: 'yes' } },
 
   // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
   // every role until a Super Admin turns it on, except Procurement, whose tab
   // this is (and who sees nothing else by default).
-  carton_tab_access: { label: "Store — Carton Shippers: their windows (Stock In / Issue / Edit / Delete on a carton in the Store) can open", levels: { procurement: 'view' } },
-  carton_btn_types: { label: "Store — Carton Shippers: add one (+ Add Part with category Carton Shippers), Edit (name, size, reorder level) and Hide", levels: { procurement: 'yes' } },
-  carton_btn_stock_in: { label: "Store — Carton Shippers: + Stock (carton Stock In - supplier, challan)", levels: { procurement: 'yes' } },
-  carton_btn_issue: { label: "Store — Carton Shippers: − Stock (carton Issue - E-Job / Manual Job / Other)", levels: { procurement: 'yes' } },
-  carton_btn_reverse: { label: "Store — Carton Shippers: Reverse a carton entry (the Station's own issues are changed at the Station)", levels: { procurement: '30-day' }, extra: ['30-day'] },
+  carton_tab_access: { label: "Carton Shippers — their windows (Stock In / Issue / Edit / Delete on a carton in the Store) can open", levels: { procurement: 'view' } },
+  carton_btn_types: { label: "Carton Add / Edit — + Add Part with category Carton Shippers, Edit (name, size, reorder level) and Hide", levels: { procurement: 'yes' } },
+  carton_btn_stock_in: { label: "Carton Stock In — + Stock on a carton (supplier, challan)", levels: { procurement: 'yes' } },
+  carton_btn_issue: { label: "Carton Issue — − Stock on a carton (E-Job / Manual Job / Other)", levels: { procurement: 'yes' } },
+  carton_btn_reverse: { label: "Carton Reverse — a carton entry (the Station's own issues are changed at the Station)", levels: { procurement: '30-day' }, extra: ['30-day'] },
 
   // Access Register — Store tab (moved from the ERP, owner 2026-11-24): one row per grant the ERP's store had.
   store_tab_access: { label: "Store tab — the raw material store (moved from the ERP)", levels: { procurement: 'view' } },
-  store_sec_consumables: { label: "Store — Inks & Consumables section (also Carton Shippers and CTCP plates)", levels: { procurement: 'view' } },
-  store_sec_machinery: { label: "Store — Parts Store (Machinery) section", levels: { procurement: 'view' } },
-  store_btn_edit: { label: "Store — Add / Edit an item (Size for Carton Shippers / CTCP plates, photo, sticker P.O. / Invoice No., Issued To names)", levels: { procurement: 'yes' } },
-  store_btn_stock_in: { label: "Store — Stock In (also Receive on an order)", levels: { procurement: 'yes' } },
-  store_btn_stock_out: { label: "Store — Stock Out / Issue", levels: { procurement: 'yes' } },
-  store_btn_reverse: { label: "Store — Reverse an entry (the quantity comes back; also a CTP plate entry, which leaves the CTP Register too)", levels: { procurement: 'yes' } },
-  store_btn_delete_history: { label: "Store — Delete from History (the record only; the quantity stays)", levels: { procurement: 'yes' } },
-  store_btn_part_delete: { label: "Store — Delete an item (to the Trash), Restore, remove from the Trash", levels: { procurement: 'yes' } },
-  store_btn_reconcile: { label: "Store — \"Does not add up\": Reconcile / Ignore", levels: { procurement: 'yes' } },
-  store_btn_settings: { label: "Store — Settings: categories (also the red bin on an empty category in Stock In / Out), machines, suppliers & brands", levels: { procurement: 'yes' } },
-  store_btn_orders: { label: "Store — Orders: book (also from a P.O.), change, cancel, delete", levels: { procurement: 'yes' } },
+  store_sec_consumables: { label: "Inks & Consumables — the section (also Carton Shippers and CTCP plates)", levels: { procurement: 'view' } },
+  store_sec_machinery: { label: "Parts Store — the Machinery section", levels: { procurement: 'view' } },
+  store_btn_edit: { label: "Add / Edit item — Size for Carton Shippers / CTCP plates, photo, sticker P.O. / Invoice No., Issued To names", levels: { procurement: 'yes' } },
+  store_btn_stock_in: { label: "Stock In — also Receive on an order", levels: { procurement: 'yes' } },
+  store_btn_stock_out: { label: "Stock Out — Issue", levels: { procurement: 'yes' } },
+  store_btn_reverse: { label: "Reverse — the quantity comes back; also a CTP plate entry, which leaves the CTP Register too", levels: { procurement: 'yes' } },
+  store_btn_delete_history: { label: "Delete from History — the record only; the quantity stays", levels: { procurement: 'yes' } },
+  store_btn_part_delete: { label: "Delete item — to the Trash, Restore, remove from the Trash", levels: { procurement: 'yes' } },
+  store_btn_reconcile: { label: "Reconcile / Ignore — the \"does not add up\" warning", levels: { procurement: 'yes' } },
+  store_btn_settings: { label: "Settings — categories (also the red bin on an empty category in Stock In / Out), machines, suppliers & brands", levels: { procurement: 'yes' } },
+  store_btn_orders: { label: "Orders — book (also from a P.O.), change, cancel, delete", levels: { procurement: 'yes' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
