@@ -35781,7 +35781,7 @@ async function saveRenameProduct(i) {
 // ── Plate Store + Plate Register (owner, 2026-11-23) ───────────────────
 // Blank plates per size (each for its machines); a plate made at the CTP Station takes one out by itself. The
 // Register lists every plate made, reused or removed, with its job, product, colour, size, reason and who.
-let plateStoreTab = 'store', plateSizesCache = [], plateRegRows = null, plateRegFrom = '', plateRegTo = '', plateRegQ = '';
+let plateStoreTab = 'store', plateSizesCache = [], plateRegRows = null, plateRegFrom = '', plateRegTo = '', plateRegQ = '', plateRegSub = 'in';
 const PLATE_REASON_TXT = { first: 'First set', damaged: 'Damaged', scratched: 'Scratched', worn: 'Worn out', artwork: 'Artwork changed', lost: 'Lost', size: 'New machine size', other: 'Other' };
 const PLATE_TX_TXT = { opening: 'Opening balance', delivery: 'Delivery', 'stock-in': 'Stock In', 'plate-made': 'Plate made (CTP)', 'new-job': 'New job', 'old-job': 'Old job', damaged: 'Damaged', adjustment: 'Adjustment', 'damaged-blank': 'Damaged blank', wasted: 'Wasted at CTP', test: 'Test plate' };
 async function openPlateStore(tab) {
@@ -35792,10 +35792,9 @@ async function openPlateStore(tab) {
   if (!root) return;
   if (typeof mode !== 'undefined' && mode !== 'plates') { setMode('plates'); return; }
   root.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
-      <h2 style="margin:0;">&#129513; Plates</h2>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
       <button class="btn ${plateStoreTab === 'store' ? 'btn-primary' : ''}" onclick="openPlateStore('store')">Plate Store</button>
-      <button class="btn ${plateStoreTab === 'register' ? 'btn-primary' : ''}" onclick="openPlateStore('register')">Plate Register</button>
+      <button class="btn ${plateStoreTab === 'register' ? 'btn-primary' : ''}" onclick="openPlateStore('register')">Register</button>
     </div>
     <div id="plate-store-body" style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:12px;">Loading…</div>`;
   if (plateStoreTab === 'store') await renderPlateStore(); else await loadPlateRegister();
@@ -35973,34 +35972,45 @@ async function plateStockHistory(id) {
         <td style="padding:5px 8px;">${esc(t.actor_name || String(t.user_email || '').split('@')[0] || '')}</td></tr>`).join('') || '<tr><td colspan="8" style="padding:12px;text-align:center;color:var(--text3);">Nothing yet.</td></tr>'}</tbody>
     </table></div>`;
 }
+// Register (owner, 2026-11-24): every plate line's Stock In and Usage in a period, each with the columns it needs.
 async function loadPlateRegister() {
   const el = document.getElementById('plate-store-body'); if (!el) return;
   el.innerHTML = 'Loading…';
-  try { plateRegRows = await api('GET', `/api/plates/register?from=${plateRegFrom}&to=${plateRegTo}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
+  try { plateRegRows = await api('GET', `/api/plates/stock-tx?from=${plateRegFrom}&to=${plateRegTo}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
   renderPlateRegister();
 }
 function renderPlateRegister() {
   const el = document.getElementById('plate-store-body'); if (!el) return;
+  const isIn = plateRegSub !== 'use';
   const q = String(plateRegQ || '').trim().toLowerCase();
-  const rows = (plateRegRows || []).filter(e => !q || [e.product_name, e.color_name, e.size_name, e.job_id ? 'e-' + e.job_id : '', e.by_name].join(' ').toLowerCase().includes(q));
-  const made = rows.filter(e => e.action === 'made').length, reused = rows.filter(e => e.action === 'reused').length, removed = rows.filter(e => e.action === 'scrapped').length;
-  const act = a => a === 'made' ? '<b style="color:#1e3a8a;">Made</b>' : a === 'reused' ? '<span style="color:#166534;font-weight:700;">Reused</span>' : '<b style="color:#b91c1c;">Removed</b>';
+  const plateOf = t => [t.size_name, t.size_brand].filter(Boolean).join(' · ');
+  const jobNo = t => t.job_id ? 'E-' + t.job_id : (t.job_no || '');
+  const all = (plateRegRows || []).filter(t => isIn ? t.change > 0 : t.change < 0);
+  const rows = all.filter(t => !q || [plateOf(t), PLATE_TX_TXT[t.reason] || t.reason, jobNo(t), t.job_name, t.damaged_by, t.challan_no, t.notes, t.actor_name, t.user_email].join(' ').toLowerCase().includes(q));
+  const total = rows.reduce((a, t) => a + Math.abs(t.change), 0);
+  const inCount = (plateRegRows || []).filter(t => t.change > 0).length, useCount = (plateRegRows || []).filter(t => t.change < 0).length;
+  const th = l => `<th style="text-align:left;padding:7px 8px;white-space:nowrap;">${l}</th>`;
+  const td = (v, x) => `<td style="padding:6px 8px;${x || ''}">${v}</td>`;
+  const dash = '<span style="color:var(--text3)">&mdash;</span>';
+  const by = t => esc(t.actor_name || String(t.user_email || '').split('@')[0] || '');
+  const date = t => `<span style="white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}</span>${t.recorded_at ? `<div style="font-size:10px;color:#92400e;font-weight:700;">LATE · entered ${esc(fmtDMY(t.recorded_at))}</div>` : ''}`;
+  const head = isIn
+    ? th('Date') + th('Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + th('Reason') + th('Challan No.') + th('Notes') + th('By')
+    : th('Date') + th('Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + th('Reason') + th('Job No.') + th('Job Name') + th('Damaged by / reason') + th('Notes') + th('By');
+  const body = rows.map(t => '<tr style="border-bottom:1px solid var(--border);">' + (isIn
+    ? td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td('+' + t.change, 'text-align:right;font-weight:800;color:#166534;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(t.challan_no || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t))
+    : td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td(String(Math.abs(t.change)), 'text-align:right;font-weight:800;color:#b91c1c;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(jobNo(t)) || dash, 'font-weight:700;') + td(esc(t.job_name || '') || dash) + td(esc(t.damaged_by || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t))) + '</tr>').join('');
+  const sub = (id, label, n) => `<button class="btn btn-sm" style="${plateRegSub === id ? (id === 'in' ? 'background:#166534;border-color:#166534;color:#fff;' : 'background:#DC2626;border-color:#DC2626;color:#fff;') : ''}font-weight:700;" onclick="plateRegSub = '${id}'; renderPlateRegister()">${label} (${n})</button>`;
   el.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
+      <div style="display:flex;gap:6px;">${sub('in', '+ Stock In', inCount)}${sub('use', 'Usage', useCount)}</div>
       <div><div class="dash-flbl">From</div><input type="date" class="filter" value="${plateRegFrom}" onchange="plateRegFrom = this.value; loadPlateRegister()"></div>
       <div><div class="dash-flbl">To</div><input type="date" class="filter" value="${plateRegTo}" onchange="plateRegTo = this.value; loadPlateRegister()"></div>
-      <div><div class="dash-flbl">Search</div><input type="search" class="filter" value="${esc(plateRegQ)}" placeholder="product, colour, size, E-job" oninput="plateRegQ = this.value; renderPlateRegister()"></div>
-      <div style="margin-left:auto;font-size:13px;"><b style="color:#1e3a8a;">${made}</b> made &middot; <b style="color:#166534;">${reused}</b> reused &middot; <b style="color:#b91c1c;">${removed}</b> removed</div>
+      <div><div class="dash-flbl">Search</div><input type="search" class="filter" value="${esc(plateRegQ)}" placeholder="plate, job, reason, challan" oninput="plateRegQ = this.value; renderPlateRegister()"></div>
+      <div style="margin-left:auto;font-size:13px;">Total <b style="color:${isIn ? '#166534' : '#b91c1c'};">${total.toLocaleString()}</b> plates ${isIn ? 'in' : 'used'}</div>
     </div>
     <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
-      <thead><tr><th style="text-align:left;padding:6px 8px;">When</th><th style="text-align:left;padding:6px 8px;">Job</th><th style="text-align:left;padding:6px 8px;">Product</th><th style="text-align:left;padding:6px 8px;">Plate</th><th style="text-align:left;padding:6px 8px;">Size</th><th style="text-align:left;padding:6px 8px;">What</th><th style="text-align:left;padding:6px 8px;">Reason</th><th style="text-align:left;padding:6px 8px;">By</th></tr></thead>
-      <tbody>${rows.map(e => `<tr><td style="padding:5px 8px;white-space:nowrap;">${esc(fmtDMYT12(e.created_at))}</td>
-        <td style="padding:5px 8px;">${e.job_id ? 'E-' + e.job_id : '&mdash;'}</td>
-        <td style="padding:5px 8px;">${esc(e.product_name || e.job_name || '')}</td>
-        <td style="padding:5px 8px;font-weight:700;">${esc(e.color_name || '')}</td>
-        <td style="padding:5px 8px;">${esc(e.size_name || '')}</td>
-        <td style="padding:5px 8px;">${act(e.action)}</td>
-        <td style="padding:5px 8px;">${esc(PLATE_REASON_TXT[e.reason] || e.reason || '') || '&mdash;'}</td>
-        <td style="padding:5px 8px;">${esc(e.by_name || '')}</td></tr>`).join('') || '<tr><td colspan="8" style="padding:12px;text-align:center;color:var(--text3);">No plates in this period.</td></tr>'}</tbody>
+      <thead><tr style="background:var(--bg2);">${head}</tr></thead>
+      <tbody>${body || `<tr><td colspan="9" style="padding:14px;text-align:center;color:var(--text3);">No ${isIn ? 'stock in' : 'usage'} in this period.</td></tr>`}</tbody>
     </table></div>`;
 }
 // A product's plates (its tile): the plates in use per size, and its register.

@@ -8639,10 +8639,17 @@ app.get('/api/plates/stock-tx', requirePermission('inv_btn_plate_store', 'view')
     await dbReady;
     const sql = getDb();
     const sizeId = parseInt(req.query.size_id, 10);
+    // Register (owner, 2026-11-24): every plate line's Stock In and Usage in a period - from / to optional.
+    const day = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d || '')); return m ? new Date(businessWallClockToMs(+m[1], +m[2], +m[3], 0, 0)).toISOString() : null; };
+    const from = day(req.query.from), toStart = day(req.query.to);
+    const to = toStart ? new Date(new Date(toStart).getTime() + 86400000).toISOString() : null;
     res.json(await sql`
-      SELECT t.*, j.name AS job_name FROM plate_stock_tx t LEFT JOIN jobs j ON j.id = t.job_id
+      SELECT t.*, COALESCE(t.job_name, j.name) AS job_name, s.name AS size_name, s.brand AS size_brand
+        FROM plate_stock_tx t LEFT JOIN jobs j ON j.id = t.job_id LEFT JOIN plate_sizes s ON s.id = t.size_id
        WHERE (${Number.isFinite(sizeId) ? sizeId : null}::int IS NULL OR t.size_id = ${Number.isFinite(sizeId) ? sizeId : null})
-       ORDER BY t.created_at DESC, t.id DESC LIMIT 500`);
+         AND (${from}::timestamptz IS NULL OR t.created_at >= ${from}::timestamptz)
+         AND (${to}::timestamptz IS NULL OR t.created_at < ${to}::timestamptz)
+       ORDER BY t.created_at DESC, t.id DESC LIMIT 3000`);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // The Plate Register: every plate made / reused / scrapped.
