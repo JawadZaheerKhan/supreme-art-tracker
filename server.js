@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-plate-colors';   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-plate-pickups';   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -2079,6 +2079,9 @@ async function initDb() {
     // A product's plate names (owner, 2026-11-24): { "C": "Cyan", "Y": "Pantone 123", "Spot 1": "Gold" } - the colour
     // each plate prints, when it is not the usual one.
     await sql`ALTER TABLE finance.products ADD COLUMN IF NOT EXISTS plate_colors JSONB`;
+    // Plates in process (owner, 2026-11-24): a job's plates out on the floor; once it is Ready, CTP picks them up -
+    // this row says when and who.
+    await sql`CREATE TABLE IF NOT EXISTS plate_pickups (job_id INTEGER PRIMARY KEY, picked_at TIMESTAMPTZ DEFAULT NOW(), by_name TEXT)`;
     await sql`
       CREATE TABLE IF NOT EXISTS plate_events (
         id          SERIAL PRIMARY KEY,
@@ -8743,6 +8746,28 @@ app.post('/api/station/plates/sizes', requireStationUser, stationCtpGate, (req, 
 app.post('/api/station/plates/sizes/:id', requireStationUser, stationCtpGate, (req, res) => plateH.sizeEdit(req, res));
 app.post('/api/station/plates/stock', requireStationUser, stationCtpGate, (req, res) => plateH.stock(req, res));
 app.post('/api/station/plates/stock-tx', requireStationUser, stationCtpGate, (req, res) => plateH.stockTx(req, res));
+// Plates in process (owner, 2026-11-24): the jobs whose plates CTP has picked up again.
+app.get('/api/station/plates/pickups', requireStationUser, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    res.json(await sql`SELECT job_id, picked_at, by_name FROM plate_pickups WHERE picked_at > NOW() - INTERVAL '400 days'`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/station/plates/pickup', requireStationUser, stationCtpGate, async (req, res) => {
+  try {
+    const sql = getDb();
+    const id = parseInt(req.body && req.body.job_id, 10);
+    const [job] = await sql`SELECT id, name FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const by = req.user.station_actor || req.user.email;
+    const [row] = await sql`INSERT INTO plate_pickups (job_id, by_name) VALUES (${id}, ${by}) ON CONFLICT (job_id) DO NOTHING RETURNING *`;
+    if (row) await logAudit(sql, req, { action: 'job.plates_picked', entityType: 'job', entityId: id, summary: `Plates picked up by CTP (job ready) · by ${by}` });
+    res.json({ ok: true, job_id: id });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// The product's plate names from the CTP Station (its Products tab) - the same handler, the CTP's PIN.
+app.post('/api/station/products/:key/plate-colors', requireStationUser, stationCtpGate, (req, res) => productH.plateColors(req, res));
 // Station - every plate in use, by product (the Damaged Plate screen).
 app.get('/api/station/plates/active', requireStationUser, async (req, res) => {
   try {
@@ -11631,7 +11656,8 @@ app.put('/api/products/:key', requirePermission('products_btn_new'), async (req,
 });
 // A product's plate names (owner, 2026-11-24): under each plate (C, M, Y, K, Spot 1 ...) the colour it prints. A
 // product from job cards with no row yet gets one.
-app.put('/api/products/:key/plate-colors', requireAnyBtn(['products_btn_new', 'products_btn_specials']), async (req, res) => {
+const productH = {};
+app.put('/api/products/:key/plate-colors', requireAnyBtn(['products_btn_new', 'products_btn_specials']), productH.plateColors = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();

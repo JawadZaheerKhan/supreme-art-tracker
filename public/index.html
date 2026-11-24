@@ -2360,6 +2360,9 @@
   .station-who-ur { font-size: 28px; font-weight: 700; color: var(--text); }
   /* The operator's name once only (owner, 2026-11-24): no Urdu repeat beside it, on every station. */
   .station-who .station-who-ur, .station-head .station-who-ur { display: none !important; }
+  /* A job ready - its plates to pick up (owner, 2026-11-24): green, blinking until "Picked up". */
+  @keyframes plateReadyBlink { 0%, 100% { background: #dcfce7; } 50% { background: #86efac; } }
+  .plate-ready-blink { animation: plateReadyBlink 1.1s ease-in-out infinite; }
   input.urdu, textarea.urdu { line-height: 2.2; padding-top: 6px; padding-bottom: 6px; }
   /* Machine pill — sits beside the operator name everywhere their name
      appears so the floor immediately sees who's at which machine. */
@@ -35805,6 +35808,101 @@ async function openPlateStore(tab) {
     <div id="plate-store-body" style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:12px;">Loading…</div>`;
   if (plateStoreTab === 'store') await renderPlateStore(); else await loadPlateRegister();
 }
+// ── CTP Station: Plates in process + Products (owner, 2026-11-24) ─────────────
+// In process: the jobs whose plates are out on the floor (Printing .. Pasting). A job that gets Ready turns green and
+// blinks until CTP taps "Picked up" (the plates are back) - then it leaves the list. Only jobs Ready from the day this
+// started blink (the older ones were picked up long ago).
+const PLATE_PICKUP_FROM = Date.parse('2026-11-24T00:00:00+05:00');
+let stationPickups = null, _stationProcessTimer = null, stationProcessQ = '', stationCtpProductsQ = '';
+function plateJobReadyAt(j) {
+  const st = (j && j.stages) || {};
+  if (!((j.stage_index || 0) >= 6 || isDone(j))) return null;
+  const s5 = st['5'] || st[5];
+  const at = s5 && s5.at ? Date.parse(s5.at) : null;
+  return Number.isFinite(at) ? at : null;
+}
+function plateJobSlots(j) {
+  const p = (j && j.particulars) || {};
+  const colors = String(((p.plates || {}).quantity) || ((p.no_of_colors || {}).quantity) || '').trim();
+  const leaflet = String(((p.inside_leaflet || {}).quantity) || '').trim().toLowerCase() === 'yes';
+  const pm = typeof productMasterOf === 'function' ? productMasterOf(productOfName(j.name).key) : null;
+  return plateSlotsOf(colors, leaflet, pm && pm.plate_colors);
+}
+function stationPlatesProcessLists() {
+  const picked = new Set((stationPickups || []).map(x => Number(x.job_id)));
+  const q = String(stationProcessQ || '').trim();
+  const match = j => !q || stationJobMatches(j, q);
+  const ready = (jobs || []).filter(j => j && !j.deleted_at && !picked.has(j.id) && (plateJobReadyAt(j) || 0) >= PLATE_PICKUP_FROM && match(j))
+    .sort((a, b) => (plateJobReadyAt(b) || 0) - (plateJobReadyAt(a) || 0));
+  const inProc = (jobs || []).filter(j => j && !j.deleted_at && !isDone(j) && !isBlocked(j) && (j.stage_index || 0) >= 1 && (j.stage_index || 0) <= 5 && match(j))
+    .sort((a, b) => b.id - a.id);
+  return { ready, inProc };
+}
+async function stationOpenPlatesProcess() {
+  stationView = 'plates-process';
+  stationRender();
+  await stationLoadPickups();
+  if (!_stationProcessTimer) _stationProcessTimer = setInterval(async () => {
+    if (typeof mode === 'undefined' || mode !== 'station' || stationView !== 'plates-process') return;
+    try { await loadJobsForStation(); } catch (e) { /* next time */ }
+    await stationLoadPickups();
+  }, 30000);
+}
+async function stationLoadPickups() {
+  try { stationPickups = await api('GET', '/api/station/plates/pickups'); } catch (e) { stationPickups = stationPickups || []; }
+  if (stationView === 'plates-process') stationRender();
+}
+function stationPlatesProcessHtml() {
+  const { ready, inProc } = stationPlatesProcessLists();
+  const chips = j => plateJobSlots(j).map(x => `<span style="display:inline-block;padding:1px 7px;margin:1px;border-radius:999px;background:#e0e7ff;color:#1e3a8a;font-size:11px;font-weight:800;">${esc(plateSlotText(x))}</span>`).join('');
+  const card = (j, isReady) => `<div class="${isReady ? 'plate-ready-blink' : ''}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin:8px 0;border:1px solid ${isReady ? '#16a34a' : 'var(--border)'};border-left:5px solid ${isReady ? '#16a34a' : '#93c5fd'};border-radius:10px;background:#fff;">
+      <div style="font-weight:900;font-size:17px;color:#1e3a8a;min-width:70px;">#${j.id}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:800;font-size:15px;">${esc(j.name || '')}</div>
+        <div style="font-size:12px;color:var(--text2);">${esc(j.client || '')}${j.machine ? ' · ' + esc(j.machine) : ''} · ${isReady ? '<b style="color:#166534;">READY - pick up the plates</b>' : esc(STAGES[j.stage_index || 0] || '')}</div>
+        <div style="margin-top:3px;">${chips(j)}</div>
+      </div>
+      ${isReady ? `<button class="btn" onclick="stationPlatesPickup(${j.id})" style="padding:10px 14px;font-weight:800;background:#166534;border-color:#166534;color:#fff;white-space:nowrap;">&#10003; Picked up</button>` : ''}
+    </div>`;
+  return stationPlatesHead('', null)
+    + stationSearchBarHtml('station-process-search', stationProcessQ, '\u{1F50D} Job no., name or item code…', "stationProcessQ = this.value; stationRender(); setTimeout(() => { const e = document.getElementById('station-process-search'); if (e) { e.focus(); e.setSelectionRange(e.value.length, e.value.length); } }, 0)", "stationProcessQ = ''; stationRender()")
+    + `<div style="padding:0 16px 24px;">
+      ${stationPickups == null ? '<div class="empty">Loading…</div>' : ''}
+      ${ready.length ? `<div style="font-weight:900;color:#166534;margin-top:8px;">&#10003; Ready - pick up the plates (${ready.length})</div>${ready.map(j => card(j, true)).join('')}` : ''}
+      <div style="font-weight:900;color:#1e3a8a;margin-top:12px;">Plates in process (${inProc.length})</div>
+      ${inProc.map(j => card(j, false)).join('') || '<div class="empty">No job in process right now.</div>'}
+    </div>`;
+}
+async function stationPlatesPickup(id) {
+  const j = (jobs || []).find(x => x && x.id === id);
+  const ok = await confirmDialog({ title: 'Plates picked up?', message: `#${id} ${j ? j.name : ''}\nThe plates of this job are back with CTP.`, confirmText: 'Picked up' });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('POST', '/api/station/plates/pickup', { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '', job_id: id });
+    stationPickups = (stationPickups || []).concat([{ job_id: id }]);
+    notify(`#${id} plates picked up`);
+    stationRender();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// Products at the CTP Station: find a product, open its plates and set the colour under each plate.
+function stationOpenCtpProducts() { stationView = 'ctp-products'; stationRender(); }
+function stationCtpProductsHtml() {
+  const q = String(stationCtpProductsQ || '').trim().toLowerCase();
+  let groups = buildProductGroups();
+  if (q) groups = groups.filter(g => searchMatch([g.name, ...g.companies, ...(g.jobs || []).map(j => j.jobcode || '')].join(' '), q));
+  groups.sort((a, b) => a.name.localeCompare(b.name));
+  const shown = groups.slice(0, 150);
+  __productGroupsCache = shown;
+  const chips = g => productPlateSlots(g.key, g.jobs).map(x => `<span style="display:inline-block;padding:1px 7px;margin:1px;border-radius:999px;background:#e0e7ff;color:#1e3a8a;font-size:11px;font-weight:800;">${esc(plateSlotText(x))}</span>`).join('');
+  return stationPlatesHead('', null)
+    + stationSearchBarHtml('station-ctpprod-search', stationCtpProductsQ, '\u{1F50D} Product name, company or item code…', "stationCtpProductsQ = this.value; stationRender(); setTimeout(() => { const e = document.getElementById('station-ctpprod-search'); if (e) { e.focus(); e.setSelectionRange(e.value.length, e.value.length); } }, 0)", "stationCtpProductsQ = ''; stationRender()")
+    + `<div style="padding:0 16px 24px;">${shown.map((g, i) => `<button class="station-job" onclick="openProductPlates(${i})" style="text-align:left;">
+        <div class="sj-main"><div class="sj-name">${esc(g.name)}</div><div class="sj-sub">${esc([...g.companies].join(', '))} · ${g.jobs.length} job${g.jobs.length === 1 ? '' : 's'}</div><div style="margin-top:3px;">${chips(g)}</div></div>
+        <div class="sj-go">›</div></button>`).join('') || '<div class="empty">No product matches.</div>'}
+      ${groups.length > shown.length ? `<div style="font-size:12px;color:var(--text2);text-align:center;">${groups.length - shown.length} more - type to narrow</div>` : ''}</div>`;
+}
 // At the CTP Station the Plate Store's calls go through the PIN-checked station routes (owner, 2026-11-24).
 function plateAtStation() { return typeof mode !== 'undefined' && mode === 'station' && stationView === 'plate-store' && !!stationOperator; }
 function plateCanEdit() { return plateAtStation() || isSuperAdmin() || hasPerm('inv_btn_plate_store', 'yes'); }
@@ -36164,7 +36262,7 @@ async function openProductPlates(i) {
   // Each plate: its slot (C, M, Y, K, Spot 1, Leaflet) and under it the colour it prints - change it when a plate
   // prints another colour (owner, 2026-11-24).
   const slots = productPlateSlots(g.key, g.jobs);
-  const canName = isSuperAdmin() || hasPerm('products_btn_new', 'yes') || hasPerm('products_btn_specials', 'yes');
+  const canName = (typeof mode !== 'undefined' && mode === 'station' && !!stationOperator) || isSuperAdmin() || hasPerm('products_btn_new', 'yes') || hasPerm('products_btn_specials', 'yes');
   const slotBg = { C: '#00aeef', M: '#ec008c', Y: '#ffe600', K: '#231f20' };
   const slotHtml = slots.length ? `<div style="display:flex;flex-wrap:wrap;gap:10px;">${slots.map((x, k) => `
       <div style="width:120px;border:1px solid var(--border);border-radius:10px;padding:8px;background:#fff;text-align:center;">
@@ -36201,7 +36299,8 @@ async function saveProductPlateNames(i) {
   document.querySelectorAll('.pp-name').forEach(el => { colors[el.dataset.slot] = String(el.value || '').trim(); });
   showSaving(true);
   try {
-    await api('PUT', `/api/products/${encodeURIComponent(g.key)}/plate-colors`, { name: g.name, colors });
+    if (typeof mode !== 'undefined' && mode === 'station' && stationOperator) await api('POST', `/api/station/products/${encodeURIComponent(g.key)}/plate-colors`, { name: g.name, colors, pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '' });
+    else await api('PUT', `/api/products/${encodeURIComponent(g.key)}/plate-colors`, { name: g.name, colors });
     await loadProductsMaster();
     _productPlatesCache.delete(g.key);
     notify('Plate names saved');
@@ -42864,6 +42963,8 @@ function stationRender() {
   else if (stationView === 'plates') root.innerHTML = stationPlatesHtml();
   else if (stationView === 'plates-damaged') root.innerHTML = stationDamagedPlatesHtml();
   else if (stationView === 'plate-store') { root.innerHTML = stationPlateStoreHtml(); setTimeout(stationPlateStoreFill, 0); }
+  else if (stationView === 'plates-process') root.innerHTML = stationPlatesProcessHtml();
+  else if (stationView === 'ctp-products') root.innerHTML = stationCtpProductsHtml();
   else root.innerHTML = stationQueueHtml();
 }
 
@@ -44120,8 +44221,10 @@ function stationCtpTabsHtml(active) {
   return `<div style="display:inline-flex;flex-wrap:wrap;margin:8px 16px 0;border:1.5px solid #1e3a8a;border-radius:9px;overflow:hidden;">
       ${tab('jobs', '&#128203; Jobs', 'stationPlatesBackToQueue()', '#7a1f1f')}
       ${tab('plates', '&#129513; Plates', 'stationOpenPlates()', '#1e3a8a')}
-      ${tab('damaged', '&#9888; Damaged Plate', 'stationOpenDamagedPlates()', '#b91c1c')}
-      ${tab('store', '&#128451; Plate Store', 'stationOpenPlateStore()', '#166534')}
+      ${tab('process', '&#9203; In Process', 'stationOpenPlatesProcess()', '#0e7490')}
+      ${tab('store', '&#128451; Plate Store', "stationOpenPlateStore('store')", '#166534')}
+      ${tab('register', '&#128209; Register', "stationOpenPlateStore('register')", '#166534')}
+      ${tab('products', '&#128230; Products', 'stationOpenCtpProducts()', '#7c3aed')}
     </div>`;
 }
 // Plate Store tab at the CTP Station: the app's Plate Store and Register - Add Plate, Edit, Stock In, Use, History,
@@ -44139,9 +44242,8 @@ function stationPlateStoreHtml() {
       <div><div class="station-who">${who}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(STAGES[0] || 'CTP')}</div></div>
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
-    ${stationCtpTabsHtml('store')}
+    ${stationCtpTabsHtml(plateStoreTab === 'register' ? 'register' : 'store')}
     <div style="padding:10px 16px 30px;">
-      <div style="display:flex;gap:8px;margin-bottom:8px;">${sub('store', 'Plate Store')}${sub('register', 'Register')}</div>
       <div id="plate-store-body" style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:12px;">Loading…</div>
     </div>`;
 }
@@ -44152,7 +44254,7 @@ function stationPlateStoreFill() {
 }
 function stationPlatesHead(title, back) {
   const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
-  const active = stationView === 'plates-damaged' ? 'damaged' : stationView === 'plate-store' ? 'store' : 'plates';
+  const active = stationView === 'plates-process' ? 'process' : stationView === 'ctp-products' ? 'products' : stationView === 'plate-store' ? (plateStoreTab === 'register' ? 'register' : 'store') : 'plates';
   return `<div class="station-head">
       <div><div class="station-who">${who}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(STAGES[0] || 'CTP')}</div></div>
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
