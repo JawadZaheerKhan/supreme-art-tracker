@@ -113,7 +113,7 @@ input:focus,select:focus{outline:none;border-color:#8C2326;box-shadow:0 0 0 3px 
 .cat-pick-btn{width:150px;padding:9px 30px 9px 12px;border-radius:8px;border:1px solid #d8d8d4;background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%23333' stroke-width='1.6'/%3E%3C/svg%3E") no-repeat right 10px center;color:#1a1a1a;font-size:13px;font-family:inherit;text-align:left;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cat-pick-btn:focus{outline:none;border-color:#8C2326;box-shadow:0 0 0 3px rgba(140,35,38,0.12)}
 .cat-pick-list{position:absolute;top:calc(100% + 1px);left:0;z-index:50;min-width:260px;max-height:420px;overflow:auto;background:#fff;border:1px solid #767676;box-shadow:0 2px 8px rgba(0,0,0,.18);padding:0}
-.cat-pick-row{display:flex;align-items:center;gap:6px;padding:5px 20px;cursor:default;font-size:15px;color:#1a1a1a;line-height:21px}
+.cat-pick-row{display:flex;align-items:center;gap:6px;padding:4px 18px;cursor:default;font-size:14px;color:#1a1a1a;line-height:22px}
 .cat-pick-row:hover,.cat-pick-row.on{background:#2f6fde;color:#fff}
 .cat-pick-del{margin-left:auto;border:none;background:none;color:#dc2626;cursor:pointer;font-size:14px;padding:0 0 0 8px;line-height:1}
 .cat-pick-row:hover .cat-pick-del,.cat-pick-row.on .cat-pick-del{color:#fff}
@@ -635,7 +635,8 @@ td>.reorder-flag{margin-left:0;flex-direction:column;align-items:flex-start;gap:
             <option value="cat">Sort: Category</option>
           </select>
         </div>
-        <select id="inv-cat-filter" onchange="renderInventory()" style="width:150px"></select>
+        <select id="inv-cat-filter" onchange="renderInventory()" style="display:none"></select>
+        <div class="cat-pick" id="inv-cat-pick"></div>
         <select id="inv-machine-filter" onchange="renderInventory()" style="width:150px"></select>
         <select id="inv-rack-filter" class="consumables-only" onchange="renderInventory()" style="width:150px"></select>
         <div class="st-actions">
@@ -4628,6 +4629,7 @@ function renderInventory(){
   const rackF=inks?(document.getElementById('inv-rack-filter')||{value:''}).value:'';
   const catSel=document.getElementById('inv-cat-filter');
   if(catSel){catSel.innerHTML='<option value="">All Categories</option>'+state.categories.map(c=>`<option value="${c}">${c}</option>`).join('');catSel.value=catF;}
+  renderCatPick('inv');
   const machSel=document.getElementById('inv-machine-filter');
   if(machSel){
     machSel.style.display=inks?'none':'';
@@ -4779,11 +4781,12 @@ function inDateRange(date,from,to){
 // Category list of Stock In / Stock Out (Job Tracker, 2026-11-24): pick one to see only its entries; a category with no
 // items gets a red bin to remove it (Settings row).
 const _catF={in:'',out:''};
+function catPicked(k){if(k==='inv'){const sel=document.getElementById('inv-cat-filter');return sel?sel.value:'';}return _catF[k]||'';}
 function catItemCount(name){return (state.parts||[]).filter(p=>p.category===name).length;}
 function renderCatPick(k){
   const box=document.getElementById(k+'-cat-pick');if(!box)return;
   const open=!!box.querySelector('.cat-pick-list');
-  box.innerHTML='<button type="button" class="cat-pick-btn" title="Show one category" onclick="toggleCatPick(\''+k+'\',event)">'+_escHtml(_catF[k]||'All Categories')+'</button>';
+  box.innerHTML='<button type="button" class="cat-pick-btn" title="Show one category" onclick="toggleCatPick(\''+k+'\',event)">'+_escHtml(catPicked(k)||'All Categories')+'</button>';
   if(open)toggleCatPick(k);
 }
 function toggleCatPick(k,ev){
@@ -4794,7 +4797,7 @@ function toggleCatPick(k,ev){
   if(had)had.remove();
   const cats=[...(state.categories||[])];
   const canDel=canStoreSettings();
-  const row=(name,label,n)=>'<div class="cat-pick-row'+((_catF[k]||'')===name?' on':'')+'" onclick="pickCat(\''+k+'\',this.dataset.c)" data-c="'+_escHtml(name)+'"'+(n==null?'':' title="'+n+' item'+(n===1?'':'s')+'"')+'><span>'+_escHtml(label)+'</span>'
+  const row=(name,label,n)=>'<div class="cat-pick-row'+(catPicked(k)===name?' on':'')+'" onclick="pickCat(\''+k+'\',this.dataset.c)" data-c="'+_escHtml(name)+'"'+(n==null?'':' title="'+n+' item'+(n===1?'':'s')+'"')+'><span>'+_escHtml(label)+'</span>'
     +(n===0&&canDel?'<button type="button" class="cat-pick-del" title="Remove this category (it has no items)" onclick="event.stopPropagation();delCatPick(\''+k+'\',this.parentNode.dataset.c)">🗑</button>':'')+'</div>';
   const list=document.createElement('div');
   list.className='cat-pick-list';
@@ -4802,13 +4805,15 @@ function toggleCatPick(k,ev){
   box.appendChild(list);
 }
 function pickCat(k,name){
-  _catF[k]=name||'';
   const box=document.getElementById(k+'-cat-pick');const l=box&&box.querySelector('.cat-pick-list');if(l)l.remove();
+  if(k==='inv'){const sel=document.getElementById('inv-cat-filter');if(sel)sel.value=name||'';renderInventory();return;}
+  _catF[k]=name||'';
   if(k==='in')renderStockIn();else renderStockOut();
 }
 async function delCatPick(k,name){
   await deleteCat(name);
-  if(_catF[k]===name)_catF[k]='';
+  if(k==='inv'){const sel=document.getElementById('inv-cat-filter');if(sel&&sel.value===name)sel.value='';}
+  else if(_catF[k]===name)_catF[k]='';
   renderCatPick(k);toggleCatPick(k);
 }
 document.addEventListener('click',e=>{if(!e.target.closest||!e.target.closest('.cat-pick'))document.querySelectorAll('.cat-pick-list').forEach(l=>l.remove());});
