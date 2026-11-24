@@ -2361,6 +2361,13 @@
   /* The operator's name once only (owner, 2026-11-24): no Urdu repeat beside it, on every station. */
   .station-who .station-who-ur, .station-head .station-who-ur { display: none !important; }
   /* A job ready - its plates to pick up (owner, 2026-11-24): green, blinking until "Picked up". */
+  /* CTP station tabs (owner, 2026-11-24): each in its own colour; the highlight slides between them. */
+  .ctp-tabs { position: relative; display: inline-flex; flex-wrap: wrap; margin: 8px 16px 0; padding: 3px; gap: 2px; background: #fff; border: 1.5px solid var(--border); border-radius: 10px; }
+  .ctp-tab { position: relative; z-index: 1; flex: 0 0 auto; padding: 6px 13px; font-size: 13px; font-weight: 800; border: none; border-radius: 7px; cursor: pointer; font-family: inherit; white-space: nowrap; background: transparent; color: var(--tab-c); transition: color .25s ease; }
+  .ctp-tab:hover:not(.is-on) { background: color-mix(in srgb, var(--tab-c) 10%, transparent); }
+  .ctp-tab.is-on { color: #fff; }
+  .ctp-tabs:not(.synced) .ctp-tab.is-on { background: var(--tab-c); }   /* until the highlight has slid in */
+  .ctp-tab-ind { position: absolute; z-index: 0; top: 3px; height: 0; left: 3px; width: 0; border-radius: 7px; box-shadow: 0 2px 8px rgba(0,0,0,.18); transition: left .32s cubic-bezier(.4,1.3,.5,1), width .32s cubic-bezier(.4,1.3,.5,1), top .32s ease, height .32s ease, background-color .32s ease; }
   @keyframes plateReadyBlink { 0%, 100% { background: #dcfce7; } 50% { background: #86efac; } }
   .plate-ready-blink { animation: plateReadyBlink 1.1s ease-in-out infinite; }
   input.urdu, textarea.urdu { line-height: 2.2; padding-top: 6px; padding-bottom: 6px; }
@@ -42966,6 +42973,7 @@ function stationRender() {
   else if (stationView === 'plates-process') root.innerHTML = stationPlatesProcessHtml();
   else if (stationView === 'ctp-products') root.innerHTML = stationCtpProductsHtml();
   else root.innerHTML = stationQueueHtml();
+  if (document.getElementById('ctp-tab-ind')) setTimeout(stationCtpTabsSync, 0);   // slide the CTP tab highlight
 }
 
 // Once-on-load keydown listener so a laptop user can type the PIN on
@@ -44216,16 +44224,41 @@ let stationPlatesActive = null, stationDamagedPick = null, stationDamagedQ = '';
 const PLATE_CMYK = ['Cyan', 'Magenta', 'Yellow', 'Black'];
 const PLATE_REASON_LABELS = { first: 'First set', damaged: 'Damaged', scratched: 'Scratched', worn: 'Worn out', artwork: 'Artwork changed', lost: 'Lost', size: 'New machine size', other: 'Other' };
 // The CTP station's sub-tabs at the top (owner, 2026-11-24): Jobs (the queue) · Plates · Damaged Plate.
+// Each tab in its own colour, and a highlight that slides from the last tab to the new one - like the top bar
+// (owner, 2026-11-24). Jobs · In Process · Use (the Plate Store) · Register · Inventory (the products).
+const CTP_TABS = [
+  ['jobs', '&#128203; Jobs', 'stationPlatesBackToQueue()', '#7a1f1f'],
+  ['process', '&#9203; In Process', 'stationOpenPlatesProcess()', '#0e7490'],
+  ['store', '&#128451; Use', "stationOpenPlateStore('store')", '#166534'],
+  ['register', '&#128209; Register', "stationOpenPlateStore('register')", '#b45309'],
+  ['products', '&#128230; Inventory', 'stationOpenCtpProducts()', '#7c3aed'],
+];
+let _ctpTabInd = null;   // where the highlight was, so it slides from there
 function stationCtpTabsHtml(active) {
-  const tab = (id, label, on, color) => `<button type="button" onclick="${on}" style="flex:0 0 auto;padding:6px 14px;font-size:13px;font-weight:800;border:none;cursor:pointer;font-family:inherit;white-space:nowrap;${active === id ? `background:${color};color:#fff;` : 'background:#fff;color:var(--text2);'}">${label}</button>`;
-  return `<div style="display:inline-flex;flex-wrap:wrap;margin:8px 16px 0;border:1.5px solid #1e3a8a;border-radius:9px;overflow:hidden;">
-      ${tab('jobs', '&#128203; Jobs', 'stationPlatesBackToQueue()', '#7a1f1f')}
-      ${tab('plates', '&#129513; Plates', 'stationOpenPlates()', '#1e3a8a')}
-      ${tab('process', '&#9203; In Process', 'stationOpenPlatesProcess()', '#0e7490')}
-      ${tab('store', '&#128451; Plate Store', "stationOpenPlateStore('store')", '#166534')}
-      ${tab('register', '&#128209; Register', "stationOpenPlateStore('register')", '#166534')}
-      ${tab('products', '&#128230; Products', 'stationOpenCtpProducts()', '#7c3aed')}
+  const on = CTP_TABS.find(t => t[0] === active) || CTP_TABS[0];
+  return `<div class="ctp-tabs" data-active="${on[0]}">
+      <span class="ctp-tab-ind" id="ctp-tab-ind" style="background:${on[3]};"></span>
+      ${CTP_TABS.map(([id, label, click, color]) => `<button type="button" class="ctp-tab${id === on[0] ? ' is-on' : ''}" data-tab="${id}" onclick="${click}" style="--tab-c:${color};">${label}</button>`).join('')}
     </div>`;
+}
+// After a render: put the highlight where it was, then slide it to the open tab.
+function stationCtpTabsSync() {
+  const ind = document.getElementById('ctp-tab-ind');
+  const box = ind && ind.parentElement;
+  const btn = box && box.querySelector('.ctp-tab.is-on');
+  if (!btn) return;
+  const to = { left: btn.offsetLeft, width: btn.offsetWidth, top: btn.offsetTop, height: btn.offsetHeight };
+  const put = r => { ind.style.left = r.left + 'px'; ind.style.width = r.width + 'px'; ind.style.top = r.top + 'px'; ind.style.height = r.height + 'px'; };
+  // Start where the highlight was (a new render draws it fresh) - the first time, just put it on the open tab.
+  ind.style.transition = 'none';
+  put(_ctpTabInd || to);
+  if (_ctpTabInd && _ctpTabInd.color) ind.style.background = _ctpTabInd.color;
+  void ind.offsetWidth;
+  ind.style.transition = '';
+  put(to);
+  box.classList.add('synced');
+  ind.style.background = getComputedStyle(btn).getPropertyValue('--tab-c').trim() || ind.style.background;
+  _ctpTabInd = { ...to, color: ind.style.background };
 }
 // Plate Store tab at the CTP Station: the app's Plate Store and Register - Add Plate, Edit, Stock In, Use, History,
 // the Register with its filters - saved with the CTP's PIN.
