@@ -105,6 +105,9 @@ module.exports = function registerStoreRoutes(app, deps) {
       await sql`
         CREATE TABLE IF NOT EXISTS store_images (
           id SERIAL PRIMARY KEY, data BYTEA NOT NULL, content_type TEXT NOT NULL, created_by TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`;
+      // A photo brought from the ERP keeps the link it came from (a later copy reuses it instead of fetching again).
+      await sql`ALTER TABLE store_images ADD COLUMN IF NOT EXISTS source_url TEXT`;
+      await sql`CREATE INDEX IF NOT EXISTS store_images_source_idx ON store_images (source_url)`;
     })().catch(e => { _ready = null; throw e; });
     return _ready;
   }
@@ -305,10 +308,8 @@ module.exports = function registerStoreRoutes(app, deps) {
       const id = parseInt(req.query.id, 10);
       if (!id) return res.status(400).json({ error: 'ID required' });
       if (await partsDenied(sql, req, res, [id])) return;
-      // The CTCP plate of a CTP Station plate size: unlink it there first, or the station would lose its stock.
-      const [lk] = await sql`SELECT name FROM plate_sizes WHERE store_part_id = ${id} AND deleted_at IS NULL LIMIT 1`;
-      if (lk) return res.status(409).json({ error: `This item is the plate of the CTP Station's "${lk.name}". Unlink it there first (CTP Station → Use → Edit → Store item), then delete it.` });
-      const [p] = await sql`UPDATE store_parts SET deleted_at = now() WHERE id = ${id} RETURNING name, sku, module`;
+      // (A CTCP plate deleted here leaves the CTP Station's list too - its plate sizes come from the Store.)
+      const [p] =await sql`UPDATE store_parts SET deleted_at = now() WHERE id = ${id} RETURNING name, sku, module`;
       await log(sql, req, `store.${(p && p.module) || 'unknown'}.part.trash`, `moved store part "${p ? labelOf(p) : '#' + id}" to trash`, id);
       res.json({ ok: true });
     } catch (e) { fail(res, e); }
@@ -962,14 +963,21 @@ module.exports = function registerStoreRoutes(app, deps) {
     { erp: 'categories', here: 'store_categories', key: 'id', cols: ['id', 'name', 'module'] },
     { erp: 'machines', here: 'store_machines', key: 'id', cols: ['id', 'name', 'module'] },
     { erp: 'store_recipients', here: 'store_recipients', key: 'id', cols: ['id', 'name', 'created_at:t'] },
-    { erp: 'parts', here: 'store_parts', key: 'id', cols: ['id', 'sku', 'name', 'category', 'module', 'machine', 'brand', 'supplier', 'rack_no', 'unit', 'qty', 'min_qty', 'description', 'image_url', 'deleted_at:t', 'archived_at:t'] },
+    { erp: 'parts', here: 'store_parts', key: 'id', cols: ['id', 'sku', 'name', 'category', 'module', 'machine', 'brand', 'supplier', 'rack_no', 'unit', 'qty', 'min_qty', 'description', 'image_url:img', 'deleted_at:t', 'archived_at:t'] },
     { erp: 'store_orders', here: 'store_orders', key: 'id', cols: ['id', 'part_id', 'qty', 'supplier', 'po_no', 'order_date', 'expected_date', 'notes', 'cancelled_at:t', 'created_by', 'created_at:t', 'item_name', 'unit', 'module', 'po_id', 'po_sr'] },
     { erp: 'transactions', here: 'store_tx', key: 'id', cols: ['id', 'type', 'part_id', 'qty', 'date', 'ref', 'notes', 'issued_to', 'purpose', 'challan_no', 'created_by', 'batch', 'po_no', 'invoice_no', 'batch_label', 'created_at:t', 'order_id'] },
     { erp: 'store_ledger_ignores', here: 'store_ledger_ignores', key: 'part_id', cols: ['part_id', 'diff', 'ignored_by', 'ignored_at:t'] },
     { erp: 'store_dropdown_hidden', here: 'store_dropdown_hidden', key: "field || '|' || value", cols: ['field', 'value', 'hidden_by', 'hidden_at:t'] },
   ];
   const fpSql = (t, table) => {
-    const parts = t.cols.map(c => { const [n, k] = c.split(':'); return k === 't' ? `COALESCE(EXTRACT(EPOCH FROM ${n})::text, '~')` : `COALESCE(${n}::text, '~')`; });
+    const here = table === t.here;
+    const parts = t.cols.map(c => {
+      const [n, k] = c.split(':');
+      if (k === 't') return `COALESCE(EXTRACT(EPOCH FROM ${n})::text, '~')`;
+      // A photo brought here is compared by the ERP link it came from.
+      if (k === 'img' && here) return `COALESCE((SELECT i.source_url FROM store_images i WHERE '/api/store/image/' || i.id = ${table}.image_url), image_url, '~')`;
+      return `COALESCE(${n}::text, '~')`;
+    });
     return `SELECT COUNT(*)::int AS n, md5(COALESCE(string_agg(x, E'\\n' ORDER BY k), '')) AS h
               FROM (SELECT (${t.key})::text AS k, ${parts.join(` || '|' || `)} AS x FROM ${table}) s`;
   };
@@ -1050,6 +1058,45 @@ module.exports = function registerStoreRoutes(app, deps) {
         `${checkOnly ? 'Checked the Store against the ERP' : 'Copied the whole Store from the ERP (' + Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ') + ')'}: ${check.items} items, ${check.diffs.length ? check.diffs.length + ' do not match' : 'all match'}; every row and column of ${tables.length - tablesOff.length} of ${tables.length} tables identical${tablesOff.length ? ' (not: ' + tablesOff.map(t => t.table).join(', ') + ')' : ''}`);
       res.json({ ok: true, copied: checkOnly ? null : counts, items: check.items, diffs: check.diffs.slice(0, 200), diffCount: check.diffs.length, tables });
     } catch (e) { fail(res, e); } finally { _copying = false; }
+  });
+
+  // ── Photos from the ERP (owner, 2026-11-24: "obv photos should shift here") ──
+  // Each item whose photo is still the ERP's link: the photo is fetched and kept in this database, and the item points
+  // to it. Only the ERP's photo storage (Vercel Blob) is fetched. A part at a time, so the page can call it again until
+  // nothing is left (each call stops before the server's time limit).
+  const ERP_PHOTO_HOST = /^https:\/\/[a-z0-9-]+\.public\.blob\.vercel-storage\.com\//i;
+  app.post('/api/store/erp-photos', requireAuth, async (req, res) => {
+    if (!isSA(req.user)) return res.status(403).json({ error: 'Super Admin only' });
+    try {
+      const sql = await db();
+      const started = Date.now();
+      const todo = await sql`SELECT id, image_url FROM store_parts WHERE image_url LIKE 'https://%' ORDER BY id`;
+      let copied = 0, reused = 0;
+      const failed = [];
+      for (const p of todo) {
+        if (Date.now() - started > 40000) break;
+        const url = String(p.image_url);
+        const [had] = await sql`SELECT id FROM store_images WHERE source_url = ${url} LIMIT 1`;
+        if (had) { await sql`UPDATE store_parts SET image_url = ${'/api/store/image/' + had.id} WHERE id = ${p.id}`; reused++; continue; }
+        if (!ERP_PHOTO_HOST.test(url)) { failed.push({ id: p.id, why: 'not an ERP photo link' }); continue; }
+        try {
+          const r = await fetch(url);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const type = String(r.headers.get('content-type') || 'image/jpeg');
+          if (!/^image\//i.test(type)) throw new Error('not an image');
+          const buf = Buffer.from(await r.arrayBuffer());
+          if (!buf.length || buf.length > 5 * 1024 * 1024) throw new Error('empty or over 5 MB');
+          const [img] = await sql`INSERT INTO store_images (data, content_type, created_by, source_url) VALUES (${'\\x' + buf.toString('hex')}::bytea, ${type}, 'Copy from ERP', ${url}) RETURNING id`;
+          await sql`UPDATE store_parts SET image_url = ${'/api/store/image/' + img.id} WHERE id = ${p.id}`;
+          copied++;
+        } catch (e) { failed.push({ id: p.id, why: e.message }); }
+      }
+      // Still left: not yet done this call (the failed ones stay on the ERP link - they still show from there).
+      const failedIds = failed.map(f => Number(f.id));
+      const [{ n }] = await sql`SELECT COUNT(*)::int AS n FROM store_parts WHERE image_url LIKE 'https://%' AND NOT (id = ANY(${failedIds.length ? failedIds : [0]}))`;
+      if (copied || reused) await log(sql, req, 'store.erp_photos', `Brought ${copied} item photo${copied === 1 ? '' : 's'} from the ERP into the Store${reused ? ` (${reused} already here)` : ''}${failed.length ? ` · ${failed.length} could not be fetched` : ''}`);
+      res.json({ ok: true, copied, reused, failed, left: n });
+    } catch (e) { fail(res, e); }
   });
 
   // ── Plates from the CTP Station (owner, 2026-11-24): plates are Store items (CTCP Plates); the station's Use / Stock

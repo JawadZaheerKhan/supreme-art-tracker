@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-store-procurement';   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-plates-from-store';   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -2104,6 +2104,9 @@ async function initDb() {
     // from there; each station entry keeps the Store entries it made.
     await sql`ALTER TABLE plate_sizes ADD COLUMN IF NOT EXISTS store_part_id INTEGER`;
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS store_tx_ids INTEGER[]`;
+    // One plate size per Store item (the CTP Station's sizes are made from the Store's plates, owner 2026-11-24).
+    try { await sql`CREATE UNIQUE INDEX IF NOT EXISTS plate_sizes_store_part_uq ON plate_sizes (store_part_id) WHERE deleted_at IS NULL AND store_part_id IS NOT NULL`; }
+    catch (e) { console.error('plate_sizes_store_part_uq not created:', e.message); }
     // A product's plate names (owner, 2026-11-24): { "C": "Cyan", "Y": "Pantone 123", "Spot 1": "Gold" } - the colour
     // each plate prints, when it is not the usual one.
     await sql`ALTER TABLE finance.products ADD COLUMN IF NOT EXISTS plate_colors JSONB`;
@@ -8591,19 +8594,40 @@ const plateWho = req => (req.user && req.user.station_actor) || (req.user && req
 
 // Sizes (the Plate Store) - read by everyone signed in (the Station needs them).
 // A plate size linked to its Store item shows the Store's quantity (owner, 2026-11-24: plates live in the Store).
+// The Store's CTCP plate items (owner, 2026-11-24: the CTP Station takes its plate sizes and everything from the Store;
+// the CTP operator only adds the job, plates and who damaged it).
+const STORE_PLATE_CATS = `(category ILIKE '%ctcp%' OR category ILIKE '%plates%')`;
 async function plateSizesList(sql) {
   await storeApi.ensureStore();
+  // Every Store plate item has its plate size here (made the first time it is seen; its name, brand and supplier
+  // follow the Store's). Only the machines it prints on are set at the station.
+  await sql(`
+    INSERT INTO plate_sizes (name, brand, supplier, store_part_id, machines, low_at)
+    SELECT p.name, NULLIF(p.brand, ''), NULLIF(p.supplier, ''), p.id, '{}'::text[], COALESCE(p.min_qty, 0)
+      FROM store_parts p
+     WHERE p.deleted_at IS NULL AND p.module = 'consumables' AND ${STORE_PLATE_CATS.replace(/category/g, 'p.category')}
+       AND NOT EXISTS (SELECT 1 FROM plate_sizes s WHERE s.store_part_id = p.id AND s.deleted_at IS NULL)
+    ON CONFLICT DO NOTHING`, []);
+  await sql`
+    UPDATE plate_sizes s SET name = p.name, brand = NULLIF(p.brand, ''), supplier = NULLIF(p.supplier, '')
+      FROM store_parts p
+     WHERE s.store_part_id = p.id AND s.deleted_at IS NULL
+       AND (s.name IS DISTINCT FROM p.name OR s.brand IS DISTINCT FROM NULLIF(p.brand, '') OR s.supplier IS DISTINCT FROM NULLIF(p.supplier, ''))`;
   const rows = await sql`
     SELECT s.*, p.qty AS store_qty, p.sku AS store_sku, p.name AS store_name, p.brand AS store_brand
       FROM plate_sizes s LEFT JOIN store_parts p ON p.id = s.store_part_id AND p.deleted_at IS NULL
      WHERE s.deleted_at IS NULL ORDER BY s.name`;
-  return rows.map(r => r.store_part_id && r.store_name != null ? { ...r, balance: Math.round(Number(r.store_qty) * 1000) / 1000, linked: true } : { ...r, linked: false });
+  const all = rows.map(r => r.store_part_id && r.store_name != null ? { ...r, balance: Math.round(Number(r.store_qty) * 1000) / 1000, linked: true } : { ...r, linked: false });
+  // Once the Store has its plates, the station shows only those (a size of its own, or an item in the Store's
+  // Trash, is not offered; their history stays in the Register).
+  return all.some(z => z.linked) ? all.filter(z => z.linked) : all;
 }
 // One plate size's stock: the Store's quantity when linked, else its own.
 async function plateBalanceOf(sql, sizeId) {
-  const list = await plateSizesList(sql);
-  const z = list.find(x => Number(x.id) === Number(sizeId));
-  return z ? z.balance : null;
+  await storeApi.ensureStore();
+  const [z] = await sql`SELECT s.balance, s.store_part_id, p.qty FROM plate_sizes s LEFT JOIN store_parts p ON p.id = s.store_part_id AND p.deleted_at IS NULL WHERE s.id = ${sizeId}`;
+  if (!z) return null;
+  return z.store_part_id && z.qty != null ? Math.round(Number(z.qty) * 1000) / 1000 : z.balance;
 }
 app.get('/api/plates/sizes', requireAuth, async (req, res) => {
   try {
@@ -8631,8 +8655,8 @@ plateH.storeParts = async (req, res) => {
     await dbReady;
     await storeApi.ensureStore();
     const sql = getDb();
-    res.json(await sql`SELECT id, sku, name, brand, supplier, category, qty, unit FROM store_parts
-                        WHERE deleted_at IS NULL AND module = 'consumables' AND category ILIKE '%plate%' ORDER BY name, brand`);
+    res.json(await sql(`SELECT id, sku, name, brand, supplier, category, qty, unit FROM store_parts
+                         WHERE deleted_at IS NULL AND module = 'consumables' AND ${STORE_PLATE_CATS} ORDER BY name, brand`, []));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 };
 app.get('/api/plates/store-parts', requireAuth, (req, res) => plateH.storeParts(req, res));
@@ -8729,14 +8753,10 @@ app.post('/api/plates/stock', plateStockGate, plateH.stock = async (req, res) =>
     // damaged it stay here, the Store entry says the same in short.
     let storeIds = null;
     if (s.store_part_id) {
-      // Its Store item gone (deleted in the ERP and copied): the plate counts as not linked - CTP is never stopped.
+      // Its Store item was deleted (it is in the Store's Trash): restore it there to use it again.
       await storeApi.ensureStore();
       const [sp] = await sql`SELECT id FROM store_parts WHERE id = ${s.store_part_id} AND deleted_at IS NULL`;
-      if (!sp) {
-        await sql`UPDATE plate_sizes SET store_part_id = NULL WHERE id = ${sizeId}`;
-        await logAudit(sql, req, { action: 'plate_size.update', entityType: 'plate_size', entityId: sizeId, summary: `Plate size ${s.name} unlinked from the Store: its Store item #${s.store_part_id} is not there any more` });
-        s.store_part_id = null;
-      }
+      if (!sp) return res.status(400).json({ error: `"${s.name}" is not in the Store any more (it was deleted - it is in the Store's Trash). Restore it there to use it again.` });
     }
     if (s.store_part_id) {
       const jobTxt = jobId ? `Job E-${jobId}` : jobNo ? `Job ${jobNo}` : '';

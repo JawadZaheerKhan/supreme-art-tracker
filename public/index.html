@@ -36082,8 +36082,8 @@ async function renderPlateStore() {
       </td></tr>`;
   }).join('');
   el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
-      <div style="font-size:12.5px;color:var(--text2);">Blank plates. A plate CTP makes at the Station also takes one out by itself.</div>
-      ${canAdd ? '<button class="btn btn-primary" onclick="plateAddForm(0)">+ Add Plate</button>' : ''}
+      <div style="font-size:12.5px;color:var(--text2);">${plateSizesCache.some(z => z.linked) ? 'The CTCP plates of the Store - their sizes and stock come from there (a new plate is added in the Store). Use takes them out of the Store; a plate CTP makes at the Station too.' : 'Blank plates. A plate CTP makes at the Station also takes one out by itself.'}</div>
+      ${canAdd && !plateSizesCache.some(z => z.linked) ? '<button class="btn btn-primary" onclick="plateAddForm(0)">+ Add Plate</button>' : ''}
     </div>
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
       <thead><tr style="background:var(--bg2);"><th ${th}>Size</th><th ${th}>Brand</th><th ${th}>Supplier</th><th ${th}>Machine</th><th style="text-align:right;padding:8px;">In stock</th><th></th></tr></thead>
@@ -36093,6 +36093,20 @@ async function renderPlateStore() {
 // Add Plate / Edit - like Add Paper Item (owner, 2026-11-24).
 function plateAddForm(id) {
   const z = plateSizesCache.find(x => x.id === id) || null;
+  // A plate of the Store (owner, 2026-11-24): its name, brand, supplier and stock come from the Store - only the
+  // machines it prints on are set here (a plate CTP makes for a job on that machine comes out of it).
+  if (z && z.linked) {
+    openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:480px;">
+      <h2>Plate</h2>
+      <div style="font-size:14px;font-weight:800;margin-bottom:2px;">${esc(z.name)}</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">From the Store${z.store_sku ? ' · ' + esc(z.store_sku) : ''}${z.brand ? ' · ' + esc(z.brand) : ''}${z.supplier ? ' · ' + esc(z.supplier) : ''} · in stock ${Number(z.balance).toLocaleString()} - its name, brand and supplier are changed in the Store.</div>
+      <div class="form-group"><label class="form-label">Machine</label><input type="text" id="pl-machine" value="${esc((z.machines || []).join(', '))}" placeholder="e.g. SM74-1, SM74-2"></div>
+      <div style="font-size:11.5px;color:var(--text2);">The machines that print with this plate - a plate CTP makes for a job on that machine comes out of this one.</div>
+      <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="plateMachineSave(${z.id})">Save</button></div>
+    </div>`);
+    setTimeout(() => { const e = document.getElementById('pl-machine'); if (e) e.focus(); }, 50);
+    return;
+  }
   const v = z || { name: '', brand: '', supplier: '', machines: [] };
   const f = (fid, label, val, extra) => `<div class="form-group"><label class="form-label">${label}</label><input ${extra || 'type="text"'} id="${fid}" value="${esc(val || '')}"></div>`;
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:520px;">
@@ -36117,6 +36131,16 @@ async function plateStoreOptions(cur) {
     const other = used.get(Number(pt.id));
     return `<option value="${pt.id}" ${Number(cur) === Number(pt.id) ? 'selected' : ''}>${esc((pt.sku ? '[' + pt.sku + '] ' : '') + pt.name + (pt.brand ? ' · ' + pt.brand : ''))} - ${Number(pt.qty).toLocaleString()} ${esc(pt.unit || '')}${other && Number(cur) !== Number(pt.id) ? ' (linked to ' + esc(other) + ')' : ''}</option>`;
   }).join('');
+}
+async function plateMachineSave(id) {
+  const z = plateSizesCache.find(x => x.id === id); if (!z) return;
+  showSaving(true);
+  try {
+    await plateApi('PUT', `/api/plates/sizes/${id}`, { name: z.name, machines: String((document.getElementById('pl-machine') || {}).value || '').trim() });
+    closeModal(); notify('Plate saved');
+    await renderPlateStore();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 async function plateAddSave(id) {
   const g = x => String((document.getElementById(x) || {}).value || '').trim();
@@ -46426,12 +46450,25 @@ async function storeErpCopy(checkOnly) {
   let r;
   try { r = await api('POST', '/api/store/erp-copy', { check_only: !!checkOnly }); }
   catch (e) { showSaving(false); await alertDialog({ title: checkOnly ? 'Check failed' : 'Copy failed', message: e.message, kind: 'error' }); return; }
+  // The photos come here too (owner, 2026-11-24), a batch at a time until none is left on the ERP's link.
+  let photos = null;
+  if (!checkOnly) {
+    photos = { copied: 0, reused: 0, failed: [] };
+    for (let k = 0; k < 60; k++) {
+      let p;
+      try { p = await api('POST', '/api/store/erp-photos'); } catch (e) { photos.error = e.message; break; }
+      photos.copied += p.copied; photos.reused += p.reused; photos.failed = p.failed || [];
+      notify(`Photos: ${photos.copied + photos.reused} brought over${p.left ? ` - ${p.left} to go` : ''}`);
+      if (!p.left || !(p.copied + p.reused)) break;
+    }
+  }
   showSaving(false);
   const copied = r.copied ? Object.entries(r.copied).map(([k, v]) => `${k}: ${Number(v).toLocaleString()}`).join(' · ') : '';
   const list = (r.diffs || []).map(d => `<tr><td style="padding:4px 8px;font-weight:700;">${esc(d.item)}</td><td style="padding:4px 8px;color:#b91c1c;">${esc(d.what)}</td></tr>`).join('');
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:760px;">
     <h2>${checkOnly ? '&#10003; Checked against the ERP' : '&#8681; Copied from the ERP'}</h2>
     ${copied ? `<div style="font-size:12.5px;color:var(--text2);margin-bottom:8px;">${esc(copied)}</div>` : ''}
+    ${photos ? `<div style="font-size:13px;font-weight:700;margin-bottom:8px;color:${photos.error || photos.failed.length ? '#b45309' : '#166534'};">Photos: ${photos.copied + photos.reused} brought into this app${photos.failed.length ? ` · ${photos.failed.length} could not be fetched (they still show from the ERP's link)` : ''}${photos.error ? ' · stopped: ' + esc(photos.error) : ''}</div>` : ''}
     <div style="font-size:15px;font-weight:800;margin:6px 0 10px;color:${r.diffCount ? '#b91c1c' : '#166534'};">${Number(r.items).toLocaleString()} items - ${r.diffCount ? r.diffCount + ' do not match the ERP' : 'every item matches the ERP (quantity, entries, in, out, each batch)'}</div>
     ${list ? `<div class="report-scroll-wrap" style="max-height:50vh;"><table class="ss-table" style="width:100%;font-size:12.5px;border-collapse:collapse;"><thead><tr><th style="text-align:left;padding:6px 8px;">Item</th><th style="text-align:left;padding:6px 8px;">Difference</th></tr></thead><tbody>${list}</tbody></table></div>${r.diffCount > (r.diffs || []).length ? `<div style="font-size:12px;color:var(--text2);margin-top:6px;">First ${(r.diffs || []).length} shown.</div>` : ''}` : ''}
     ${Array.isArray(r.tables) ? `<div style="font-weight:800;margin:12px 0 4px;">Every row and column, table by table</div>
