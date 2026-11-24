@@ -2508,7 +2508,7 @@ function getSectionData(sec){
     const s=(document.getElementById('in-search')||{value:''}).value.toLowerCase();
     const dF=(document.getElementById('in-date-from')||{value:''}).value;
     const dT=(document.getElementById('in-date-to')||{value:''}).value;
-    return [...state.transactions].filter(t=>t.type==='in').sort((a,b)=>b.id-a.id).filter(t=>{
+    return [...state.transactions].filter(t=>t.type==='in').sort(txNewer).filter(t=>{
       const ms=searchHit(s,getPartName(t.partId),getPartCat(t.partId),t.ref,t.notes,t.challanNo,t.poNo,t.invoiceNo);
       return ms&&inDateRange(t.date,dF,dT);
     });
@@ -2517,7 +2517,7 @@ function getSectionData(sec){
     const s=(document.getElementById('out-search')||{value:''}).value.toLowerCase();
     const dF=(document.getElementById('out-date-from')||{value:''}).value;
     const dT=(document.getElementById('out-date-to')||{value:''}).value;
-    return [...state.transactions].filter(t=>t.type==='out').sort((a,b)=>b.id-a.id).filter(t=>{
+    return [...state.transactions].filter(t=>t.type==='out').sort(txNewer).filter(t=>{
       const ms=searchHit(s,getPartName(t.partId),getPartCat(t.partId),t.issuedTo,t.purpose,t.challanNo);
       return ms&&inDateRange(t.date,dF,dT);
     });
@@ -2526,7 +2526,7 @@ function getSectionData(sec){
     const s=(document.getElementById('iss-search')||{value:''}).value.toLowerCase();
     const dF=(document.getElementById('iss-date-from')||{value:''}).value;
     const dT=(document.getElementById('iss-date-to')||{value:''}).value;
-    return [...state.transactions].sort((a,b)=>b.id-a.id).filter(t=>{
+    return [...state.transactions].sort(txNewer).filter(t=>{
       const ms=searchHit(s,getPartName(t.partId),getPartCat(t.partId),t.issuedTo,t.ref,t.purpose,t.notes,t.challanNo);
       return ms&&inDateRange(t.date,dF,dT)&&(!StoreMovement.category||getPartCat(t.partId)===StoreMovement.category);
     });
@@ -3468,7 +3468,7 @@ function renderDashboard(){
   const lp=state.parts.filter(p=>p.qty<=p.minQty);
   if(lsl)lsl.innerHTML=lp.length?`<table><thead><tr><th>Part</th><th>Category</th><th>Current Qty</th><th>Min Qty</th><th>Status</th></tr></thead><tbody>${lp.map(p=>{const s=stockStatus(p);return`<tr><td style="font-weight:600">${p.sku?`<span class="part-sku">[${p.sku}]</span>`:''}${p.name}${inkTagHtml(p)}</td><td>${p.category}</td><td>${fmtQty(p.qty)} ${p.unit}</td><td>${p.minQty}</td><td><span class="badge ${s.cls}">${s.label}</span></td></tr>`}).join('')}</tbody></table>`:'<div class="empty"><i class="ti ti-circle-check" style="color:#2d6a10;font-size:28px"></i>All stock levels are healthy</div>';
   const rt=document.getElementById('recent-txns');
-  const recent=[...state.transactions].sort((a,b)=>b.id-a.id).slice(0,6);
+  const recent=[...state.transactions].sort(txNewer).slice(0,6);
   if(rt)rt.innerHTML=recent.length?`<table><thead><tr><th>Date</th><th>Part</th><th>Type</th><th>Qty</th><th>Details</th></tr></thead><tbody>${recent.map(t=>`<tr><td>${fmtDate(t.date)}</td><td style="font-weight:600">${getPartLabelFull(t.partId)}</td><td><span class="badge badge-${t.type}">${t.type==='in'?'Stock In':'Issue'}</span></td><td class="${t.type==='in'?'qty-positive':'qty-negative'}">${t.type==='in'?'+':'−'}${fmtQty(t.qty)} ${getPartUnit(t.partId)}</td><td style="color:#888">${t.type==='in'?(t.ref||'—'):(t.issuedTo||'—')}</td></tr>`).join('')}</tbody></table>`:'<div class="empty"><i class="ti ti-file-off"></i>No transactions yet</div>';
 }
 
@@ -4600,14 +4600,23 @@ function sortParts(list,v){
   else if(v==='cat')list.sort((a,b)=>stNameCmp(a.category,b.category)||nm(a,b));
   return list;
 }
-// Stock in / out / issuance rows. The lists arrive newest first (highest id first), which is the default.
+// Newest first: the entry's date, then the time it was saved, then the id (not the id alone - the carton entries were
+// saved after the ERP copy, so they all had the highest ids).
+function txNewer(a,b){
+  const da=String(a.date||''),db=String(b.date||'');
+  if(da!==db)return da<db?1:-1;
+  const ta=Date.parse(a.createdAt)||0,tb=Date.parse(b.createdAt)||0;
+  if(ta!==tb)return tb-ta;
+  return b.id-a.id;
+}
+// Stock in / out / issuance rows. The lists arrive newest first (txNewer), which is the default.
 function sortTxns(list,v){
   const pn=(a,b)=>stNameCmp(getPartName(a.partId),getPartName(b.partId));
-  if(v==='old')list.sort((a,b)=>a.id-b.id);
-  else if(v==='name')list.sort((a,b)=>pn(a,b)||b.id-a.id);
-  else if(v==='name-desc')list.sort((a,b)=>pn(b,a)||b.id-a.id);
-  else if(v==='qty-desc')list.sort((a,b)=>(Number(b.qty)||0)-(Number(a.qty)||0)||b.id-a.id);
-  else if(v==='qty-asc')list.sort((a,b)=>(Number(a.qty)||0)-(Number(b.qty)||0)||b.id-a.id);
+  if(v==='old')list.sort((a,b)=>txNewer(b,a));
+  else if(v==='name')list.sort((a,b)=>pn(a,b)||txNewer(a,b));
+  else if(v==='name-desc')list.sort((a,b)=>pn(b,a)||txNewer(a,b));
+  else if(v==='qty-desc')list.sort((a,b)=>(Number(b.qty)||0)-(Number(a.qty)||0)||txNewer(a,b));
+  else if(v==='qty-asc')list.sort((a,b)=>(Number(a.qty)||0)-(Number(b.qty)||0)||txNewer(a,b));
   return list;
 }
 // Categories / machines: items {count}, sorted by name (nameOf) or by how many parts they hold.
@@ -4831,7 +4840,7 @@ function renderStockIn(){
   const search=(document.getElementById('in-search')||{value:''}).value.toLowerCase();
   const dFrom=(document.getElementById('in-date-from')||{value:''}).value;
   const dTo=(document.getElementById('in-date-to')||{value:''}).value;
-  const txns=[...state.transactions].filter(t=>t.type==='in').sort((a,b)=>b.id-a.id).filter(t=>{
+  const txns=[...state.transactions].filter(t=>t.type==='in').sort(txNewer).filter(t=>{
     const ms=searchHit(search,getPartName(t.partId),getPartCat(t.partId),t.ref,t.notes,t.challanNo,t.poNo,t.invoiceNo);
     return ms&&inDateRange(t.date,dFrom,dTo)&&(!_catF.in||getPartCat(t.partId)===_catF.in);
   });
@@ -4863,7 +4872,7 @@ function renderStockOut(){
   const search=(document.getElementById('out-search')||{value:''}).value.toLowerCase();
   const dFrom=(document.getElementById('out-date-from')||{value:''}).value;
   const dTo=(document.getElementById('out-date-to')||{value:''}).value;
-  const txns=[...state.transactions].filter(t=>t.type==='out').sort((a,b)=>b.id-a.id).filter(t=>{
+  const txns=[...state.transactions].filter(t=>t.type==='out').sort(txNewer).filter(t=>{
     const ms=searchHit(search,getPartName(t.partId),getPartCat(t.partId),t.issuedTo,t.purpose,t.challanNo);
     return ms&&inDateRange(t.date,dFrom,dTo)&&(!_catF.out||getPartCat(t.partId)===_catF.out);
   });
@@ -4897,7 +4906,7 @@ function renderIssuance(){
   const search=(document.getElementById('iss-search')||{value:''}).value.toLowerCase();
   const dFrom=(document.getElementById('iss-date-from')||{value:''}).value;
   const dTo=(document.getElementById('iss-date-to')||{value:''}).value;
-  const txns=[...state.transactions].sort((a,b)=>b.id-a.id).filter(t=>{
+  const txns=[...state.transactions].sort(txNewer).filter(t=>{
     const ms=searchHit(search,getPartName(t.partId),getPartCat(t.partId),t.issuedTo,t.ref,t.purpose,t.notes,t.challanNo);
     return ms&&inDateRange(t.date,dFrom,dTo)&&(!StoreMovement.category||getPartCat(t.partId)===StoreMovement.category);
   });
