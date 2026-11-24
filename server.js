@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-23-plates';   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-plate-store';   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -2064,6 +2064,14 @@ async function initDb() {
         replaced_by     INTEGER
       )`;
     await sql`CREATE INDEX IF NOT EXISTS plates_product_idx ON plates (product_key)`;
+    // A plate line like a paper item (owner, 2026-11-24): size, brand, supplier, machine(s), opening balance. Stock
+    // In (delivery / adjustment) and Use (new job / old job / damaged / adjustment) with the job, who damaged it, and a
+    // date for a late entry.
+    await sql`ALTER TABLE plate_sizes ADD COLUMN IF NOT EXISTS brand TEXT`;
+    await sql`ALTER TABLE plate_sizes ADD COLUMN IF NOT EXISTS supplier TEXT`;
+    await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS job_name TEXT`;
+    await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS damaged_by TEXT`;
+    await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ`;
     await sql`
       CREATE TABLE IF NOT EXISTS plate_events (
         id          SERIAL PRIMARY KEY,
@@ -8482,7 +8490,8 @@ async function verifyPapercutPin(sql, rawPin) {
 // Store - or reuses the set on a repeat job; a damaged plate is removed and remade on its own screen (Damaged Plate).
 // Every step is a row in the Plate Register (plate_events).
 const PLATE_REASONS = { first: 'First set', damaged: 'Damaged', scratched: 'Scratched', worn: 'Worn out', artwork: 'Artwork changed', lost: 'Lost', size: 'New machine size', other: 'Other' };
-const PLATE_OUT_REASONS = { 'damaged-blank': 'Damaged blank', wasted: 'Wasted at CTP', test: 'Test plate', adjustment: 'Adjustment' };
+const PLATE_OUT_REASONS = { 'new-job': 'New job', 'old-job': 'Old job', damaged: 'Damaged', adjustment: 'Adjustment' };
+const PLATE_IN_REASONS = { delivery: 'Delivery', adjustment: 'Adjustment' };
 const plateNorm = s => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, '');
 // The size a machine prints with: a size whose machines name it (SM74 covers SM74-1 and SM74-2).
 function plateSizeForMachine(sizes, machine) {
@@ -8542,12 +8551,20 @@ app.post('/api/plates/sizes', requirePermission('inv_btn_plate_store'), async (r
     await dbReady;
     const sql = getDb();
     const name = String((req.body && req.body.name) || '').trim().slice(0, 80);
-    if (!name) return res.status(400).json({ error: 'Name the plate size (e.g. SM74 · 745 x 605).' });
+    if (!name) return res.status(400).json({ error: 'Enter the plate size (e.g. 745 x 605).' });
     const machines = (Array.isArray(req.body.machines) ? req.body.machines : String(req.body.machines || '').split(','))
       .map(x => String(x).trim()).filter(Boolean).slice(0, 20);
     const low = Math.max(0, parseInt(req.body.low_at, 10) || 0);
-    const [row] = await sql`INSERT INTO plate_sizes (name, machines, low_at) VALUES (${name}, ${machines}, ${low}) RETURNING *`;
-    await logAudit(sql, req, { action: 'plate_size.create', entityType: 'plate_size', entityId: row.id, summary: `Plate size added: ${name} (machines: ${machines.join(', ') || '—'})` });
+    const brand = String(req.body.brand || '').trim().slice(0, 80) || null;
+    const supplier = String(req.body.supplier || '').trim().slice(0, 80) || null;
+    const opening = Math.max(0, parseInt(req.body.opening, 10) || 0);
+    const [row] = await sql`INSERT INTO plate_sizes (name, machines, low_at, brand, supplier) VALUES (${name}, ${machines}, ${low}, ${brand}, ${supplier}) RETURNING *`;
+    if (opening > 0) {
+      await sql`INSERT INTO plate_stock_tx (size_id, change, reason, notes, user_email) VALUES (${row.id}, ${opening}, 'opening', 'Opening balance', ${req.user.email})`;
+      await sql`UPDATE plate_sizes SET balance = balance + ${opening} WHERE id = ${row.id}`;
+      row.balance = opening;
+    }
+    await logAudit(sql, req, { action: 'plate_size.create', entityType: 'plate_size', entityId: row.id, summary: `Plate added: ${name}${brand ? ' · ' + brand : ''}${supplier ? ' · ' + supplier : ''} (machines: ${machines.join(', ') || '—'})${opening ? ' · opening ' + opening : ''}` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -8562,7 +8579,9 @@ app.put('/api/plates/sizes/:id', requirePermission('inv_btn_plate_store'), async
     const machines = req.body.machines === undefined ? before.machines
       : (Array.isArray(req.body.machines) ? req.body.machines : String(req.body.machines || '').split(',')).map(x => String(x).trim()).filter(Boolean).slice(0, 20);
     const low = req.body.low_at === undefined ? before.low_at : Math.max(0, parseInt(req.body.low_at, 10) || 0);
-    const [row] = await sql`UPDATE plate_sizes SET name = ${name}, machines = ${machines}, low_at = ${low} WHERE id = ${id} RETURNING *`;
+    const brand = req.body.brand === undefined ? before.brand : (String(req.body.brand || '').trim().slice(0, 80) || null);
+    const supplier = req.body.supplier === undefined ? before.supplier : (String(req.body.supplier || '').trim().slice(0, 80) || null);
+    const [row] = await sql`UPDATE plate_sizes SET name = ${name}, machines = ${machines}, low_at = ${low}, brand = ${brand}, supplier = ${supplier} WHERE id = ${id} RETURNING *`;
     await logAudit(sql, req, { action: 'plate_size.update', entityType: 'plate_size', entityId: id, summary: `Plate size edited: ${before.name} -> ${name} (machines: ${machines.join(', ') || '—'}, low at ${low})` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -8577,15 +8596,38 @@ app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), async (r
     const dir = req.body && req.body.direction === 'out' ? 'out' : 'in';
     if (!(qty > 0)) return res.status(400).json({ error: 'Enter how many plates.' });
     const [s] = await sql`SELECT * FROM plate_sizes WHERE id = ${sizeId} AND deleted_at IS NULL`;
-    if (!s) return res.status(404).json({ error: 'Plate size not found' });
-    const reason = dir === 'in' ? 'stock-in' : (PLATE_OUT_REASONS[req.body.reason] ? req.body.reason : 'adjustment');
+    if (!s) return res.status(404).json({ error: 'Plate not found' });
+    // Stock In: Delivery (its challan) / Adjustment. Use: New job / Old job (the job: number + name) / Damaged /
+    // Adjustment; Old job and Damaged say who damaged it and why. A date for a late entry (owner, 2026-11-24).
+    const reasons = dir === 'in' ? PLATE_IN_REASONS : PLATE_OUT_REASONS;
+    const reason = reasons[req.body.reason] ? req.body.reason : (dir === 'in' ? 'delivery' : 'adjustment');
+    const entry = stockEntryInstant(req.body.entry_date);
+    if (entry.error) return res.status(400).json({ error: entry.error });
+    const txt = (v, n) => String(v == null ? '' : v).trim().slice(0, n) || null;
+    let jobId = null, jobName = null, damagedBy = null;
+    if (reason === 'new-job' || reason === 'old-job') {
+      const raw = txt(req.body.job_no, 20);
+      const m = raw && raw.match(/^E?-?\s*(\d+)$/i);
+      if (!m) return res.status(400).json({ error: 'Enter the job number.' });
+      const [j] = await sql`SELECT id, name FROM jobs WHERE id = ${parseInt(m[1], 10)} AND deleted_at IS NULL`;
+      if (!j) return res.status(400).json({ error: `Job ${raw} was not found.` });
+      jobId = j.id;
+      jobName = txt(req.body.job_name, 200) || j.name;
+    }
+    if (reason === 'old-job' || reason === 'damaged') {
+      damagedBy = txt(req.body.damaged_by, 300);
+      if (!damagedBy) return res.status(400).json({ error: 'Write who damaged it and why.' });
+    }
     const change = dir === 'in' ? qty : -qty;
-    const notes = String(req.body.notes || '').trim().slice(0, 300) || null;
-    const challan = dir === 'in' ? (String(req.body.challan_no || '').trim().slice(0, 60) || null) : null;
-    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, notes, challan_no, user_email) VALUES (${sizeId}, ${change}, ${reason}, ${notes}, ${challan}, ${req.user.email})`;
+    const notes = txt(req.body.notes, 300);
+    const challan = reason === 'delivery' ? txt(req.body.challan_no, 60) : null;
+    const at = entry.at ? new Date(entry.at).toISOString() : null;
+    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_name, damaged_by, notes, challan_no, user_email, created_at, recorded_at)
+              VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobName}, ${damagedBy}, ${notes}, ${challan}, ${req.user.email},
+                      COALESCE(${at}::timestamptz, NOW()), CASE WHEN ${at}::timestamptz IS NULL THEN NULL ELSE NOW() END)`;
     const [row] = await sql`UPDATE plate_sizes SET balance = balance + ${change} WHERE id = ${sizeId} RETURNING *`;
     await logAudit(sql, req, { action: 'plate_stock.' + dir, entityType: 'plate_size', entityId: sizeId,
-      summary: `Plate Store ${dir === 'in' ? 'Stock In' : 'Stock Out'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name}${dir === 'out' ? ' (' + PLATE_OUT_REASONS[reason] + ')' : ''}${challan ? ' · challan ' + challan : ''} · balance ${row.balance}` });
+      summary: `Plates ${dir === 'in' ? 'Stock In' : 'Use'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name} (${reasons[reason]})${jobId ? ' · Job E-' + jobId : ''}${damagedBy ? ' · ' + damagedBy : ''}${challan ? ' · challan ' + challan : ''}${entry.date ? ' · dated ' + entry.date + ' (late entry)' : ''} · balance ${row.balance}` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
