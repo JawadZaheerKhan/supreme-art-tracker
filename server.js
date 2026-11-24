@@ -8559,7 +8559,7 @@ async function plateStockOut(sql, req, sizeId, { jobId, plateId, reason, notes }
     // Never stops the CTP's work: if the Store item is gone, the plate is still recorded here.
     try {
       // Notes: the reason (plate made at CTP); Issued To: the job and the plate.
-      storeIds = await storeApi.plateMove(sql, { partId: lk.store_part_id, change: -1, by: plateWho(req), purpose: '',
+      storeIds = await storeApi.plateMove(sql, { partId: lk.store_part_id, change: -1, by: plateByName(req), purpose: '',
         notes: 'Plate made (CTP)', issuedTo: [jobId ? 'E-' + jobId : '', notes || ''].filter(Boolean).join(' · ') });
     } catch (e) {
       console.error('plate made: Store item not moved -', e.message);
@@ -8592,6 +8592,8 @@ async function plateProductOfJob(sql, job) {
   return { key, name: (pn && pn.name) || String(job.name || '').trim() };
 }
 const plateWho = req => (req.user && req.user.station_actor) || (req.user && req.user.email) || 'unknown';
+// For the Store's "Done by": the station operator, else the person's name (not their email).
+const plateByName = req => (req.user && (req.user.station_actor || req.user.name)) || plateWho(req);
 
 // Sizes (the Plate Store) - read by everyone signed in (the Station needs them).
 // A plate size linked to its Store item shows the Store's quantity (owner, 2026-11-24: plates live in the Store).
@@ -8765,7 +8767,7 @@ app.post('/api/plates/stock', plateStockGate, plateH.stock = async (req, res) =>
       const jobTxt = [jobId ? `E-${jobId}` : jobNo ? `Job ${jobNo}` : '', jobName || ''].filter(Boolean).join(' ');
       const forWhat = [jobTxt, plateNames ? 'plates: ' + plateNames : '', damagedBy ? 'damaged by: ' + damagedBy : ''].filter(Boolean).join(' · ');
       try {
-        storeIds = await storeApi.plateMove(sql, { partId: s.store_part_id, change, date: entry.date || null, by: plateWho(req),
+        storeIds = await storeApi.plateMove(sql, { partId: s.store_part_id, change, date: entry.date || null, by: plateByName(req),
           issuedTo: dir === 'out' ? forWhat : '', purpose: '', ref: dir === 'in' ? (s.supplier || '') : '',
           challanNo: challan || '', notes: [reasons[reason], notes || ''].filter(Boolean).join(' · ') });
       } catch (e) { return res.status(400).json({ error: e.message }); }
