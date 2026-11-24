@@ -734,7 +734,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   plate_btn_stock_in: { label: 'Plate Store — + Stock In (Delivery with its challan / Adjustment)', levels: { admin: 'yes', store_manager: 'yes', procurement: 'yes' } },
   plate_btn_use:      { label: 'Store — CTCP plates: Use (New job / Old job / Damaged / Adjustment) from the Store', levels: { admin: 'yes', store_manager: 'yes', procurement: 'yes' } },
   plate_btn_pickup:   { label: 'Plate Store — In Process: Picked up (CTP took the plates back)', levels: { admin: 'yes', store_manager: 'yes' } },
-  plate_btn_delete:   { label: 'Store — CTP Station plates: Delete a wrong Use / Stock In entry in the Register (the Store stock goes back)', levels: { admin: 'yes', procurement: 'yes' } },
+  plate_btn_delete:   { label: 'Store — CTP Station plates: Reverse a wrong Use / Stock In entry in the CTP Register (the Store stock comes back; from the Store it is the Store\'s Reverse row)', levels: { admin: 'yes', procurement: 'yes' } },
   products_btn_new:     { label: 'New / edit product — + New Product (a product without a job card), its details on a tile (company, item code, No. of Colors, UPS) and Delete for a product with no jobs', levels: { admin: 'yes', finance: 'yes' } },
 
   // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
@@ -8827,14 +8827,17 @@ app.get('/api/plates/stock-tx', requirePermission('inv_btn_plate_store', 'view')
 // Delete a wrong Stock In / Use entry (owner, 2026-11-24: "add delete option for any issue so can be fixed"): the
 // entry goes and the plates in stock move back, in ONE statement; the Activity Log keeps what it was. A plate made at
 // the CTP Station is not deleted here - it belongs to that plate.
-app.delete('/api/plates/stock-tx/:id', requirePermission('plate_btn_delete'), async (req, res) => {
+// Reverse (owner, 2026-11-24: the CTP Register's Delete is a Reverse, like the Store's; the store person reverses a CTP
+// entry from the Store too - that runs this same handler).
+app.delete('/api/plates/stock-tx/:id', requirePermission('plate_btn_delete'), (req, res) => plateH.reverse(req, res));
+plateH.reverse = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     const id = parseInt(req.params.id, 10);
     const [t] = await sql`SELECT t.*, s.name AS size_name FROM plate_stock_tx t LEFT JOIN plate_sizes s ON s.id = t.size_id WHERE t.id = ${id}`;
     if (!t) return res.status(404).json({ error: 'That entry is not there any more.' });
-    if (t.reason === 'plate-made') return res.status(400).json({ error: 'This one was a plate made at the CTP Station - it cannot be deleted here.' });
+    if (t.reason === 'plate-made') return res.status(400).json({ error: 'This one was a plate made at the CTP Station - it is not reversed.' });
     // Its Store entries go too, and the Store's quantity moves back (owner, 2026-11-24: plates live in the Store).
     if (Array.isArray(t.store_tx_ids) && t.store_tx_ids.length) await storeApi.plateUnmove(sql, t.store_tx_ids);
     const [row] = await sql`
@@ -8842,13 +8845,13 @@ app.delete('/api/plates/stock-tx/:id', requirePermission('plate_btn_delete'), as
       UPDATE plate_sizes s SET balance = s.balance - d.change FROM d WHERE s.id = d.size_id RETURNING s.*`;
     const reasons = t.change > 0 ? PLATE_IN_REASONS : PLATE_OUT_REASONS;
     await logAudit(sql, req, { action: 'plate_stock.delete', entityType: 'plate_size', entityId: t.size_id,
-      summary: `Plate entry deleted: ${t.change > 0 ? 'Stock In +' : 'Use -'}${Math.abs(t.change)} ${t.size_name || ''} (${reasons[t.reason] || t.reason})`
+      summary: `Plate entry reversed${req.fromStore ? ' (from the Store)' : ''}: ${t.change > 0 ? 'Stock In +' : 'Use -'}${Math.abs(t.change)} ${t.size_name || ''} (${reasons[t.reason] || t.reason})`
         + `${t.job_id ? ' · Job E-' + t.job_id : t.job_no ? ' · Job ' + t.job_no : ''}${t.job_name ? ' ' + t.job_name : ''}${t.plate_names ? ' · plates: ' + t.plate_names : ''}`
         + `${t.damaged_by ? ' · ' + t.damaged_by : ''}${t.challan_no ? ' · challan ' + t.challan_no : ''}${t.notes ? ' · ' + t.notes : ''}`
         + ` · was dated ${new Date(t.created_at).toLocaleDateString('en-GB', { timeZone: 'Asia/Karachi' })} by ${t.actor_name || t.user_email || '—'}${row ? ' · balance now ' + row.balance : ''}` });
     res.json({ ok: true, size: row || null });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
+};
 // The Plate Register: every plate made / reused / scrapped.
 app.get('/api/plates/register', requirePermission('inv_btn_plate_store', 'view'), async (req, res) => {
   try {
@@ -17113,6 +17116,13 @@ const storeApi = require('./store-routes')(app, { getDb, dbReady, logAudit, user
   // is a carton reversal.
   afterErpCopy: sql => cartonStoreSync(sql, null),
   cartonCreate: (req, o) => cartonCreateFromStore(req, o),
+  // A CTP plate entry reversed from the Store (the Store's Reverse permission) = the CTP Register's Reverse.
+  plateReverse: async (req, plateTxId) => {
+    const r2 = Object.create(req); r2.params = { id: String(plateTxId) }; r2.body = {}; r2.fromStore = true;
+    const out = { code: 200, body: null };
+    await plateH.reverse(r2, { status(c) { out.code = c; return this; }, json(b) { out.body = b; return this; } });
+    return out;
+  },
   cartonReverse: async (req, cartonTxId) => {
     const r2 = Object.create(req); r2.params = { id: String(cartonTxId) }; r2.body = {};
     const out = { code: 200, body: null };

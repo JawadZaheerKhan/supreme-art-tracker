@@ -36377,20 +36377,22 @@ let plateTxCache = [];
 function plateTxDelBtn(t, from) {
   if (t.reason === 'plate-made') return '';
   if (t.from_store) return '<span style="font-size:11px;color:var(--text3);" title="Entered in the Store - change it there">in the Store</span>';
-  return `<button class="btn btn-sm" style="color:#b91c1c;border-color:#fca5a5;font-weight:700;padding:2px 8px;" title="Delete this entry - the stock goes back" onclick="plateTxDelete(${t.id}, '${from}')">&#128465; Delete</button>`;
+  // Reverse, like the Store's (owner, 2026-11-24): the entry goes and the stock comes back.
+  return `<button class="btn btn-sm" style="color:#8C2326;border-color:#e8c9c9;background:#fff;font-weight:600;padding:3px 10px;white-space:nowrap;" title="Reverse this entry - the stock comes back" onclick="plateTxDelete(${t.id}, '${from}')">&#8630; Reverse</button>`;
 }
 async function plateTxDelete(id, from) {
   const t = (from === 'register' ? plateRegRows : plateTxCache).find(x => x.id === id); if (!t) return;
   const isIn = t.change > 0, n = Math.abs(t.change);
   const job = t.job_id ? 'E-' + t.job_id : (t.job_no || '');
   const what = `${isIn ? 'Stock In +' : 'Use -'}${n} ${t.size_name || ''} · ${PLATE_TX_TXT[t.reason] || t.reason}${job ? ' · Job ' + job : ''}${t.job_name ? ' ' + t.job_name : ''} · ${fmtDMY(t.created_at)}`;
-  const ok = await confirmDialog({ title: 'Delete this plate entry?', danger: true, confirmText: 'Delete',
-    message: `${what}\n\n${isIn ? n + ' plates come off' : n + ' plates go back into'} the stock. It cannot be undone - the Activity Log keeps what it was.` });
+  const ok = await confirmDialog({ title: 'Reverse this plate entry?', danger: true, confirmText: 'Reverse',
+    message: `${what}\n\n${isIn ? n + ' plates come off' : n + ' plates go back into'} the Store stock. The entry leaves the Register and the Store - the Activity Log keeps what it was.` });
   if (!ok) return;
   showSaving(true);
   try {
     await api('DELETE', `/api/plates/stock-tx/${id}`);
-    notify('Entry deleted');
+    notify('Entry reversed');
+    storeFrameReload();
     if (from === 'register') await loadPlateRegister();
     else { try { plateSizesCache = await plateApi('GET', '/api/plates/sizes'); } catch (e) {} await plateStockHistory(t.size_id); }
   } catch (e) { notify('Error: ' + e.message); }

@@ -9,7 +9,7 @@
 'use strict';
 
 module.exports = function registerStoreRoutes(app, deps) {
-  const { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon, afterErpCopy, cartonReverse, cartonCreate } = deps;
+  const { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon, afterErpCopy, cartonReverse, cartonCreate, plateReverse } = deps;
 
   // The ERP grant -> its Access Register row here.
   const GRANT_ROW = {
@@ -470,8 +470,16 @@ module.exports = function registerStoreRoutes(app, deps) {
         if (r.code !== 200) return res.status(r.code).json(r.body || { error: 'Reverse failed' });
         return res.json({ ok: true, deleted: 0, reload: true });
       }
-      const [pe] = await sql`SELECT id, reason, job_id, job_no FROM plate_stock_tx WHERE store_tx_ids && ${ids}::int[] LIMIT 1`;
-      if (pe) return res.status(409).json({ error: `This entry was made at the CTP Station${pe.job_id ? ' (Job E-' + pe.job_id + ')' : pe.job_no ? ' (Job ' + pe.job_no + ')' : ''}. ${pe.reason === 'plate-made' ? 'A plate made at CTP is not deleted.' : 'Delete it in the CTP Station Register - the Store stock comes back with it.'}` });
+      // A CTP Station plate entry (owner, 2026-11-24: "store person can reverse it"): Reverse here = the CTP Register's
+      // Reverse - the whole station entry (all its Store parts) goes and the stock comes back; the page reloads.
+      const [pe] = await sql`SELECT id, reason FROM plate_stock_tx WHERE store_tx_ids && ${ids}::int[] LIMIT 1`;
+      if (pe) {
+        if (historyOnly || ids.length > 1) return res.status(409).json({ error: 'A CTP Station plate entry is reversed on its own (Reverse on the entry).' });
+        if (pe.reason === 'plate-made' || !plateReverse) return res.status(409).json({ error: 'This was a plate made at the CTP Station - it is not reversed.' });
+        const r = await plateReverse(req, pe.id);
+        if (r.code !== 200) return res.status(r.code).json(r.body || { error: 'Reverse failed' });
+        return res.json({ ok: true, deleted: 0, reload: true });
+      }
       const txns = await sql`SELECT id, type, part_id, qty, date::text AS date, ref, issued_to FROM store_tx WHERE id = ANY(${ids})`;
       if (!txns.length) return res.json({ ok: true, deleted: 0 });
       const partIds = [...new Set(txns.map(t => t.part_id))];
