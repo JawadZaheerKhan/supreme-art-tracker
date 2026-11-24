@@ -8553,7 +8553,10 @@ app.get('/api/plates/sizes', requireAuth, async (req, res) => {
     res.json(await sql`SELECT * FROM plate_sizes WHERE deleted_at IS NULL ORDER BY name`);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.post('/api/plates/sizes', requirePermission('inv_btn_plate_store'), async (req, res) => {
+// The Plate Store's handlers - the app's routes below, and the same at the CTP Station with the CTP PIN (owner,
+// 2026-11-24: "same as the Line Clearance at the QA station").
+const plateH = {};
+app.post('/api/plates/sizes', requirePermission('inv_btn_plate_store'), plateH.sizeAdd = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8567,7 +8570,7 @@ app.post('/api/plates/sizes', requirePermission('inv_btn_plate_store'), async (r
     const opening = Math.max(0, parseInt(req.body.opening, 10) || 0);
     const [row] = await sql`INSERT INTO plate_sizes (name, machines, low_at, brand, supplier) VALUES (${name}, ${machines}, ${low}, ${brand}, ${supplier}) RETURNING *`;
     if (opening > 0) {
-      await sql`INSERT INTO plate_stock_tx (size_id, change, reason, notes, user_email) VALUES (${row.id}, ${opening}, 'opening', 'Opening balance', ${req.user.email})`;
+      await sql`INSERT INTO plate_stock_tx (size_id, change, reason, notes, user_email, actor_name) VALUES (${row.id}, ${opening}, 'opening', 'Opening balance', ${req.user.email}, ${req.user.station_actor || null})`;
       await sql`UPDATE plate_sizes SET balance = balance + ${opening} WHERE id = ${row.id}`;
       row.balance = opening;
     }
@@ -8575,7 +8578,7 @@ app.post('/api/plates/sizes', requirePermission('inv_btn_plate_store'), async (r
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.put('/api/plates/sizes/:id', requirePermission('inv_btn_plate_store'), async (req, res) => {
+app.put('/api/plates/sizes/:id', requirePermission('inv_btn_plate_store'), plateH.sizeEdit = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8594,7 +8597,7 @@ app.put('/api/plates/sizes/:id', requirePermission('inv_btn_plate_store'), async
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Stock In (plates received) / Stock Out (a damaged blank, wasted at CTP, a test plate, adjustment).
-app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), async (req, res) => {
+app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), plateH.stock = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8632,8 +8635,8 @@ app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), async (r
     const plateNames = dir === 'out' && Array.isArray(req.body.plate_names)
       ? (req.body.plate_names.map(x => String(x || '').trim().slice(0, 40)).filter(Boolean).slice(0, 16).join(', ') || null) : null;
     const at = entry.at ? new Date(entry.at).toISOString() : null;
-    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_no, job_name, damaged_by, plate_names, notes, challan_no, user_email, created_at, recorded_at)
-              VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobNo}, ${jobName}, ${damagedBy}, ${plateNames}, ${notes}, ${challan}, ${req.user.email},
+    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_no, job_name, damaged_by, plate_names, notes, challan_no, user_email, actor_name, created_at, recorded_at)
+              VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobNo}, ${jobName}, ${damagedBy}, ${plateNames}, ${notes}, ${challan}, ${req.user.email}, ${req.user.station_actor || null},
                       COALESCE(${at}::timestamptz, NOW()), CASE WHEN ${at}::timestamptz IS NULL THEN NULL ELSE NOW() END)`;
     const [row] = await sql`UPDATE plate_sizes SET balance = balance + ${change} WHERE id = ${sizeId} RETURNING *`;
     await logAudit(sql, req, { action: 'plate_stock.' + dir, entityType: 'plate_size', entityId: sizeId,
@@ -8641,10 +8644,11 @@ app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), async (r
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.get('/api/plates/stock-tx', requirePermission('inv_btn_plate_store', 'view'), async (req, res) => {
+app.get('/api/plates/stock-tx', requirePermission('inv_btn_plate_store', 'view'), plateH.stockTx = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
+    if (req.method === 'POST') req.query = { ...req.query, ...(req.body || {}) };   // the Station sends it in the body
     const sizeId = parseInt(req.query.size_id, 10);
     // Register (owner, 2026-11-24): every plate line's Stock In and Usage in a period - from / to optional.
     const day = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d || '')); return m ? new Date(businessWallClockToMs(+m[1], +m[2], +m[3], 0, 0)).toISOString() : null; };
@@ -8721,6 +8725,24 @@ app.get('/api/station/plates/job/:id', requireStationUser, async (req, res) => {
     res.json({ job: { id: job.id, name: job.name, client: job.client, machine: job.machine }, product: prod, colors, leaflet, sizes, size_id: sz ? sz.id : null, plates, done });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
+// Station - the Plate Store and its Register at the CTP Station (owner, 2026-11-24), like the Line Clearance Log at
+// the QA station: the same screens and handlers, checked by the CTP's PIN (or a Manager PIN) instead of the login's
+// Access Register row; who did it is the station's operator.
+async function stationCtpGate(req, res, next) {
+  try {
+    if (!canProcessStation(req.user)) return res.status(403).json({ error: 'View-only: your role cannot save at the station.' });
+    await dbReady;
+    const sql = getDb();
+    const v = await verifyCtpPin(sql, req.body && req.body.pin);
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    await withStationActor(sql, req, v.operator);
+    next();
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+}
+app.post('/api/station/plates/sizes', requireStationUser, stationCtpGate, (req, res) => plateH.sizeAdd(req, res));
+app.post('/api/station/plates/sizes/:id', requireStationUser, stationCtpGate, (req, res) => plateH.sizeEdit(req, res));
+app.post('/api/station/plates/stock', requireStationUser, stationCtpGate, (req, res) => plateH.stock(req, res));
+app.post('/api/station/plates/stock-tx', requireStationUser, stationCtpGate, (req, res) => plateH.stockTx(req, res));
 // Station - every plate in use, by product (the Damaged Plate screen).
 app.get('/api/station/plates/active', requireStationUser, async (req, res) => {
   try {

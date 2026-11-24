@@ -35803,10 +35803,23 @@ async function openPlateStore(tab) {
     <div id="plate-store-body" style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:12px;">Loading…</div>`;
   if (plateStoreTab === 'store') await renderPlateStore(); else await loadPlateRegister();
 }
+// At the CTP Station the Plate Store's calls go through the PIN-checked station routes (owner, 2026-11-24).
+function plateAtStation() { return typeof mode !== 'undefined' && mode === 'station' && stationView === 'plate-store' && !!stationOperator; }
+function plateCanEdit() { return plateAtStation() || isSuperAdmin() || hasPerm('inv_btn_plate_store', 'yes'); }
+function plateApi(method, path, body) {
+  if (!plateAtStation() || (method === 'GET' && path === '/api/plates/sizes')) return api(method, path, body);
+  const who = { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '' };
+  if (method === 'GET' && path.startsWith('/api/plates/stock-tx')) {
+    const qs = Object.fromEntries(new URLSearchParams(path.split('?')[1] || ''));
+    return api('POST', '/api/station/plates/stock-tx', { ...qs, ...who });
+  }
+  if (method === 'PUT' && path.startsWith('/api/plates/sizes/')) return api('POST', '/api/station/plates/sizes/' + path.split('/').pop(), { ...(body || {}), ...who });
+  return api(method, path.replace('/api/plates/', '/api/station/plates/'), { ...(body || {}), ...who });
+}
 async function renderPlateStore() {
   const el = document.getElementById('plate-store-body'); if (!el) return;
-  try { plateSizesCache = await api('GET', '/api/plates/sizes'); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
-  const can = isSuperAdmin() || hasPerm('inv_btn_plate_store', 'yes');
+  try { plateSizesCache = await plateApi('GET', '/api/plates/sizes'); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
+  const can = plateCanEdit();
   const th = 'style="text-align:left;padding:8px;"';
   const rows = plateSizesCache.map(z => {
     const low = z.balance < 0 || (z.low_at > 0 && z.balance <= z.low_at);
@@ -35854,7 +35867,7 @@ async function plateAddSave(id) {
   if (!id) body.opening = parseInt(g('pl-opening'), 10) || 0;
   showSaving(true);
   try {
-    if (id) await api('PUT', `/api/plates/sizes/${id}`, body); else await api('POST', '/api/plates/sizes', body);
+    if (id) await plateApi('PUT', `/api/plates/sizes/${id}`, body); else await plateApi('POST', '/api/plates/sizes', body);
     closeModal(); notify(id ? 'Plate saved' : 'Plate added');
     await renderPlateStore();
   } catch (e) { notify('Error: ' + e.message); }
@@ -35953,10 +35966,11 @@ async function plateStockSave(id, dir) {
   }
   showSaving(true);
   try {
-    await api('POST', '/api/plates/stock', body);
+    await plateApi('POST', '/api/plates/stock', body);
     closeModal();
     const z = plateSizesCache.find(x => x.id === id);
     notify(`${dir === 'in' ? '+' : '-'}${qty} ${z ? z.name : ''} plates`);
+    plateRegRows = null;
     await renderPlateStore();
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
@@ -35966,7 +35980,7 @@ async function plateStockHistory(id) {
   const el = document.getElementById('plate-store-body'); if (!el) return;
   el.innerHTML = 'Loading…';
   let rows = [];
-  try { rows = await api('GET', `/api/plates/stock-tx?size_id=${id}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
+  try { rows = await plateApi('GET', `/api/plates/stock-tx?size_id=${id}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
   const th = 'style="text-align:left;padding:6px 8px;"';
   el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;"><b>${esc(z.name)}${z.brand ? ' · ' + esc(z.brand) : ''} &middot; history</b><button class="btn btn-sm" onclick="renderPlateStore()">&lsaquo; Back</button></div>
     <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
@@ -36070,7 +36084,7 @@ function plateUsePlatesQty() {
 async function loadPlateRegister() {
   const el = document.getElementById('plate-store-body'); if (!el) return;
   el.innerHTML = 'Loading…';
-  try { plateRegRows = await api('GET', `/api/plates/stock-tx?from=${plateRegFrom}&to=${plateRegTo}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
+  try { plateRegRows = await plateApi('GET', `/api/plates/stock-tx?from=${plateRegFrom}&to=${plateRegTo}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
   renderPlateRegister();
 }
 // Green column filters on the Register (owner, 2026-11-24): Plate, Reason; Usage also Job No., Job Name, Plates,
@@ -42847,6 +42861,7 @@ function stationRender() {
   else if (stationView === 'qa-pending') root.innerHTML = stationQaPendingHtml();
   else if (stationView === 'plates') root.innerHTML = stationPlatesHtml();
   else if (stationView === 'plates-damaged') root.innerHTML = stationDamagedPlatesHtml();
+  else if (stationView === 'plate-store') { root.innerHTML = stationPlateStoreHtml(); setTimeout(stationPlateStoreFill, 0); }
   else root.innerHTML = stationQueueHtml();
 }
 
@@ -44104,11 +44119,38 @@ function stationCtpTabsHtml(active) {
       ${tab('jobs', '&#128203; Jobs', 'stationPlatesBackToQueue()', '#7a1f1f')}
       ${tab('plates', '&#129513; Plates', 'stationOpenPlates()', '#1e3a8a')}
       ${tab('damaged', '&#9888; Damaged Plate', 'stationOpenDamagedPlates()', '#b91c1c')}
+      ${tab('store', '&#128451; Plate Store', 'stationOpenPlateStore()', '#166534')}
     </div>`;
+}
+// Plate Store tab at the CTP Station: the app's Plate Store and Register - Add Plate, Edit, Stock In, Use, History,
+// the Register with its filters - saved with the CTP's PIN.
+function stationOpenPlateStore(tab) {
+  plateStoreTab = tab || plateStoreTab || 'store';
+  if (!plateRegFrom) { const t = localDateISO(); plateRegFrom = t.slice(0, 8) + '01'; plateRegTo = t; }
+  stationView = 'plate-store';
+  stationRender();
+}
+function stationPlateStoreHtml() {
+  const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
+  const sub = (id, label) => `<button class="btn ${plateStoreTab === id ? 'btn-primary' : ''}" onclick="stationOpenPlateStore('${id}')">${label}</button>`;
+  return `<div class="station-head">
+      <div><div class="station-who">${who}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(STAGES[0] || 'CTP')}</div></div>
+      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
+    </div>
+    ${stationCtpTabsHtml('store')}
+    <div style="padding:10px 16px 30px;">
+      <div style="display:flex;gap:8px;margin-bottom:8px;">${sub('store', 'Plate Store')}${sub('register', 'Register')}</div>
+      <div id="plate-store-body" style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:12px;">Loading…</div>
+    </div>`;
+}
+function stationPlateStoreFill() {
+  if (stationView !== 'plate-store') return;
+  if (plateStoreTab === 'register') { if (plateRegRows) renderPlateRegister(); else loadPlateRegister(); }
+  else renderPlateStore();
 }
 function stationPlatesHead(title, back) {
   const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
-  const active = stationView === 'plates-damaged' ? 'damaged' : 'plates';
+  const active = stationView === 'plates-damaged' ? 'damaged' : stationView === 'plate-store' ? 'store' : 'plates';
   return `<div class="station-head">
       <div><div class="station-who">${who}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(STAGES[0] || 'CTP')}</div></div>
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
