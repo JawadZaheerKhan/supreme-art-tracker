@@ -6600,6 +6600,7 @@ app.post('/api/jobs', requireAnyBtn(['job_btn_new_job', 'job_btn_duplicate']), a
     // "Process to CTP" on the card flips them to 'pending' so the
     // store keeper's Pending Stock queue picks them up. Stock is only
     // deducted after that, via POST /api/jobs/:id/issue-stock.
+    particulars = await fillPlatesFromProduct(sql, name, particulars);   // the product's plates (owner, 2026-11-24)
     const result = await sql`
       INSERT INTO jobs (id, name, client, jobcode, ref, dateissued, deadline, size, ups, sheets, qty, paper, machine, coatings, priority, delqty, cartonqty, notes, bno, mfgdate, expdate, mrp, particulars, inventory_item_id, cut_size, offcut_size, is_shade_card, client_visible, group_job_id, stock_group_name, stock_group_visible, issuance_status)
       -- COALESCE short-circuits in Postgres, so nextval() is NOT called when a
@@ -11921,6 +11922,25 @@ async function productKeyOf(sql, name) {
   const [a] = await sql`SELECT canonical FROM finance.product_aliases WHERE alias = ${own}`;
   return a ? String(a.canonical || '').trim().toLowerCase() : own;
 }
+// A new job of a product whose plates are set on it (owner, 2026-11-24: CTP adds the plates and colours on the
+// product, a new job picks them up and CTP checks them when processing): its empty Plates / No. of Colors (and Inside
+// Leaflet) boxes are filled from the product, marked from_product until CTP saves them at the Station.
+async function fillPlatesFromProduct(sql, name, particulars) {
+  const p = (particulars && typeof particulars === 'object' && !Array.isArray(particulars)) ? particulars : {};
+  const has = k => String(((p[k] || {}).quantity) || '').trim() !== '';
+  if (has('plates') || has('no_of_colors')) return p;
+  try {
+    const key = await productKeyOf(sql, name);
+    if (!key) return p;
+    const [pr] = await sql`SELECT colors, plate_colors FROM finance.products WHERE key = ${key}`;
+    const n = pr ? String(pr.colors || '').trim() : '';
+    if (!n) return p;
+    p.plates = { ...(p.plates || {}), quantity: n, from_product: true };
+    p.no_of_colors = { ...(p.no_of_colors || {}), quantity: n, from_product: true };
+    if (pr.plate_colors && pr.plate_colors.__leaflet === true && !has('inside_leaflet')) p.inside_leaflet = { ...(p.inside_leaflet || {}), quantity: 'Yes', from_product: true };
+  } catch (e) { console.error('plates from the product not filled:', e.message); }
+  return p;
+}
 // Jobs that sit on a product's tile: their own name is the product's, or a name folded into it.
 async function productJobCount(sql, key) {
   const [{ n }] = await sql`
@@ -11993,18 +12013,24 @@ app.put('/api/products/:key/plate-colors', requireAnyBtn(['products_btn_new', 'p
     for (const [slot, v] of Object.entries(raw).slice(0, 24)) {
       // __slots: which plate each one is, when it is not the usual set (owner, 2026-11-24 - a 2 colour job = K + a spot ...).
       if (slot === '__slots') { if (Array.isArray(v)) colors.__slots = v.map(x => String(x || '').trim().slice(0, 20)).filter(Boolean).slice(0, 16); continue; }
+      // __leaflet: the product has an inside leaflet plate (owner, 2026-11-24 - CTP sets the plates on the product).
+      if (slot === '__leaflet') { colors.__leaflet = v === true; continue; }
       const s = String(slot || '').trim().slice(0, 20), n = String(v == null ? '' : v).trim().replace(/\s+/g, ' ').slice(0, 60);
       if (s) colors[s] = n;
     }
     const name = productText(req.body && req.body.name) || key;
-    const [before] = await sql`SELECT plate_colors FROM finance.products WHERE key = ${key}`;
+    // The product's No. of Colors / Plates (owner, 2026-11-24): set by CTP here, a new job of it starts with it.
+    const count = (req.body && req.body.count !== undefined) ? productText(req.body.count) : null;
+    const [before] = await sql`SELECT plate_colors, colors FROM finance.products WHERE key = ${key}`;
     const [row] = await sql`
-      INSERT INTO finance.products (key, name, plate_colors, created_by, updated_by)
-      VALUES (${key}, ${name}, ${JSON.stringify(colors)}::jsonb, ${req.user.email}, ${req.user.email})
-      ON CONFLICT (key) DO UPDATE SET plate_colors = EXCLUDED.plate_colors, updated_by = EXCLUDED.updated_by, updated_at = NOW()
-      RETURNING key, name, plate_colors`;
+      INSERT INTO finance.products (key, name, plate_colors, colors, created_by, updated_by)
+      VALUES (${key}, ${name}, ${JSON.stringify(colors)}::jsonb, COALESCE(${count}::text, ''), ${req.user.email}, ${req.user.email})
+      ON CONFLICT (key) DO UPDATE SET plate_colors = EXCLUDED.plate_colors, colors = COALESCE(${count}::text, finance.products.colors),
+                                      updated_by = EXCLUDED.updated_by, updated_at = NOW()
+      RETURNING key, name, plate_colors, colors`;
     const old = (before && before.plate_colors) || {};
-    const changes = Object.keys(colors).filter(s => String(old[s] || '') !== String(colors[s] || '')).map(s => s === '__slots' ? `plates: ${(old.__slots || []).join(' ') || 'usual'} -> ${(colors.__slots || []).join(' ')}` : `${s}: "${old[s] || '—'}" -> "${colors[s] || '—'}"`);
+    const changes = Object.keys(colors).filter(s => String(old[s] || '') !== String(colors[s] || '')).map(s => s === '__slots' ? `plates: ${(old.__slots || []).join(' ') || 'usual'} -> ${(colors.__slots || []).join(' ')}` : s === '__leaflet' ? `inside leaflet: ${old.__leaflet ? 'yes' : 'no'} -> ${colors.__leaflet ? 'yes' : 'no'}` : `${s}: "${old[s] || '—'}" -> "${colors[s] || '—'}"`);
+    if (count !== null && String((before && before.colors) || '') !== count) changes.unshift(`No. of Colors / Plates: "${(before && before.colors) || '—'}" -> "${count || '—'}"`);
     if (changes.length) await logAudit(sql, req, { action: 'product.plate_colors', entityType: 'product', entityId: key, summary: `Plate names: "${name}" — ${changes.join('; ')}` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -13053,7 +13079,7 @@ app.post('/api/stock-groups/:id/duplicate-into-job', requirePermission('job_btn_
     // MRP, machine, ups, cut, etc.) lives on the sub job — mirroring
     // the "duplicate" behaviour the owner wants.
     const seedParts = (tpl.particulars && typeof tpl.particulars === 'object') ? tpl.particulars : {};
-    const particulars = JSON.parse(JSON.stringify(seedParts));
+    const particulars = await fillPlatesFromProduct(sql, tpl.name || g.product, JSON.parse(JSON.stringify(seedParts)));   // the product's plates (owner, 2026-11-24)
     // stock_group_name is set to the group's product too so every
     // client-side lookup that still groups by name continues to work
     // without having to refactor every reader in one go.
@@ -16247,6 +16273,8 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         };
       }
     }
+    // Plates filled from the product (owner, 2026-11-24): CTP saving them here is the check - the mark goes.
+    for (const k of Object.keys(particularsPatch)) if (particulars[k] && particulars[k].from_product) delete particulars[k].from_product;
 
     // Carton type per Carton Shipper line (owner, 2026-10-14): one id list
     // per pass, one id per "qty x cartons" line. A pass the client didn't

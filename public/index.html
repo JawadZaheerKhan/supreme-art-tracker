@@ -36327,7 +36327,10 @@ function productPlateSlots(key, jobsOf) {
   return plateSlotsOf(c.colors, c.leaflet, pm && pm.plate_colors);
 }
 function productColorsOf(key, jobsOf) {
-  const list = (jobsOf || (jobs || []).filter(j => j && productOfName(j.name).key === key)).slice().sort((a, b) => b.id - a.id);
+  // Set on the product by CTP (owner, 2026-11-24): that wins - else its newest job's.
+  const pm0 = typeof productMasterOf === 'function' ? productMasterOf(key) : null;
+  if (pm0 && String(pm0.colors || '').trim()) return { colors: String(pm0.colors).trim(), leaflet: !!(pm0.plate_colors && pm0.plate_colors.__leaflet) };
+  const list =(jobsOf || (jobs || []).filter(j => j && productOfName(j.name).key === key)).slice().sort((a, b) => b.id - a.id);
   for (const j of list) {
     const p = j.particulars || {};
     const c = String(((p.plates || {}).quantity) || ((p.no_of_colors || {}).quantity) || '').trim();
@@ -36491,19 +36494,15 @@ async function openProductPlates(i) {
   // prints another colour (owner, 2026-11-24).
   const slots = productPlateSlots(g.key, g.jobs);
   const canName = (typeof mode !== 'undefined' && mode === 'station' && !!stationOperator) || isSuperAdmin() || hasPerm('products_btn_new', 'yes') || hasPerm('products_btn_specials', 'yes');
-  const slotBg = { C: '#00aeef', M: '#ec008c', Y: '#ffe600', K: '#231f20' };
-  const slotHtml = slots.length ? `<div style="display:flex;flex-wrap:wrap;gap:10px;">${slots.map((x, k) => `
-      <div class="pp-card" style="width:120px;border:1px solid var(--border);border-radius:10px;padding:8px;background:#fff;text-align:center;">
-        ${canName && !/^Leaflet/.test(x.slot)
-          ? `<select class="pp-slot" onchange="ppSlotChanged(this)" title="Which plate this is - edit it" style="width:100%;font-size:17px;font-weight:900;padding:5px 2px;border-radius:7px;border:none;cursor:pointer;text-align:center;background:${slotBg[x.slot] || '#e5e7eb'};color:${x.slot === 'Y' || !slotBg[x.slot] ? '#111' : '#fff'};">${PLATE_SLOT_CHOICES.map(c => `<option value="${esc(c)}" ${c === x.slot ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`
-          : `<div class="pp-slot" data-slot="${esc(x.slot)}" style="font-size:18px;font-weight:900;padding:6px 0;border-radius:7px;background:${slotBg[x.slot] || '#e5e7eb'};color:${x.slot === 'Y' || !slotBg[x.slot] ? '#111' : '#fff'};">${esc(x.slot)}</div>`}
-        <input type="text" class="pp-name" value="${esc(x.name)}" placeholder="colour name" ${canName ? '' : 'disabled'} style="width:100%;margin-top:6px;padding:5px 6px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;text-align:center;box-sizing:border-box;">
-      </div>`).join('')}</div>
-      <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap;">
-        <span style="font-size:11.5px;color:var(--text2);">${slots.length} plates from its ${c.leaflet && !/\+/.test(c.colors) ? esc(c.colors) + ' plates + inside leaflet' : 'No. of Colors ' + esc(c.colors)}. Under each plate, the colour it prints.</span>
-        ${canName ? `<button class="btn btn-sm btn-primary" style="margin-left:auto;" onclick="saveProductPlateNames(${i})">Save names</button>` : ''}
-      </div>`
-    : '<div style="color:var(--text3);">No. of Colors / Plates is not on its jobs yet.</div>';
+  // CTP sets the product's plates here (owner, 2026-11-24): No. of Colors / Plates and Inside Leaflet - the cards
+  // follow as it is typed; a new job of this product starts with them and CTP checks them when processing it.
+  const setupHtml = canName ? `<div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;background:var(--bg2);border-radius:8px;">
+      <div><div class="dash-flbl">No. of Colors / Plates</div><input type="text" id="pp-count" class="filter" value="${esc(c.colors)}" placeholder="e.g. 4 or 4+1" style="width:130px;" oninput="ppRedraw()"></div>
+      <label style="display:flex;align-items:center;gap:6px;font-weight:600;font-size:13px;padding-bottom:7px;cursor:pointer;"><input type="checkbox" id="pp-leaflet" ${c.leaflet ? 'checked' : ''} onchange="ppRedraw()" style="width:18px;height:18px;"> Inside Leaflet</label>
+      <div style="font-size:11.5px;color:var(--text2);padding-bottom:7px;flex:1;min-width:200px;">A new job of this product starts with these plates; CTP checks them when processing it.</div>
+    </div>` : '';
+  const slotHtml = setupHtml + `<div id="pp-slots">${ppSlotsHtml(slots, canName, c)}</div>`
+    + (canName ? `<div style="display:flex;margin-top:8px;"><button class="btn btn-sm btn-primary" style="margin-left:auto;" onclick="saveProductPlateNames(${i})">Save</button></div>` : '');
   const setHtml = (bySize.size
     ? `<div style="font-size:12px;color:var(--text2);margin-bottom:4px;">Made at the CTP Station:</div>` + [...bySize.entries()].map(([sz, list]) => `<div style="margin-bottom:6px;"><span style="font-size:12px;color:var(--text2);font-weight:700;">${esc(sz)}:</span> ${list.map(pl => chip(pl.color_name, `Made ${fmtDMY(pl.made_at)}${pl.made_job_id ? ' on E-' + pl.made_job_id : ''} by ${pl.made_by || ''}`)).join('')}</div>`).join('') + '<div style="height:8px;"></div>'
     : '') + slotHtml;
@@ -36522,6 +36521,35 @@ async function openProductPlates(i) {
       <thead><tr>${th('When')}${th('Job')}${th('Plate')}${th('Size')}${th('What')}${th('Reason')}${th('By')}</tr></thead>
       <tbody>${d.events.map(e => `<tr>${td(esc(fmtDMYT12(e.created_at)))}${td(e.job_id ? 'E-' + e.job_id : dash)}${td('<b>' + esc(e.color_name || '') + '</b>')}${td(esc(e.size_name || ''))}${td(act(e.action))}${td(esc(PLATE_REASON_TXT[e.reason] || e.reason || '') || dash)}${td(esc(e.by_name || ''))}</tr>`).join('')}</tbody>
     </table></div>` : ''}`;
+}
+// The plate cards: the letter (C, M, Y, K, Spot 1 ..., Leaflet) and under it the colour it prints.
+function ppSlotsHtml(slots, canName, c) {
+  if (!slots.length) return `<div style="color:var(--text3);">${canName ? 'Type its No. of Colors / Plates above - its plates show here.' : 'No. of Colors / Plates is not set yet.'}</div>`;
+  const slotBg = { C: '#00aeef', M: '#ec008c', Y: '#ffe600', K: '#231f20' };
+  return `<div style="display:flex;flex-wrap:wrap;gap:10px;">${slots.map(x => `
+      <div class="pp-card" style="width:120px;border:1px solid var(--border);border-radius:10px;padding:8px;background:#fff;text-align:center;">
+        ${canName && !/^Leaflet/.test(x.slot)
+          ? `<select class="pp-slot" onchange="ppSlotChanged(this)" title="Which plate this is - edit it" style="width:100%;font-size:17px;font-weight:900;padding:5px 2px;border-radius:7px;border:none;cursor:pointer;text-align:center;background:${slotBg[x.slot] || '#e5e7eb'};color:${x.slot === 'Y' || !slotBg[x.slot] ? '#111' : '#fff'};">${PLATE_SLOT_CHOICES.map(o => `<option value="${esc(o)}" ${o === x.slot ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`
+          : `<div class="pp-slot" data-slot="${esc(x.slot)}" style="font-size:18px;font-weight:900;padding:6px 0;border-radius:7px;background:${slotBg[x.slot] || '#e5e7eb'};color:${x.slot === 'Y' || !slotBg[x.slot] ? '#111' : '#fff'};">${esc(x.slot)}</div>`}
+        <input type="text" class="pp-name" value="${esc(x.name)}" placeholder="colour name" ${canName ? '' : 'disabled'} style="width:100%;margin-top:6px;padding:5px 6px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;text-align:center;box-sizing:border-box;">
+      </div>`).join('')}</div>
+      <div style="font-size:11.5px;color:var(--text2);margin-top:8px;">${slots.length} plates from its ${c.leaflet && !/\+/.test(c.colors) ? esc(c.colors) + ' plates + inside leaflet' : 'No. of Colors ' + esc(c.colors)}. Under each plate, the colour it prints.</div>`;
+}
+// No. of Colors / Plates or Inside Leaflet typed: the cards again, the names typed so far kept.
+function ppRedraw() {
+  const box = document.getElementById('pp-slots'); if (!box) return;
+  const count = String((document.getElementById('pp-count') || {}).value || '').trim();
+  const leaflet = !!(document.getElementById('pp-leaflet') || {}).checked;
+  const typed = {}, order = [];
+  for (const card of document.querySelectorAll('.pp-card')) {
+    const s = card.querySelector('.pp-slot');
+    const slot = s ? (s.tagName === 'SELECT' ? s.value : s.dataset.slot) : '';
+    if (!slot) continue;
+    typed[slot] = String((card.querySelector('.pp-name') || {}).value || '');
+    order.push(slot);
+  }
+  typed.__slots = order.filter(x => !/^Leaflet/.test(x));   // kept while the number of plates stays the same
+  box.innerHTML = ppSlotsHtml(plateSlotsOf(count, leaflet, typed), true, { colors: count, leaflet });
 }
 // A plate's letter changed (owner, 2026-11-24): its colour and, when the name was the usual one, the new usual name.
 function ppSlotChanged(sel) {
@@ -36545,13 +36573,17 @@ async function saveProductPlateNames(i) {
     colors[slot] = String((card.querySelector('.pp-name') || {}).value || '').trim();
   }
   colors.__slots = slots.filter(x => !/^Leaflet/.test(x));
+  // The product's plates themselves (owner, 2026-11-24): No. of Colors / Plates and Inside Leaflet.
+  const countEl = document.getElementById('pp-count'), leafEl = document.getElementById('pp-leaflet');
+  if (leafEl) colors.__leaflet = !!leafEl.checked;
+  const count = countEl ? String(countEl.value || '').trim() : undefined;
   showSaving(true);
   try {
-    if (typeof mode !== 'undefined' && mode === 'station' && stationOperator) await api('POST', `/api/station/products/${encodeURIComponent(g.key)}/plate-colors`, { name: g.name, colors, pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '' });
-    else await api('PUT', `/api/products/${encodeURIComponent(g.key)}/plate-colors`, { name: g.name, colors });
+    if (typeof mode !== 'undefined' && mode === 'station' && stationOperator) await api('POST', `/api/station/products/${encodeURIComponent(g.key)}/plate-colors`, { name: g.name, colors, count, pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '' });
+    else await api('PUT', `/api/products/${encodeURIComponent(g.key)}/plate-colors`, { name: g.name, colors, count });
     await loadProductsMaster();
     _productPlatesCache.delete(g.key);
-    notify('Plate names saved');
+    notify('Plates saved - a new job of this product starts with them');
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -45131,6 +45163,9 @@ function stationUpdateHtml() {
       if (f.type === 'shipper') return '';   // drawn together below (shipperHtml)
       const cur = passValue(f, passIdx);
       const inputId = `sf-${f.key}-p${passIdx}`;
+      // Filled from the product's plates (owner, 2026-11-24): CTP checks it - saving it here takes the mark off.
+      const fromProduct = passIdx === 0 && !!(j.particulars && j.particulars[f.key] && j.particulars[f.key].from_product);
+      const fromTag = fromProduct ? ' <span title="Filled from the product\'s plates - check it, then save" style="display:inline-block;margin-left:6px;padding:0 7px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:10.5px;font-weight:800;vertical-align:middle;">from the product · check</span>' : '';
       // Checkbox fields (e.g. Shade Card at CTP): render a big touchable
       // checkbox instead of the numeric input. Stored as 'Yes' / '' in
       // the same quantity slot so downstream code and the Job Card can
@@ -45143,7 +45178,7 @@ function stationUpdateHtml() {
         <div class="station-field station-field--check">
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:600;">
             <input type="checkbox" id="${inputId}" data-key="${esc(f.key)}" data-pass="${passIdx}" data-check="1" ${checked} style="width:22px;height:22px;">
-            <span>${esc(f.label)}</span>
+            <span>${esc(f.label)}${fromTag}</span>
           </label>
         </div>`;
       }
@@ -45153,7 +45188,7 @@ function stationUpdateHtml() {
       const shownVal = draftVal !== undefined ? draftVal : cur;
       return `
         <div class="station-field">
-          <label>${esc(f.label)}</label>
+          <label>${esc(f.label)}${fromTag}</label>
           <input type="text" ${isTouch ? tabletAttrs : laptopAttrs} class="numpad-target" id="${inputId}"
                  data-key="${esc(f.key)}" data-pass="${passIdx}"
                  value="${esc(shownVal)}" placeholder="0">
