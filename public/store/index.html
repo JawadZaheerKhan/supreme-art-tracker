@@ -914,6 +914,7 @@ td>.reorder-flag{margin-left:0;flex-direction:column;align-items:flex-start;gap:
     <div class="form-group"><label class="form-label">SKU / Part No.</label><input id="f-part-sku" placeholder="e.g. BRG-6204"></div>
     <div class="form-group"><label class="form-label">Part Name *</label><input id="f-part-name" placeholder="e.g. Bearing 6204"></div>
     <div class="form-group"><label class="form-label">Category *</label><select id="f-part-cat"></select></div>
+    <div class="form-group" id="g-part-size" style="display:none"><label class="form-label">Size</label><input id="f-part-size" placeholder="e.g. 18x12x10 / 785 x 690"></div>
     <div class="form-group machinery-only" id="g-part-machine">
       <label class="form-label">Machine / Equipment <span style="color:#aaa;font-weight:400;text-transform:none">(select one or more)</span></label>
       <div class="multi-box" id="f-part-machine"></div>
@@ -1238,6 +1239,7 @@ td>.reorder-flag{margin-left:0;flex-direction:column;align-items:flex-start;gap:
     <div class="form-group"><label class="form-label">Unit of Measure</label>
       <select id="f-edit-unit"><option>pcs</option><option>kg</option><option>liters</option><option>meters</option><option>rolls</option><option>boxes</option><option>sets</option><option>pairs</option></select>
     </div>
+    <div class="form-group" id="g-edit-size" style="display:none"><label class="form-label">Size</label><input id="f-edit-size" placeholder="e.g. 18x12x10 / 785 x 690"></div>
     <div class="form-group consumables-only" id="g-edit-rack"><label class="form-label">Rack No.</label><input id="f-edit-rack" placeholder="e.g. R-12 / A3"></div>
     <div class="two-col">
       <div class="form-group"><label class="form-label">Qty on Hand</label><input id="f-edit-qty" type="number" min="0" step="any"></div>
@@ -1670,7 +1672,11 @@ function openModal(id){
 function closeModal(id){document.getElementById('modal-'+id).classList.remove('open')}
 document.querySelectorAll('.modal-overlay').forEach(m=>{m.addEventListener('click',e=>{if(e.target===m)m.classList.remove('open')})});
 
-function populateCatSelect(id){
+// Carton Shippers and CTCP plates have a Size (shown under the name in the Stock In / Out lists).
+function sizeCat(c){return /carton|ctcp|plates/i.test(String(c||''));}
+function sizeFieldSync(k){const c=document.getElementById('f-'+k+'-cat'),g=document.getElementById('g-'+k+'-size');if(c&&g)g.style.display=sizeCat(c.value)?'':'none';}
+document.addEventListener('change',e=>{if(e.target&&e.target.id==='f-part-cat')sizeFieldSync('part');if(e.target&&e.target.id==='f-edit-cat')sizeFieldSync('edit');});
+function populateCatSelect(id){setTimeout(()=>{sizeFieldSync('part');sizeFieldSync('edit');},0);
   const el=document.getElementById(id);
   const prev=el.value;
   el.innerHTML=state.categories.map(c=>`<option>${c}</option>`).join('')+'<option value="__add__" style="font-style:italic;color:#8C2326">+ Add new category…</option>';
@@ -2421,12 +2427,23 @@ function getPartName(id){
 // Supplier and brand of a part, for the reports of Inks & Consumables (none for the Parts Store).
 function getPartPlain(id){
   const p=partOf(id);
-  return p?skuPrefix(p)+p.name+(p.deleted?' (deleted)':''):'Unknown';
+  return p?skuPrefix(p)+p.name+(p.size?' (Size: '+p.size+')':'')+(p.deleted?' (deleted)':''):'Unknown';
 }
 function inkSB(id){
   if(!isInks())return [];
   const p=partOf(id);
   return [(p&&p.supplier)||'—',(p&&p.brand)||'—'];
+}
+function inkSBTx(t){
+  const sb=inkSB(t.partId);
+  const p=partOf(t.partId);
+  if(sb.length&&t.type==='in'&&p&&p.cartonTypeId&&userText(t.ref))sb[0]=userText(t.ref);
+  return sb;
+}
+function inkSBCellsTx(t){
+  if(!isInks())return '';
+  const sb=inkSBTx(t);
+  return '<td style="font-weight:700">'+_escHtml(sb[0])+'</td><td>'+_escHtml(sb[1])+'</td>';
 }
 function inkSBCells(id){
   if(!isInks())return '';
@@ -2444,7 +2461,7 @@ function getPartLabelFull(id){
 function getPartLabel(id){
   const p=partOf(id);
   if(!p)return 'Unknown';
-  return (p.sku?`<span class="part-sku">[${p.sku}]</span>`:'')+p.name+(p.deleted?'<span class="del-tag">deleted</span>':'');
+  return (p.sku?`<span class="part-sku">[${p.sku}]</span>`:'')+p.name+(p.deleted?'<span class="del-tag">deleted</span>':'')+(p.size?'<div style="font-size:11px;color:#6b7280;font-weight:500">Size: '+_escHtml(p.size)+'</div>':'');
 }
 function getPartCat(id){const p=partOf(id);return p?p.category:''}
 function getPartUnit(id){const p=partOf(id);return p?p.unit:''}
@@ -2523,9 +2540,9 @@ function rowCells(sec,item,i){
     return[...head,...mid,item.unit,fmtQty(item.qty),item.minQty,s.label];
   }
   const bal=(window._balCache=window._balCache||computeBalances());
-  if(sec==='stockin')  return[i+1,fmtDate(item.date)+(fmtTxnTime(item)?' '+fmtTxnTime(item):''),item.challanNo||'—',getPartPlain(item.partId),...inkSB(item.partId),getPartCat(item.partId),'+'+fmtQty(item.qty)+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),...(isInks()?[]:[userText(item.ref)||'—']),isInks()?txnBatchCode(item):(userText(item.notes)||'—'),...(isInks()?[inkNotesText(item)]:[]),item.createdBy||'—'];
-  if(sec==='stockout') return[i+1,fmtDate(item.date)+(fmtTxnTime(item)?' '+fmtTxnTime(item):''),item.challanNo||'—',getPartPlain(item.partId),...inkSB(item.partId),getPartCat(item.partId),'-'+fmtQty(item.qty)+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),userText(item.issuedTo)||'—',isInks()?txnBatchCode(item):(userText(item.purpose)||'—'),...(isInks()?[inkNotesText(item)]:[]),item.createdBy||'—'];
-  if(sec==='issuance') return[i+1,fmtDate(item.date),item.challanNo||'—',getPartPlain(item.partId),...inkSB(item.partId),item.type==='in'?'Stock In':'Issue',(item.type==='in'?'+':'-')+fmtQty(item.qty)+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),userText(item.type==='in'?item.ref:item.issuedTo)||'—',isInks()?txnBatchCode(item):(userText(item.type==='in'?item.notes:item.purpose)||'—'),...(isInks()?[inkNotesText(item)]:[])];
+  if(sec==='stockin')  return[i+1,fmtDate(item.date)+(fmtTxnTime(item)?' '+fmtTxnTime(item):''),item.challanNo||'—',getPartPlain(item.partId),...inkSBTx(item),getPartCat(item.partId),'+'+fmtQty(item.qty)+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),...(isInks()?[]:[userText(item.ref)||'—']),isInks()?txnBatchCode(item):(userText(item.notes)||'—'),...(isInks()?[inkNotesText(item)]:[]),item.createdBy||'—'];
+  if(sec==='stockout') return[i+1,fmtDate(item.date)+(fmtTxnTime(item)?' '+fmtTxnTime(item):''),item.challanNo||'—',getPartPlain(item.partId),...inkSBTx(item),getPartCat(item.partId),'-'+fmtQty(item.qty)+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),userText(item.issuedTo)||'—',isInks()?txnBatchCode(item):(userText(item.purpose)||'—'),...(isInks()?[inkNotesText(item)]:[]),item.createdBy||'—'];
+  if(sec==='issuance') return[i+1,fmtDate(item.date),item.challanNo||'—',getPartPlain(item.partId),...inkSBTx(item),item.type==='in'?'Stock In':'Issue',(item.type==='in'?'+':'-')+fmtQty(item.qty)+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),userText(item.type==='in'?item.ref:item.issuedTo)||'—',isInks()?txnBatchCode(item):(userText(item.type==='in'?item.notes:item.purpose)||'—'),...(isInks()?[inkNotesText(item)]:[])];
   return[];
 }
 
@@ -2912,7 +2929,7 @@ async function savePart(){
   const name=document.getElementById('f-part-name').value.trim();
   if(!name){await warnDialog('Part name required','Enter a name for this part.');return;}
   const qty=parseFloat(document.getElementById('f-part-qty').value)||0;
-  const fields=['f-part-sku','f-part-name','f-part-qty','f-part-min','f-part-desc','f-part-brand','f-part-supplier','f-part-rack'];
+  const fields=['f-part-sku','f-part-name','f-part-qty','f-part-min','f-part-desc','f-part-brand','f-part-supplier','f-part-rack','f-part-size'];
 
   async function mergeIntoExisting(existing,how){
     if(qty>0){
@@ -2966,9 +2983,12 @@ async function savePart(){
       unit:document.getElementById('f-part-unit').value,
       minQty:parseInt(document.getElementById('f-part-min').value)||0,
       desc:document.getElementById('f-part-desc').value.trim(),
+      size:sizeCat(document.getElementById('f-part-cat').value)?document.getElementById('f-part-size').value.trim():'',
+      openingQty:/carton/i.test(document.getElementById('f-part-cat').value)?qty:undefined,
       imageUrl:imageUrl
     });
     state.parts.push(newPart);
+    if(newPart.cartonTypeId){await loadAll();closeModal('addPart');fields.forEach(id=>document.getElementById(id).value='');resetImagePick('add');return;}
     if(qty>0){
       const txn=await apiFetch('/api/store/transactions','POST',{type:'in',partId:newPart.id,qty,date:today(),ref:'Opening Stock',notes:'Opening balance'});
       newPart.qty+=qty;
@@ -3198,6 +3218,7 @@ function openEditPart(id){if(storeSpecial('edit',id))return;
   document.getElementById('f-edit-qty').value=p.qty;
   document.getElementById('f-edit-min').value=p.minQty;
   document.getElementById('f-edit-desc').value=p.desc||'';
+  document.getElementById('f-edit-size').value=p.size||'';sizeFieldSync('edit');
   // Reset any prior pick, then preload the saved image (if the part has one).
   resetImagePick('edit');
   document.getElementById('f-edit-img-url').value = p.imageUrl || '';
@@ -3242,13 +3263,14 @@ async function updatePart(){
       qty,
       minQty:parseInt(document.getElementById('f-edit-min').value)||0,
       desc:document.getElementById('f-edit-desc').value.trim(),
+      size:sizeCat(document.getElementById('f-edit-cat').value)?document.getElementById('f-edit-size').value.trim():'',
       imageUrl:finalImageUrl
     };
     const saved=await apiFetch('/api/store/parts','PUT',payload);
     const p=state.parts.find(x=>x.id===id);
     if(p){
       p.sku=sku||null;p.name=name;p.category=payload.category;p.machine=payload.machine;
-      p.unit=payload.unit;p.minQty=payload.minQty;p.desc=payload.desc;
+      p.unit=payload.unit;p.minQty=payload.minQty;p.desc=payload.desc;p.size=payload.size;
       p.imageUrl=finalImageUrl;
       if(qty!==undefined)p.qty=qty;
     }
@@ -3458,8 +3480,8 @@ function fmtTxnTime(t){
 // as notes, so the Notes, Purpose and Issued To columns only carry what a person wrote.
 const SYSTEM_TEXT=/^(Opening balance adjustment|Opening balance$|Qty corrected via Edit|Qty added \(matched by|Adjustment$|Qty Edit \(|Opening Stock$|Added to existing$)/i;
 // Notes of an entry for the Inks & Consumables tables (Job Tracker, 2026-11-24): its purpose and notes together.
-function inkNotesText(t){return [t.purpose,t.notes].map(userText).filter(Boolean).join(' · ')||'—';}
-function inkNotesHtml(t){const v=inkNotesText(t);return v==='—'?'<span style="color:#bbb">—</span>':_escHtml(v);}
+function inkNotesText(t){return [t.notes,t.purpose].map(userText).filter(Boolean).join(' · ')||'—';}
+function inkNotesHtml(t){const n=userText(t.notes),f=userText(t.purpose);if(!n&&!f)return '<span style="color:#bbb">—</span>';return (n?_escHtml(n):'')+(f?'<div style="color:#1e3a8a;font-weight:600">'+_escHtml(f)+'</div>':'');}
 // Carton Shippers and CTCP Plates have their own windows in the Job Tracker (the carton Issue / Stock In with its E-Job,
 // Manual Job, Other; the plate Use with its reasons): their buttons here open those (owner, 2026-11-24).
 function storeSpecialOf(partId){const p=(state.parts||[]).find(x=>x.id===partId);if(!p)return null;const c=String(p.category||'').toLowerCase();if(p.cartonTypeId)return'carton';if(c.includes('ctcp')||c.includes('plates'))return'plate';return null;}
@@ -4768,7 +4790,7 @@ function renderStockIn(){
     <td style="color:#bbb;font-size:12px">${i+1}</td>
     <td style="white-space:nowrap">${whenHtml(t)}</td>
     <td style="font-family:monospace;color:#555">${t.challanNo||'—'}</td>
-    <td style="font-weight:600">${getPartLabel(t.partId)}</td>${inkSBCells(t.partId)}
+    <td style="font-weight:600">${getPartLabel(t.partId)}</td>${inkSBCellsTx(t)}
     <td>${getPartCat(t.partId)}</td>
     <td class="qty-positive">+${fmtQty(t.qty)} ${getPartUnit(t.partId)}</td>
     <td style="font-weight:600">${fmtQty(bal[t.id])??'—'} ${getPartUnit(t.partId)}</td>
@@ -4799,7 +4821,7 @@ function renderStockOut(){
     <td style="color:#bbb;font-size:12px">${i+1}</td>
     <td style="white-space:nowrap">${whenHtml(t)}</td>
     <td style="font-family:monospace;color:#555">${t.challanNo||'—'}</td>
-    <td style="font-weight:600">${getPartLabel(t.partId)}</td>${inkSBCells(t.partId)}
+    <td style="font-weight:600">${getPartLabel(t.partId)}</td>${inkSBCellsTx(t)}
     <td>${getPartCat(t.partId)}</td>
     <td class="qty-negative">−${fmtQty(t.qty)} ${getPartUnit(t.partId)}</td>
     <td style="font-weight:600">${fmtQty(bal[t.id])??'—'} ${getPartUnit(t.partId)}</td>
@@ -4835,7 +4857,7 @@ function renderIssuance(){
     <td style="color:#bbb;font-size:12px">${i+1}</td>
     <td style="white-space:nowrap">${whenHtml(t)}</td>
     <td style="font-family:monospace;color:#555">${t.challanNo||'—'}</td>
-    <td style="font-weight:600">${getPartLabel(t.partId)}</td>${inkSBCells(t.partId)}
+    <td style="font-weight:600">${getPartLabel(t.partId)}</td>${inkSBCellsTx(t)}
     <td><span class="badge badge-${t.type}">${t.type==='in'?'Stock In':'Issue'}</span></td>
     <td class="${t.type==='in'?'qty-positive':'qty-negative'}">${t.type==='in'?'+':'−'}${fmtQty(t.qty)} ${getPartUnit(t.partId)}</td>
     <td style="font-weight:600">${fmtQty(bal[t.id])??'—'} ${getPartUnit(t.partId)}</td>

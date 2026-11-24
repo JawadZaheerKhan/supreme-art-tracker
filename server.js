@@ -8558,8 +8558,9 @@ async function plateStockOut(sql, req, sizeId, { jobId, plateId, reason, notes }
   if (lk && lk.store_part_id) {
     // Never stops the CTP's work: if the Store item is gone, the plate is still recorded here.
     try {
-      storeIds = await storeApi.plateMove(sql, { partId: lk.store_part_id, change: -1, issuedTo: plateWho(req), by: plateWho(req), notes: notes || '',
-        purpose: `CTP - plate made${jobId ? ' · Job E-' + jobId : ''}` });
+      // Notes: the reason (plate made at CTP); Issued To: the job and the plate.
+      storeIds = await storeApi.plateMove(sql, { partId: lk.store_part_id, change: -1, by: plateWho(req), purpose: '',
+        notes: 'Plate made (CTP)', issuedTo: [jobId ? 'E-' + jobId : '', notes || ''].filter(Boolean).join(' · ') });
     } catch (e) {
       console.error('plate made: Store item not moved -', e.message);
       await logAudit(sql, req, { action: 'plate_stock.store_skip', entityType: 'plate_size', entityId: sizeId, summary: `Plate made at CTP${jobId ? ' (Job E-' + jobId + ')' : ''} was NOT taken out of the Store: ${e.message}` });
@@ -8614,7 +8615,7 @@ async function plateSizesList(sql) {
      WHERE s.store_part_id = p.id AND s.deleted_at IS NULL
        AND (s.name IS DISTINCT FROM p.name OR s.brand IS DISTINCT FROM NULLIF(p.brand, '') OR s.supplier IS DISTINCT FROM NULLIF(p.supplier, ''))`;
   const rows = await sql`
-    SELECT s.*, p.qty AS store_qty, p.sku AS store_sku, p.name AS store_name, p.brand AS store_brand
+    SELECT s.*, p.qty AS store_qty, p.sku AS store_sku, p.name AS store_name, p.brand AS store_brand, p.size AS store_size
       FROM plate_sizes s LEFT JOIN store_parts p ON p.id = s.store_part_id AND p.deleted_at IS NULL
      WHERE s.deleted_at IS NULL ORDER BY s.name`;
   const all = rows.map(r => r.store_part_id && r.store_name != null ? { ...r, balance: Math.round(Number(r.store_qty) * 1000) / 1000, linked: true } : { ...r, linked: false });
@@ -8759,12 +8760,14 @@ app.post('/api/plates/stock', plateStockGate, plateH.stock = async (req, res) =>
       if (!sp) return res.status(400).json({ error: `"${s.name}" is not in the Store any more (it was deleted - it is in the Store's Trash). Restore it there to use it again.` });
     }
     if (s.store_part_id) {
-      const jobTxt = jobId ? `Job E-${jobId}` : jobNo ? `Job ${jobNo}` : '';
-      const summary = [`CTP - ${reasons[reason]}`, jobTxt, jobName && !jobId ? jobName : '', plateNames ? 'plates: ' + plateNames : '', damagedBy || ''].filter(Boolean).join(' · ');
+      // In the Store (owner, 2026-11-24): the reason (New job / Old job / Damaged / Adjustment) -> Notes; what it is
+      // for - the job, the plates, who damaged it - -> Issued To. Who did it is the Store's "Done by".
+      const jobTxt = [jobId ? `E-${jobId}` : jobNo ? `Job ${jobNo}` : '', jobName || ''].filter(Boolean).join(' ');
+      const forWhat = [jobTxt, plateNames ? 'plates: ' + plateNames : '', damagedBy ? 'damaged by: ' + damagedBy : ''].filter(Boolean).join(' · ');
       try {
         storeIds = await storeApi.plateMove(sql, { partId: s.store_part_id, change, date: entry.date || null, by: plateWho(req),
-          issuedTo: dir === 'out' ? plateWho(req) : '', purpose: dir === 'out' ? summary : '', ref: dir === 'in' ? (s.supplier || 'CTP Station') : '',
-          challanNo: challan || '', notes: [dir === 'in' ? summary : '', notes || ''].filter(Boolean).join(' · ') });
+          issuedTo: dir === 'out' ? forWhat : '', purpose: '', ref: dir === 'in' ? (s.supplier || '') : '',
+          challanNo: challan || '', notes: [reasons[reason], notes || ''].filter(Boolean).join(' · ') });
       } catch (e) { return res.status(400).json({ error: e.message }); }
     }
     try {
@@ -9751,43 +9754,63 @@ async function cartonStoreSync(sql, typeIds) {
   await storeApi.ensureStore();
   const ids = Array.isArray(typeIds) && typeIds.length ? typeIds.map(Number) : null;
   await sql`INSERT INTO store_categories (name, module) VALUES ('Carton Shippers', 'consumables') ON CONFLICT (module, name) DO NOTHING`;
+  // Items: the name, the Size (its own field, shown under the name), Reorder level = the Store's Min Qty, the stock.
   await sql`
-    INSERT INTO store_parts (name, category, module, unit, qty, min_qty, description, deleted_at, carton_type_id)
-    SELECT c.name, 'Carton Shippers', 'consumables', 'pcs', c.current_balance, COALESCE(c.reorder_level, 0),
-           concat_ws(' · ', 'Size: ' || c.size, 'Ply: ' || c.ply, CASE WHEN c.hidden THEN 'Hidden in the carton pickers' END),
-           c.deleted_at, c.id
+    INSERT INTO store_parts (name, category, module, unit, qty, min_qty, description, size, deleted_at, carton_type_id)
+    SELECT c.name, 'Carton Shippers', 'consumables', 'pcs', c.current_balance, COALESCE(c.reorder_level, 0), '', c.size, c.deleted_at, c.id
       FROM carton_types c
      WHERE (${ids}::int[] IS NULL OR c.id = ANY(${ids}))
        AND NOT EXISTS (SELECT 1 FROM store_parts p WHERE p.carton_type_id = c.id)`;
   await sql`
     UPDATE store_parts p SET name = c.name, category = 'Carton Shippers', module = 'consumables', unit = 'pcs', qty = c.current_balance,
-           min_qty = COALESCE(c.reorder_level, 0), deleted_at = c.deleted_at,
-           description = concat_ws(' · ', 'Size: ' || c.size, 'Ply: ' || c.ply, CASE WHEN c.hidden THEN 'Hidden in the carton pickers' END)
+           min_qty = COALESCE(c.reorder_level, 0), deleted_at = c.deleted_at, size = c.size, description = ''
       FROM carton_types c
      WHERE p.carton_type_id = c.id AND (${ids}::int[] IS NULL OR c.id = ANY(${ids}))`;
-  // Entries: one Store entry per carton entry (a deleted carton entry takes its Store entry with it).
+  // Entries: one Store entry per carton entry (a deleted carton entry takes its Store entry with it). Supplier -> the
+  // Supplier column; Issued To, Challan No. -> theirs; the carton notes -> Notes, and the "For" (E-Job / Manual Job /
+  // Other) beneath them.
   await sql`
     DELETE FROM store_tx x USING store_parts p
      WHERE x.part_id = p.id AND p.carton_type_id IS NOT NULL AND (${ids}::int[] IS NULL OR p.carton_type_id = ANY(${ids}))
        AND (x.carton_tx_id IS NULL OR NOT EXISTS (SELECT 1 FROM carton_transactions t WHERE t.id = x.carton_tx_id))`;
-  await sql`
+  const forText = `CASE t.reason WHEN 'e-job' THEN 'E-Job E-' || t.job_id || COALESCE(' ' || j.name, '')
+                                 WHEN 'manual-job' THEN 'Manual Job ' || COALESCE(t.manual_job, '')
+                                 WHEN 'other' THEN 'Other - ' || COALESCE(t.other_reason, '') ELSE '' END`;
+  await sql(`
+    UPDATE store_tx x SET ref = COALESCE(t.supplier, ''), notes = COALESCE(t.notes, ''), purpose = ${forText},
+           issued_to = COALESCE(t.issued_to, ''), challan_no = COALESCE(t.challan_no, '')
+      FROM carton_transactions t LEFT JOIN jobs j ON j.id = t.job_id
+     WHERE x.carton_tx_id = t.id AND ($1::int[] IS NULL OR t.type_id = ANY($1))`, [ids]);
+  await sql(`
     INSERT INTO store_tx (type, part_id, qty, date, ref, notes, issued_to, purpose, challan_no, created_by, created_at, carton_tx_id)
     SELECT CASE WHEN t.change > 0 THEN 'in' ELSE 'out' END, p.id, ABS(t.change)::double precision,
-           (t.created_at AT TIME ZONE 'Asia/Karachi')::date, COALESCE(t.supplier, ''),
-           concat_ws(' · ',
-             CASE WHEN t.supplier IS NOT NULL AND t.supplier <> '' THEN 'Supplier: ' || t.supplier END,
-             CASE t.reason WHEN 'e-job' THEN 'For: E-Job E-' || t.job_id || COALESCE(' ' || j.name, '')
-                           WHEN 'manual-job' THEN 'For: Manual Job ' || COALESCE(t.manual_job, '')
-                           WHEN 'other' THEN 'For: Other - ' || COALESCE(t.other_reason, '') END,
-             CASE WHEN t.source = 'station' THEN 'Taken by the Station (Pasting / QC)' END,
-             NULLIF(t.notes, '')),
-           COALESCE(t.issued_to, ''), '', COALESCE(t.challan_no, ''),
+           (t.created_at AT TIME ZONE 'Asia/Karachi')::date, COALESCE(t.supplier, ''), COALESCE(t.notes, ''),
+           COALESCE(t.issued_to, ''), ${forText}, COALESCE(t.challan_no, ''),
            COALESCE(t.actor_name, split_part(COALESCE(t.user_email, ''), '@', 1)), COALESCE(t.recorded_at, t.created_at), t.id
       FROM carton_transactions t
       JOIN store_parts p ON p.carton_type_id = t.type_id
       LEFT JOIN jobs j ON j.id = t.job_id
-     WHERE t.change <> 0 AND (${ids}::int[] IS NULL OR t.type_id = ANY(${ids}))
-       AND NOT EXISTS (SELECT 1 FROM store_tx x WHERE x.carton_tx_id = t.id)`;
+     WHERE t.change <> 0 AND ($1::int[] IS NULL OR t.type_id = ANY($1))
+       AND NOT EXISTS (SELECT 1 FROM store_tx x WHERE x.carton_tx_id = t.id)`, [ids]);
+}
+// A Carton Shipper added in the Store (owner, 2026-11-24): it is made as a carton type (so the Station and the carton
+// Issue know it), with its opening stock as a Stock In; the Store item follows.
+async function cartonCreateFromStore(req, { name, size, reorder, openingQty }) {
+  await dbReady;
+  const sql = getDb();
+  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'carton_btn_types')) return { status: 403, error: 'Adding a Carton Shipper needs the "+ Carton Type" row in the Access Register.' };
+  const b = readCartonTypeBody({ name, size, reorder_level: reorder || '' });
+  if (b.error) return { status: 400, error: b.error };
+  const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name}) AND deleted_at IS NULL`;
+  if (dup.length) return { status: 409, error: `A Carton Shipper named "${b.name}" already exists.` };
+  const [t] = await sql`INSERT INTO carton_types (name, size, ply, reorder_level, created_by) VALUES (${b.name}, ${b.size}, NULL, ${b.reorder}, ${req.user.email}) RETURNING *`;
+  await logAudit(sql, req, { action: 'carton.type_create', entityType: 'carton_type', entityId: t.id, summary: `Carton type added (from the Store): ${cartonTypeLabel(t)}` });
+  if (openingQty > 0) {
+    const r = await applyCartonChange(sql, { typeId: t.id, change: openingQty, kind: 'in', notes: 'Opening stock (added in the Store)', user: req.user });
+    if (r.error) return { status: r.status || 400, error: r.error };
+  }
+  await cartonStoreSync(sql, [t.id]);
+  return { typeId: t.id };
 }
 // Never stops a carton entry: if the Store could not follow, it is logged (and the next change, or the rebuild, fixes it).
 async function cartonStoreSyncSafe(sql, typeIds) {
@@ -17089,6 +17112,7 @@ const storeApi = require('./store-routes')(app, { getDb, dbReady, logAudit, user
   // Carton Shippers in the Store (owner, 2026-11-24): rebuilt after a Copy from ERP; a carton entry reversed from the Store
   // is a carton reversal.
   afterErpCopy: sql => cartonStoreSync(sql, null),
+  cartonCreate: (req, o) => cartonCreateFromStore(req, o),
   cartonReverse: async (req, cartonTxId) => {
     const r2 = Object.create(req); r2.params = { id: String(cartonTxId) }; r2.body = {};
     const out = { code: 200, body: null };

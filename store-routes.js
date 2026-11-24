@@ -9,7 +9,7 @@
 'use strict';
 
 module.exports = function registerStoreRoutes(app, deps) {
-  const { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon, afterErpCopy, cartonReverse } = deps;
+  const { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon, afterErpCopy, cartonReverse, cartonCreate } = deps;
 
   // The ERP grant -> its Access Register row here.
   const GRANT_ROW = {
@@ -110,6 +110,8 @@ module.exports = function registerStoreRoutes(app, deps) {
       await sql`CREATE INDEX IF NOT EXISTS store_images_source_idx ON store_images (source_url)`;
       // Carton Shippers (owner, 2026-11-24): the Store item of a carton type, the Store entry of a carton entry.
       await sql`ALTER TABLE store_parts ADD COLUMN IF NOT EXISTS carton_type_id INTEGER`;
+      // Size of a Carton Shipper / CTCP plate (shown under its name, owner 2026-11-24).
+      await sql`ALTER TABLE store_parts ADD COLUMN IF NOT EXISTS size TEXT`;
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_parts_carton_type_uq ON store_parts (carton_type_id) WHERE carton_type_id IS NOT NULL`;
       await sql`ALTER TABLE store_tx ADD COLUMN IF NOT EXISTS carton_tx_id INTEGER`;
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_tx_carton_tx_uq ON store_tx (carton_tx_id) WHERE carton_tx_id IS NOT NULL`;
@@ -190,7 +192,7 @@ module.exports = function registerStoreRoutes(app, deps) {
 
   // (Plain text: this database library can't put one query piece inside another.)
   const PART_COLS = `id, sku, name, category, machine, brand, supplier, rack_no AS "rackNo", module, unit, qty,
-                     min_qty AS "minQty", description AS "desc", image_url AS "imageUrl", carton_type_id AS "cartonTypeId"`;
+                     min_qty AS "minQty", description AS "desc", image_url AS "imageUrl", carton_type_id AS "cartonTypeId", size`;
   const TX_COLS = `t.id, t.type, t.part_id AS "partId", t.qty, t.date::text AS date, t.ref, t.notes, t.issued_to AS "issuedTo",
                    t.purpose, t.challan_no AS "challanNo", t.batch, t.po_no AS "poNo", t.invoice_no AS "invoiceNo",
                    t.batch_label AS "batchLabel", t.order_id AS "orderId", t.created_by AS "createdBy", t.created_at AS "createdAt"`;
@@ -248,13 +250,20 @@ module.exports = function registerStoreRoutes(app, deps) {
                                   FROM store_parts WHERE LOWER(sku) = LOWER(${sku}) AND deleted_at IS NULL LIMIT 1`;
         if (dup) return res.status(409).json({ error: `SKU "${dup.sku}" already exists`, existing: dup });
       }
+      const size = String(b.size || '').trim().slice(0, 60) || null;
+      if (mod === 'consumables' && /carton/i.test(category) && cartonCreate) {
+        const r = await cartonCreate(req, { name, size, reorder: Number(b.minQty || 0) || null, openingQty: Math.max(0, Math.round(Number(b.openingQty) || 0)) });
+        if (r.error) return res.status(r.status || 400).json({ error: r.error });
+        const [row] = await sql(`SELECT ${PART_COLS} FROM store_parts WHERE carton_type_id = $1`, [r.typeId]);
+        return res.json(row || { ok: true });
+      }
       try {
         const [row] = await sql(`
-          INSERT INTO store_parts (sku, name, category, machine, brand, supplier, rack_no, module, unit, qty, min_qty, description, image_url)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11, $12)
+          INSERT INTO store_parts (sku, name, category, machine, brand, supplier, rack_no, module, unit, qty, min_qty, description, image_url, size)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11, $12, $13)
           RETURNING ${PART_COLS}`,
           [sku, name, category, String(b.machine || ''), String(b.brand || ''), String(b.supplier || ''), String(b.rackNo || ''), mod,
-           String(b.unit || 'pcs'), Number(b.minQty || 0) || 0, String(b.desc || ''), b.imageUrl || null]);
+           String(b.unit || 'pcs'), Number(b.minQty || 0) || 0, String(b.desc || ''), b.imageUrl || null, size]);
         await log(sql, req, `store.${mod}.part.add`, `added store part "${sku ? `[${sku}] ` : ''}${name}" (${mod})`, row.id);
         res.json(row);
       } catch (e) {
@@ -278,13 +287,14 @@ module.exports = function registerStoreRoutes(app, deps) {
       const qtyVal = b.qty === undefined || b.qty === null || b.qty === '' ? null : roundQty(Math.max(0, Number(b.qty) || 0));
       const [before] = await sql`SELECT id, name, sku, unit, module, qty, carton_type_id FROM store_parts WHERE id = ${id}`;
       if (!before) return res.status(404).json({ error: 'Part not found' });
-      if (before.carton_type_id) return res.status(409).json({ error: `"${before.name}" is a Carton Shipper - change it with Edit on its row (name, size, ply, reorder level).` });
+      if (before.carton_type_id) return res.status(409).json({ error: `"${before.name}" is a Carton Shipper - change it with Edit on its row (name, size, reorder level).` });
       try {
         await sql`
           UPDATE store_parts SET sku = ${sku}, name = ${name}, category = ${String(b.category || '')}, machine = ${String(b.machine || '')},
                  brand = ${String(b.brand || '')}, supplier = ${String(b.supplier || '')}, rack_no = ${String(b.rackNo || '')},
                  unit = ${String(b.unit || 'pcs')}, min_qty = ${Number(b.minQty || 0) || 0}, description = ${String(b.desc || '')},
                  qty = COALESCE(${qtyVal}::double precision, qty),
+                 size = CASE WHEN ${Object.prototype.hasOwnProperty.call(b, 'size')} THEN ${String(b.size || '').trim().slice(0, 60) || null} ELSE size END,
                  image_url = CASE WHEN ${imageProvided} THEN ${imageProvided ? (b.imageUrl || null) : null} ELSE image_url END
            WHERE id = ${id}`;
       } catch (e) {
