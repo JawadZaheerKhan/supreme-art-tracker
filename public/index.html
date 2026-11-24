@@ -35811,9 +35811,12 @@ async function openPlateStore(tab) {
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
       <button class="btn ${plateStoreTab === 'store' ? 'btn-primary' : ''}" onclick="openPlateStore('store')">Plate Store</button>
       <button class="btn ${plateStoreTab === 'register' ? 'btn-primary' : ''}" onclick="openPlateStore('register')">Register</button>
+      <button class="btn ${plateStoreTab === 'process' ? 'btn-primary' : ''}" onclick="openPlateStore('process')">&#9203; In Process</button>
     </div>
     <div id="plate-store-body" style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:12px;">Loading…</div>`;
-  if (plateStoreTab === 'store') await renderPlateStore(); else await loadPlateRegister();
+  if (plateStoreTab === 'store') await renderPlateStore();
+  else if (plateStoreTab === 'process') await loadPlatesProcessApp();
+  else await loadPlateRegister();
 }
 // ── CTP Station: Plates in process + Products (owner, 2026-11-24) ─────────────
 // In process: the jobs whose plates are out on the floor (Printing .. Pasting). A job that gets Ready turns green and
@@ -35821,11 +35824,12 @@ async function openPlateStore(tab) {
 // started blink (the older ones were picked up long ago).
 const PLATE_PICKUP_FROM = Date.parse('2026-11-24T00:00:00+05:00');
 let stationPickups = null, _stationProcessTimer = null, stationProcessQ = '', stationCtpProductsQ = '';
+// A job forwarded from Printing (owner, 2026-11-24): its plates are free - when Printing was done.
 function plateJobReadyAt(j) {
   const st = (j && j.stages) || {};
-  if (!((j.stage_index || 0) >= 6 || isDone(j))) return null;
-  const s5 = st['5'] || st[5];
-  const at = s5 && s5.at ? Date.parse(s5.at) : null;
+  if (!((j.stage_index || 0) >= 2 || isDone(j))) return null;
+  const s1 = st['1'] || st[1];
+  const at = s1 && s1.at ? Date.parse(s1.at) : null;
   return Number.isFinite(at) ? at : null;
 }
 function plateJobSlots(j) {
@@ -35841,7 +35845,8 @@ function stationPlatesProcessLists() {
   const match = j => !q || stationJobMatches(j, q);
   const ready = (jobs || []).filter(j => j && !j.deleted_at && !picked.has(j.id) && (plateJobReadyAt(j) || 0) >= PLATE_PICKUP_FROM && match(j))
     .sort((a, b) => (plateJobReadyAt(b) || 0) - (plateJobReadyAt(a) || 0));
-  const inProc = (jobs || []).filter(j => j && !j.deleted_at && !isDone(j) && !isBlocked(j) && (j.stage_index || 0) >= 1 && (j.stage_index || 0) <= 5 && match(j))
+  // In process = processed to Printing (the plates are on the press).
+  const inProc = (jobs || []).filter(j => j && !j.deleted_at && !isDone(j) && !isBlocked(j) && (j.stage_index || 0) === 1 && match(j))
     .sort((a, b) => b.id - a.id);
   return { ready, inProc };
 }
@@ -35859,26 +35864,45 @@ async function stationLoadPickups() {
   try { stationPickups = await api('GET', '/api/station/plates/pickups'); } catch (e) { stationPickups = stationPickups || []; }
   if (stationView === 'plates-process') stationRender();
 }
-function stationPlatesProcessHtml() {
+function stationPlatesProcessHtml() { return stationPlatesHead('', null) + platesProcessBodyHtml(); }
+// Re-draw In Process wherever it is open: the CTP station, or the app's Plate Store tab.
+function plateCanPickup() { return (typeof mode !== 'undefined' && mode === 'station' && !!stationOperator) || isSuperAdmin() || hasPerm('inv_btn_plate_store', 'yes'); }
+function platesProcessRerender() { if (typeof mode !== 'undefined' && mode === 'station') stationRender(); else renderPlatesProcessApp(); }
+function platesProcessBodyHtml() {
   const { ready, inProc } = stationPlatesProcessLists();
   const chips = j => plateJobSlots(j).map(x => `<span style="display:inline-block;padding:1px 7px;margin:1px;border-radius:999px;background:#e0e7ff;color:#1e3a8a;font-size:11px;font-weight:800;">${esc(plateSlotText(x))}</span>`).join('');
   const card = (j, isReady) => `<div class="${isReady ? 'plate-ready-blink' : ''}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin:8px 0;border:1px solid ${isReady ? '#16a34a' : 'var(--border)'};border-left:5px solid ${isReady ? '#16a34a' : '#93c5fd'};border-radius:10px;background:#fff;">
       <div style="font-weight:900;font-size:17px;color:#1e3a8a;min-width:70px;">#${j.id}</div>
       <div style="flex:1;min-width:0;">
         <div style="font-weight:800;font-size:15px;">${esc(j.name || '')}</div>
-        <div style="font-size:12px;color:var(--text2);">${esc(j.client || '')}${j.machine ? ' · ' + esc(j.machine) : ''} · ${isReady ? '<b style="color:#166534;">READY - pick up the plates</b>' : esc(STAGES[j.stage_index || 0] || '')}</div>
+        <div style="font-size:12px;color:var(--text2);">${esc(j.client || '')}${j.machine ? ' · ' + esc(j.machine) : ''} · ${isReady ? `<b style="color:#166534;">Printing done - pick up the plates</b> (now at ${esc(isDone(j) ? 'Delivered' : STAGES[j.stage_index || 0] || '')})` : esc(STAGES[j.stage_index || 0] || '')}</div>
         <div style="margin-top:3px;">${chips(j)}</div>
       </div>
-      ${isReady ? `<button class="btn" onclick="stationPlatesPickup(${j.id})" style="padding:10px 14px;font-weight:800;background:#166534;border-color:#166534;color:#fff;white-space:nowrap;">&#10003; Picked up</button>` : ''}
+      ${isReady && plateCanPickup() ? `<button class="btn" onclick="stationPlatesPickup(${j.id})" style="padding:10px 14px;font-weight:800;background:#166534;border-color:#166534;color:#fff;white-space:nowrap;">&#10003; Picked up</button>` : ''}
     </div>`;
-  return stationPlatesHead('', null)
-    + stationSearchBarHtml('station-process-search', stationProcessQ, '\u{1F50D} Job no., name or item code…', "stationProcessQ = this.value; stationRender(); setTimeout(() => { const e = document.getElementById('station-process-search'); if (e) { e.focus(); e.setSelectionRange(e.value.length, e.value.length); } }, 0)", "stationProcessQ = ''; stationRender()")
+  return stationSearchBarHtml('station-process-search', stationProcessQ, '\u{1F50D} Job no., name or item code…', "stationProcessQ = this.value; platesProcessRerender(); setTimeout(() => { const e = document.getElementById('station-process-search'); if (e) { e.focus(); e.setSelectionRange(e.value.length, e.value.length); } }, 0)", "stationProcessQ = ''; platesProcessRerender()")
     + `<div style="padding:0 16px 24px;">
       ${stationPickups == null ? '<div class="empty">Loading…</div>' : ''}
-      ${ready.length ? `<div style="font-weight:900;color:#166534;margin-top:8px;">&#10003; Ready - pick up the plates (${ready.length})</div>${ready.map(j => card(j, true)).join('')}` : ''}
-      <div style="font-weight:900;color:#1e3a8a;margin-top:12px;">Plates in process (${inProc.length})</div>
-      ${inProc.map(j => card(j, false)).join('') || '<div class="empty">No job in process right now.</div>'}
+      ${ready.length ? `<div style="font-weight:900;color:#166534;margin-top:8px;">&#10003; Printing done - pick up the plates (${ready.length})</div>${ready.map(j => card(j, true)).join('')}` : ''}
+      <div style="font-weight:900;color:#1e3a8a;margin-top:12px;">On Printing - plates on the press (${inProc.length})</div>
+      ${inProc.map(j => card(j, false)).join('') || '<div class="empty">No job on Printing right now.</div>'}
     </div>`;
+}
+// In Process in the app's Plate Store tab too (owner, 2026-11-24): the same lists; Picked up with its own row.
+let _platesProcessTimer = null;
+async function loadPlatesProcessApp() {
+  const el = document.getElementById('plate-store-body'); if (!el) return;
+  try { stationPickups = await api('GET', '/api/plates/pickups'); } catch (e) { stationPickups = stationPickups || []; }
+  renderPlatesProcessApp();
+  if (!_platesProcessTimer) _platesProcessTimer = setInterval(async () => {
+    if (typeof mode === 'undefined' || mode !== 'plates' || plateStoreTab !== 'process') return;
+    try { stationPickups = await api('GET', '/api/plates/pickups'); } catch (e) { /* next time */ }
+    renderPlatesProcessApp();
+  }, 30000);
+}
+function renderPlatesProcessApp() {
+  const el = document.getElementById('plate-store-body'); if (!el || plateStoreTab !== 'process') return;
+  el.innerHTML = platesProcessBodyHtml();
 }
 async function stationPlatesPickup(id) {
   const j = (jobs || []).find(x => x && x.id === id);
@@ -35886,10 +35910,11 @@ async function stationPlatesPickup(id) {
   if (!ok) return;
   showSaving(true);
   try {
-    await api('POST', '/api/station/plates/pickup', { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '', job_id: id });
+    if (typeof mode !== 'undefined' && mode === 'station' && stationOperator) await api('POST', '/api/station/plates/pickup', { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '', job_id: id });
+    else await api('POST', '/api/plates/pickup', { job_id: id });
     stationPickups = (stationPickups || []).concat([{ job_id: id }]);
     notify(`#${id} plates picked up`);
-    stationRender();
+    platesProcessRerender();
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -36114,7 +36139,8 @@ function defaultPlateNames(colors, leaflet) {
   if (leaflet && !extra && main) extra = 1;
   const out = [];
   if (main >= 4) { out.push('Cyan', 'Magenta', 'Yellow', 'Black'); for (let k = 1; k <= main - 4; k++) out.push('Spot ' + k); }
-  else for (let k = 1; k <= main; k++) out.push('Spot ' + k);
+  else if (main === 1) out.push('Black');                                    // 1-3 colours are CMYK too (owner, 2026-11-24)
+  else out.push(...['Cyan', 'Magenta', 'Yellow'].slice(0, main));
   for (let k = 1; k <= extra; k++) out.push(extra === 1 ? 'Inside Leaflet' : 'Inside Leaflet ' + k);
   return out;
 }
@@ -36129,12 +36155,17 @@ function plateSlotsOf(colors, leaflet, saved) {
   let extra = Math.min(8, nums.slice(1).reduce((a, n) => a + (parseInt(n, 10) || 0), 0));
   if (leaflet && !extra && main) extra = 1;
   const out = [];
-  if (main >= 4) { [['C', 'Cyan'], ['M', 'Magenta'], ['Y', 'Yellow'], ['K', 'Black']].forEach(([slot, def]) => out.push({ slot, def })); for (let k = 1; k <= main - 4; k++) out.push({ slot: 'Spot ' + k, def: '' }); }
-  else for (let k = 1; k <= main; k++) out.push({ slot: 'Spot ' + k, def: '' });
-  for (let k = 1; k <= extra; k++) out.push({ slot: extra === 1 ? 'Leaflet' : 'Leaflet ' + k, def: '' });
+  // 1-3 colours are CMYK plates too (owner, 2026-11-24): 1 = K, 2 = C M, 3 = C M Y - "Edit" on the product says which.
+  const cmyk = main >= 4 ? ['C', 'M', 'Y', 'K'] : main === 1 ? ['K'] : ['C', 'M', 'Y'].slice(0, main);
   const sv = (saved && typeof saved === 'object') ? saved : {};
+  const main4 = cmyk.concat(Array.from({ length: Math.max(0, main - 4) }, (_, k) => 'Spot ' + (k + 1)));
+  const picked = Array.isArray(sv.__slots) && sv.__slots.length === main4.length ? sv.__slots : main4;
+  picked.forEach(slot => out.push({ slot, def: PLATE_SLOT_DEFAULT[slot] || '' }));
+  for (let k = 1; k <= extra; k++) out.push({ slot: extra === 1 ? 'Leaflet' : 'Leaflet ' + k, def: '' });
   return out.map(x => ({ ...x, name: Object.prototype.hasOwnProperty.call(sv, x.slot) ? String(sv[x.slot] || '') : x.def }));
 }
+const PLATE_SLOT_DEFAULT = { C: 'Cyan', M: 'Magenta', Y: 'Yellow', K: 'Black' };
+const PLATE_SLOT_CHOICES = ['C', 'M', 'Y', 'K', 'Spot 1', 'Spot 2', 'Spot 3', 'Spot 4', 'Spot 5', 'Spot 6'];
 // How a plate reads: "Y · Pantone 123", "Spot 1 · Gold", or just "Spot 1".
 function plateSlotText(x) { return x.name ? `${x.slot} · ${x.name}` : x.slot; }
 function productPlateSlots(key, jobsOf) {
@@ -36272,9 +36303,11 @@ async function openProductPlates(i) {
   const canName = (typeof mode !== 'undefined' && mode === 'station' && !!stationOperator) || isSuperAdmin() || hasPerm('products_btn_new', 'yes') || hasPerm('products_btn_specials', 'yes');
   const slotBg = { C: '#00aeef', M: '#ec008c', Y: '#ffe600', K: '#231f20' };
   const slotHtml = slots.length ? `<div style="display:flex;flex-wrap:wrap;gap:10px;">${slots.map((x, k) => `
-      <div style="width:120px;border:1px solid var(--border);border-radius:10px;padding:8px;background:#fff;text-align:center;">
-        <div style="font-size:18px;font-weight:900;padding:6px 0;border-radius:7px;background:${slotBg[x.slot] || '#e5e7eb'};color:${x.slot === 'Y' || !slotBg[x.slot] ? '#111' : '#fff'};">${esc(x.slot)}</div>
-        <input type="text" class="pp-name" data-slot="${esc(x.slot)}" value="${esc(x.name)}" placeholder="colour name" ${canName ? '' : 'disabled'} style="width:100%;margin-top:6px;padding:5px 6px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;text-align:center;box-sizing:border-box;">
+      <div class="pp-card" style="width:120px;border:1px solid var(--border);border-radius:10px;padding:8px;background:#fff;text-align:center;">
+        ${canName && !/^Leaflet/.test(x.slot)
+          ? `<select class="pp-slot" onchange="ppSlotChanged(this)" title="Which plate this is - edit it" style="width:100%;font-size:17px;font-weight:900;padding:5px 2px;border-radius:7px;border:none;cursor:pointer;text-align:center;background:${slotBg[x.slot] || '#e5e7eb'};color:${x.slot === 'Y' || !slotBg[x.slot] ? '#111' : '#fff'};">${PLATE_SLOT_CHOICES.map(c => `<option value="${esc(c)}" ${c === x.slot ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`
+          : `<div class="pp-slot" data-slot="${esc(x.slot)}" style="font-size:18px;font-weight:900;padding:6px 0;border-radius:7px;background:${slotBg[x.slot] || '#e5e7eb'};color:${x.slot === 'Y' || !slotBg[x.slot] ? '#111' : '#fff'};">${esc(x.slot)}</div>`}
+        <input type="text" class="pp-name" value="${esc(x.name)}" placeholder="colour name" ${canName ? '' : 'disabled'} style="width:100%;margin-top:6px;padding:5px 6px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;text-align:center;box-sizing:border-box;">
       </div>`).join('')}</div>
       <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap;">
         <span style="font-size:11.5px;color:var(--text2);">${slots.length} plates from its ${c.leaflet && !/\+/.test(c.colors) ? esc(c.colors) + ' plates + inside leaflet' : 'No. of Colors ' + esc(c.colors)}. Under each plate, the colour it prints.</span>
@@ -36300,10 +36333,28 @@ async function openProductPlates(i) {
       <tbody>${d.events.map(e => `<tr>${td(esc(fmtDMYT12(e.created_at)))}${td(e.job_id ? 'E-' + e.job_id : dash)}${td('<b>' + esc(e.color_name || '') + '</b>')}${td(esc(e.size_name || ''))}${td(act(e.action))}${td(esc(PLATE_REASON_TXT[e.reason] || e.reason || '') || dash)}${td(esc(e.by_name || ''))}</tr>`).join('')}</tbody>
     </table></div>` : ''}`;
 }
+// A plate's letter changed (owner, 2026-11-24): its colour and, when the name was the usual one, the new usual name.
+function ppSlotChanged(sel) {
+  const bg = { C: '#00aeef', M: '#ec008c', Y: '#ffe600', K: '#231f20' };
+  const v = sel.value;
+  sel.style.background = bg[v] || '#e5e7eb';
+  sel.style.color = v === 'Y' || !bg[v] ? '#111' : '#fff';
+  const nm = sel.closest('.pp-card').querySelector('.pp-name');
+  const usual = Object.values(PLATE_SLOT_DEFAULT);
+  if (nm && (!nm.value.trim() || usual.includes(nm.value.trim()))) nm.value = PLATE_SLOT_DEFAULT[v] || '';
+}
 async function saveProductPlateNames(i) {
   const g = __productGroupsCache[i]; if (!g) return;
-  const colors = {};
-  document.querySelectorAll('.pp-name').forEach(el => { colors[el.dataset.slot] = String(el.value || '').trim(); });
+  const colors = {}, slots = [];
+  for (const card of document.querySelectorAll('.pp-card')) {
+    const s = card.querySelector('.pp-slot');
+    const slot = s ? (s.tagName === 'SELECT' ? s.value : s.dataset.slot) : '';
+    if (!slot) continue;
+    if (slots.includes(slot)) { notify(`Two plates are ${slot} - pick another letter for one of them`); return; }
+    slots.push(slot);
+    colors[slot] = String((card.querySelector('.pp-name') || {}).value || '').trim();
+  }
+  colors.__slots = slots.filter(x => !/^Leaflet/.test(x));
   showSaving(true);
   try {
     if (typeof mode !== 'undefined' && mode === 'station' && stationOperator) await api('POST', `/api/station/products/${encodeURIComponent(g.key)}/plate-colors`, { name: g.name, colors, pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '' });

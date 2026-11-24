@@ -8747,15 +8747,20 @@ app.post('/api/station/plates/sizes/:id', requireStationUser, stationCtpGate, (r
 app.post('/api/station/plates/stock', requireStationUser, stationCtpGate, (req, res) => plateH.stock(req, res));
 app.post('/api/station/plates/stock-tx', requireStationUser, stationCtpGate, (req, res) => plateH.stockTx(req, res));
 // Plates in process (owner, 2026-11-24): the jobs whose plates CTP has picked up again.
-app.get('/api/station/plates/pickups', requireStationUser, async (req, res) => {
+// (The app's Plate Store tab has In Process too - the same handlers, its own Access Register row; owner, 2026-11-24.)
+plateH.pickups = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
     res.json(await sql`SELECT job_id, picked_at, by_name FROM plate_pickups WHERE picked_at > NOW() - INTERVAL '400 days'`);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-app.post('/api/station/plates/pickup', requireStationUser, stationCtpGate, async (req, res) => {
+};
+app.get('/api/station/plates/pickups', requireStationUser, (req, res) => plateH.pickups(req, res));
+app.get('/api/plates/pickups', requireAuth, (req, res) => plateH.pickups(req, res));
+app.post('/api/plates/pickup', requirePermission('inv_btn_plate_store'), (req, res) => plateH.pickup(req, res));
+app.post('/api/station/plates/pickup', requireStationUser, stationCtpGate, plateH.pickup = async (req, res) => {
   try {
+    await dbReady;
     const sql = getDb();
     const id = parseInt(req.body && req.body.job_id, 10);
     const [job] = await sql`SELECT id, name FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
@@ -11666,6 +11671,8 @@ app.put('/api/products/:key/plate-colors', requireAnyBtn(['products_btn_new', 'p
     const raw = (req.body && req.body.colors && typeof req.body.colors === 'object') ? req.body.colors : {};
     const colors = {};
     for (const [slot, v] of Object.entries(raw).slice(0, 24)) {
+      // __slots: which plate each one is, when it is not the usual set (owner, 2026-11-24 - a 2 colour job = K + a spot ...).
+      if (slot === '__slots') { if (Array.isArray(v)) colors.__slots = v.map(x => String(x || '').trim().slice(0, 20)).filter(Boolean).slice(0, 16); continue; }
       const s = String(slot || '').trim().slice(0, 20), n = String(v == null ? '' : v).trim().replace(/\s+/g, ' ').slice(0, 60);
       if (s) colors[s] = n;
     }
@@ -11677,7 +11684,7 @@ app.put('/api/products/:key/plate-colors', requireAnyBtn(['products_btn_new', 'p
       ON CONFLICT (key) DO UPDATE SET plate_colors = EXCLUDED.plate_colors, updated_by = EXCLUDED.updated_by, updated_at = NOW()
       RETURNING key, name, plate_colors`;
     const old = (before && before.plate_colors) || {};
-    const changes = Object.keys(colors).filter(s => String(old[s] || '') !== String(colors[s] || '')).map(s => `${s}: "${old[s] || '—'}" -> "${colors[s] || '—'}"`);
+    const changes = Object.keys(colors).filter(s => String(old[s] || '') !== String(colors[s] || '')).map(s => s === '__slots' ? `plates: ${(old.__slots || []).join(' ') || 'usual'} -> ${(colors.__slots || []).join(' ')}` : `${s}: "${old[s] || '—'}" -> "${colors[s] || '—'}"`);
     if (changes.length) await logAudit(sql, req, { action: 'product.plate_colors', entityType: 'product', entityId: key, summary: `Plate names: "${name}" — ${changes.join('; ')}` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
