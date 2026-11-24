@@ -44084,11 +44084,7 @@ function stationQueueHtml() {
       <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
-    ${stationStageBanner(stIdx)}
-    ${stIdx === 0 ? `<div style="display:flex;gap:10px;flex-wrap:wrap;padding:10px 16px 0;">
-      <button class="btn" style="padding:11px 18px;font-size:15px;font-weight:800;background:#1e3a8a;border-color:#1e3a8a;color:#fff;" onclick="stationOpenPlates()">&#129513; Plates</button>
-      <button class="btn" style="padding:11px 18px;font-size:15px;font-weight:800;background:#b91c1c;border-color:#b91c1c;color:#fff;" onclick="stationOpenDamagedPlates()">&#9888; Damaged Plate</button>
-    </div>` : ''}
+    ${stIdx === 0 ? stationCtpTabsHtml('jobs') : ''}
     ${searchBox}
     <div class="station-queue">${rows}</div>`;
 }
@@ -44101,12 +44097,24 @@ let stationPlatesJob = null, stationPlateRows = [], stationPlatesQ = '', station
 let stationPlatesActive = null, stationDamagedPick = null, stationDamagedQ = '';
 const PLATE_CMYK = ['Cyan', 'Magenta', 'Yellow', 'Black'];
 const PLATE_REASON_LABELS = { first: 'First set', damaged: 'Damaged', scratched: 'Scratched', worn: 'Worn out', artwork: 'Artwork changed', lost: 'Lost', size: 'New machine size', other: 'Other' };
+// The CTP station's sub-tabs at the top (owner, 2026-11-24): Jobs (the queue) · Plates · Damaged Plate.
+function stationCtpTabsHtml(active) {
+  const tab = (id, label, on, color) => `<button type="button" onclick="${on}" style="flex:1 1 0;min-width:0;padding:12px 10px;font-size:15px;font-weight:800;border:none;cursor:pointer;font-family:inherit;${active === id ? `background:${color};color:#fff;` : 'background:#fff;color:var(--text2);'}">${label}</button>`;
+  return `<div style="display:flex;margin:10px 16px 0;border:2px solid #1e3a8a;border-radius:12px;overflow:hidden;">
+      ${tab('jobs', '&#128203; Jobs', 'stationPlatesBackToQueue()', '#7a1f1f')}
+      ${tab('plates', '&#129513; Plates', 'stationOpenPlates()', '#1e3a8a')}
+      ${tab('damaged', '&#9888; Damaged Plate', 'stationOpenDamagedPlates()', '#b91c1c')}
+    </div>`;
+}
 function stationPlatesHead(title, back) {
   const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
+  const active = stationView === 'plates-damaged' ? 'damaged' : 'plates';
   return `<div class="station-head">
-      <div><div class="station-who">${who}</div><div class="station-where">${title}</div></div>
-      <div style="display:flex;gap:8px;"><button class="btn" onclick="${back}">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
-    </div>`;
+      <div><div class="station-who">${who}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(STAGES[0] || 'CTP')}</div></div>
+      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
+    </div>
+    ${stationCtpTabsHtml(active)}
+    ${back ? `<div style="padding:10px 16px 0;display:flex;align-items:center;gap:10px;"><button class="btn" onclick="${back}">&lsaquo; Back</button><span style="font-weight:800;font-size:15px;">${title}</span></div>` : ''}`;
 }
 function stationOpenPlates() { stationView = 'plates'; stationPlatesJob = null; stationPlatesQ = ''; stationRender(); }
 function stationPlatesBackToQueue() { stationView = 'queue'; stationRender(); }
@@ -44151,7 +44159,7 @@ function stationPlatesHtml() {
         <div class="station-job-number"><div class="sj-id">#${j.id}</div></div>
         <div class="sj-main"><div class="sj-name">${esc(j.name)}</div><div class="sj-sub">${esc(j.client || '')}${j.machine ? ' · ' + esc(j.machine) : ''}</div></div>
         <div class="sj-go">›</div></button>`).join('') : `<div class="empty">${q ? 'No job matches.' : 'No job at CTP right now - search a job number.'}</div>`;
-    return stationPlatesHead('&#129513; Plates &middot; pick a job', 'stationPlatesBackToQueue()')
+    return stationPlatesHead('', null)
       + stationSearchBarHtml('station-plates-search', stationPlatesQ, '\u{1F50D} Job no., name or item code\u2026', 'stationPlatesQ = this.value; stationRender(); setTimeout(() => { const e = document.getElementById(\'station-plates-search\'); if (e) { e.focus(); e.setSelectionRange(e.value.length, e.value.length); } }, 0)', "stationPlatesQ = ''; stationRender()")
       + `<div class="station-queue">${rows}</div>`;
   }
@@ -44187,7 +44195,7 @@ function stationPlatesHtml() {
     <div style="font-size:12.5px;color:var(--text2);margin-top:6px;">One plate damaged? Use the <b>Damaged Plate</b> screen.</div>`;
   else body = (otherSizes.length && !inUse.length ? `<div style="margin-top:10px;padding:8px 12px;background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;font-size:13.5px;">This product has plates in another size (${[...new Set(otherSizes.map(x => x.size_name))].map(esc).join(', ')}) - this job needs this size, so make them.</div>` : '')
     + form(!!(inUse.length && stationPlatesNewSet));
-  return stationPlatesHead('&#129513; Plates', 'stationPlatesJob = null; stationRender();') + `
+  return stationPlatesHead('Pick another job', 'stationPlatesJob = null; stationRender();') + `
     <div style="padding:12px 16px;">
       <div style="font-size:18px;font-weight:800;">#${d.job.id} &middot; ${esc(d.job.name || '')}</div>
       <div style="font-size:13.5px;color:var(--text2);">${esc(d.job.client || '')}${d.job.machine ? ' &middot; machine ' + esc(d.job.machine) : ''}${d.colors ? ' &middot; colours ' + esc(d.colors) : ''}</div>
@@ -44229,7 +44237,7 @@ async function stationOpenDamagedPlates() {
   if (stationView === 'plates-damaged') stationRender();
 }
 function stationDamagedPlatesHtml() {
-  const head = stationPlatesHead('&#9888; Damaged Plate', stationDamagedPick ? 'stationDamagedPick = null; stationRender();' : 'stationPlatesBackToQueue()');
+  const head = stationPlatesHead('Pick another plate', stationDamagedPick ? 'stationDamagedPick = null; stationRender();' : null);
   if (stationPlatesActive == null) return head + '<div class="empty">Loading…</div>';
   if (stationDamagedPick) {
     const pl = stationPlatesActive.find(x => x.id === stationDamagedPick);
