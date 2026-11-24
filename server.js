@@ -8564,8 +8564,14 @@ async function plateStockOut(sql, req, sizeId, { jobId, plateId, reason, notes }
       await logAudit(sql, req, { action: 'plate_stock.store_skip', entityType: 'plate_size', entityId: sizeId, summary: `Plate made at CTP${jobId ? ' (Job E-' + jobId + ')' : ''} was NOT taken out of the Store: ${e.message}` });
     }
   }
-  await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, plate_id, notes, user_email, actor_name, store_tx_ids)
-            VALUES (${sizeId}, -1, ${reason}, ${jobId || null}, ${plateId || null}, ${notes || null}, ${(req.user && req.user.email) || null}, ${(req.user && req.user.station_actor) || null}, ${storeIds})`;
+  try {
+    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, plate_id, notes, user_email, actor_name, store_tx_ids)
+              VALUES (${sizeId}, -1, ${reason}, ${jobId || null}, ${plateId || null}, ${notes || null}, ${(req.user && req.user.email) || null}, ${(req.user && req.user.station_actor) || null}, ${storeIds})`;
+  } catch (e) {
+    // Not recorded here: the Store's -1 is taken back, so the two never disagree.
+    if (storeIds && storeIds.length) { try { await storeApi.plateUnmove(sql, storeIds); } catch (e2) { console.error('plate made: Store entry not taken back', storeIds, e2.message); } }
+    throw e;
+  }
   await sql`UPDATE plate_sizes SET balance = balance - 1 WHERE id = ${sizeId}`;
 }
 async function makePlate(sql, req, { productKey, productName, colorName, sizeId, jobId, reason, by }) {
@@ -8621,7 +8627,10 @@ async function plateSizesList(sql) {
   const all = rows.map(r => r.store_part_id && r.store_name != null ? { ...r, balance: Math.round(Number(r.store_qty) * 1000) / 1000, linked: true } : { ...r, linked: false });
   // Once the Store has its plates, the station shows only those (a size of its own, or an item in the Store's
   // Trash, is not offered; their history stays in the Register).
-  return all.some(z => z.linked) ? all.filter(z => z.linked) : all;
+  // (A size of its own that still has plates in use stays, so those plates can be used / replaced.)
+  if (!all.some(z => z.linked)) return all;
+  const inUse = new Set((await sql`SELECT DISTINCT size_id FROM plates WHERE status = 'active' AND size_id IS NOT NULL`).map(r => Number(r.size_id)));
+  return all.filter(z => z.linked || inUse.has(Number(z.id)));
 }
 // One plate size's stock: the Store's quantity when linked, else its own.
 async function plateBalanceOf(sql, sizeId) {
@@ -8660,7 +8669,7 @@ plateH.storeParts = async (req, res) => {
                          WHERE deleted_at IS NULL AND module = 'consumables' AND ${STORE_PLATE_CATS} ORDER BY name, brand`, []));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 };
-app.get('/api/plates/store-parts', requireAuth, (req, res) => plateH.storeParts(req, res));
+app.get('/api/plates/store-parts', requirePermission('store_tab_access', 'view'), (req, res) => plateH.storeParts(req, res));
 app.get('/api/station/plates/store-parts', requireStationUser, (req, res) => plateH.storeParts(req, res));
 app.post('/api/plates/sizes', requirePermission('plate_btn_add'), plateH.sizeAdd = async (req, res) => {
   try {
@@ -9802,18 +9811,22 @@ async function cartonStoreSync(sql, typeIds) {
 async function cartonCreateFromStore(req, { name, size, reorder, openingQty }) {
   await dbReady;
   const sql = getDb();
-  if (!userHasRole(req.user, 'super_admin') && !roleHasPermission(req.user, 'carton_btn_types')) return { status: 403, error: 'Adding a Carton Shipper needs the "+ Carton Type" row in the Access Register.' };
+  const sa = userHasRole(req.user, 'super_admin');
+  if (!sa && !roleHasPermission(req.user, 'carton_btn_types')) return { status: 403, error: 'Adding a Carton Shipper needs the "Carton Add / Edit" row in the Access Register.' };
+  if (openingQty > 0 && !sa && !roleHasPermission(req.user, 'carton_btn_stock_in')) return { status: 403, error: 'An opening quantity is a carton Stock In - it needs the "Carton Stock In" row (or add it with 0 and use + Stock).' };
   const b = readCartonTypeBody({ name, size, reorder_level: reorder || '' });
   if (b.error) return { status: 400, error: b.error };
   const dup = await sql`SELECT id FROM carton_types WHERE lower(name) = lower(${b.name}) AND deleted_at IS NULL`;
   if (dup.length) return { status: 409, error: `A Carton Shipper named "${b.name}" already exists.` };
-  const [t] = await sql`INSERT INTO carton_types (name, size, ply, reorder_level, created_by) VALUES (${b.name}, ${b.size}, NULL, ${b.reorder}, ${req.user.email}) RETURNING *`;
+  let t;
+  try { [t] = await sql`INSERT INTO carton_types (name, size, ply, reorder_level, created_by) VALUES (${b.name}, ${b.size}, NULL, ${b.reorder}, ${req.user.email}) RETURNING *`; }
+  catch (e) { if (/ux_carton_types_name|duplicate key/i.test(String(e && e.message))) return { status: 409, error: `A Carton Shipper named "${b.name}" already exists.` }; throw e; }
   await logAudit(sql, req, { action: 'carton.type_create', entityType: 'carton_type', entityId: t.id, summary: `Carton type added (from the Store): ${cartonTypeLabel(t)}` });
   if (openingQty > 0) {
     const r = await applyCartonChange(sql, { typeId: t.id, change: openingQty, kind: 'in', notes: 'Opening stock (added in the Store)', user: req.user });
     if (r.error) return { status: r.status || 400, error: r.error };
   }
-  await cartonStoreSync(sql, [t.id]);
+  await cartonStoreSyncSafe(sql, [t.id]);   // saved either way - a Store hiccup is fixed by the next sync
   return { typeId: t.id };
 }
 // Never stops a carton entry: if the Store could not follow, it is logged (and the next change, or the rebuild, fixes it).

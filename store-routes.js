@@ -402,7 +402,7 @@ module.exports = function registerStoreRoutes(app, deps) {
       const [p] = await sql`SELECT qty, name, sku, unit, module, category, carton_type_id FROM store_parts WHERE id = ${partId}`;
       if (!p) return res.status(400).json({ error: 'Part not found' });
       if (p.carton_type_id) return res.status(409).json({ error: `"${p.name}" is a Carton Shipper - use + Stock / − Stock on its row (the carton Stock In / Issue with E-Job, Manual Job, Other).` });
-      if (type === 'out' && /ctcp|plates/i.test(String(p.category || ''))) return res.status(409).json({ error: `"${p.name}" is a CTCP plate - issue it with − Stock on its row (the plate Use with its reason, job and plates), or at the CTP Station.` });
+      if (type === 'out' && p.module === 'consumables' && /ctcp|plates/i.test(String(p.category || ''))) return res.status(409).json({ error: `"${p.name}" is a CTCP plate - issue it with − Stock on its row (the plate Use with its reason, job and plates), or at the CTP Station.` });
       if (type === 'out' && p.qty < qty) return res.status(400).json({ error: `Not enough stock! Available: ${p.qty}` });
       let batch = null;
       if (p.module === 'consumables') {
@@ -568,8 +568,9 @@ module.exports = function registerStoreRoutes(app, deps) {
       const partId = parseInt(b.partId, 10);
       if (!partId) return res.status(400).json({ error: 'partId is required' });
       if (await partsDenied(sql, req, res, [partId])) return;
-      const [part] = await sql`SELECT id, sku, name, unit, module FROM store_parts WHERE id = ${partId}`;
+      const [part] = await sql`SELECT id, sku, name, unit, module, carton_type_id FROM store_parts WHERE id = ${partId}`;
       if (!part) return res.status(404).json({ error: 'Part not found' });
+      if (part.carton_type_id) return res.status(409).json({ error: 'A Carton Shipper follows the carton entries - nothing to reconcile here.' });
       const label = labelOf(part);
       if (action === 'ignore') {
         const diff = roundQty(Number(b.diff));
@@ -915,8 +916,9 @@ module.exports = function registerStoreRoutes(app, deps) {
       const id = Number((req.body || {}).id);
       if (!id) return res.status(400).json({ error: 'ID required' });
       if (await partsDenied(sql, req, res, [id])) return;
-      const [t] = await sql`SELECT sku, name, module FROM store_parts WHERE id = ${id} AND deleted_at IS NOT NULL`;
+      const [t] = await sql`SELECT sku, name, module, carton_type_id FROM store_parts WHERE id = ${id} AND deleted_at IS NOT NULL`;
       if (!t) return res.status(404).json({ error: 'Trashed part not found' });
+      if (t.carton_type_id) return res.status(409).json({ error: 'A deleted Carton Shipper is not restored here (its carton type was deleted).' });
       if (t.sku) {
         const [clash] = await sql`SELECT id, sku, name FROM store_parts WHERE LOWER(sku) = LOWER(${t.sku}) AND deleted_at IS NULL AND id <> ${id} LIMIT 1`;
         if (clash) return res.status(409).json({ error: `Cannot restore: SKU "${t.sku}" is already used by active part "${clash.name}". Rename or delete that one first.` });
@@ -932,7 +934,8 @@ module.exports = function registerStoreRoutes(app, deps) {
       const id = parseInt(req.query.id, 10);
       if (!id) return res.status(400).json({ error: 'ID required' });
       if (await partsDenied(sql, req, res, [id])) return;
-      const [t] = await sql`SELECT module FROM store_parts WHERE id = ${id} AND deleted_at IS NOT NULL`;
+      const [t] = await sql`SELECT module, carton_type_id FROM store_parts WHERE id = ${id} AND deleted_at IS NOT NULL`;
+      if (t && t.carton_type_id) return res.status(409).json({ error: 'A deleted Carton Shipper stays in the Trash with its carton history.' });
       const hasHistory = (await sql`SELECT 1 FROM store_tx WHERE part_id = ${id} LIMIT 1`).length > 0;
       if (hasHistory) await sql`UPDATE store_parts SET archived_at = now() WHERE id = ${id} AND deleted_at IS NOT NULL AND archived_at IS NULL`;
       else await sql`DELETE FROM store_parts WHERE id = ${id} AND deleted_at IS NOT NULL`;
