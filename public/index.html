@@ -29707,7 +29707,10 @@ function invColPass(picks, defs, t, skip) {
   return true;
 }
 // kind: 'sm-in' / 'sm-out' / 'oc'
-function invColState(kind) { return kind === 'oc' ? offcutConsumptionState : stockMovementStates[kind.slice(3)]; }
+function invColState(kind) {
+  if (kind === 'pr') return plateRegColState[plateRegSub === 'use' ? 'use' : 'in'];   // the plate Register (owner, 2026-11-24)
+  return kind === 'oc' ? offcutConsumptionState : stockMovementStates[kind.slice(3)];
+}
 function invColHeadHtml(kind, field, label) {
   const pk = (invColState(kind).colPick || {})[field] || [];
   const on = pk.length > 0;
@@ -29715,11 +29718,11 @@ function invColHeadHtml(kind, field, label) {
 }
 let _invColCtx = null;
 function invColFilterModal(kind, field) {
-  const defs = kind === 'oc' ? OC_COL_DEFS : INV_COL_DEFS;
+  const defs = kind === 'oc' ? OC_COL_DEFS : kind === 'pr' ? PR_COL_DEFS : INV_COL_DEFS;
   const def = defs[field]; if (!def) return;
   const st = invColState(kind);
   if (!st.colPick) st.colPick = {};
-  const rows = kind === 'oc' ? offcutBaseRows() : smBaseRows(kind.slice(3));
+  const rows = kind === 'oc' ? offcutBaseRows() : kind === 'pr' ? plateRegBaseRows() : smBaseRows(kind.slice(3));
   const set = new Set();
   rows.filter(t => invColPass(st.colPick, defs, t, field)).forEach(t => def.vals(t).forEach(v => set.add(v)));
   const values = [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
@@ -29770,6 +29773,7 @@ function invColFilterApply(clear) {
   st.colPick[ctx.field] = clear ? [] : [...ctx.picked];
   closeModal();
   if (ctx.kind === 'oc') { renderOffcutConsumption(); return; }
+  if (ctx.kind === 'pr') { renderPlateRegister(); return; }
   const dir = ctx.kind.slice(3);
   stockMovementSel[dir].clear();
   const r = periodToDateRange(st.period, st.from, st.to);
@@ -35995,6 +35999,28 @@ function defaultPlateNames(colors, leaflet) {
 }
 // A product's plate count and inside leaflet: its newest job's Plates box (else No. of Colors) and Inside Leaflet
 // tick; a product with no job: the No. of Colors saved on it.
+// The plates as slots (owner, 2026-11-24): C, M, Y, K, Spot 1 ..., Leaflet - each with the colour it prints under it
+// (Cyan, Magenta, Yellow, Black by default; spots and the leaflet get theirs typed). saved = the names set on the
+// product, which win.
+function plateSlotsOf(colors, leaflet, saved) {
+  const nums = String(colors || '').match(/\d+/g) || [];
+  const main = Math.min(16, parseInt(nums[0], 10) || 0);
+  let extra = Math.min(8, nums.slice(1).reduce((a, n) => a + (parseInt(n, 10) || 0), 0));
+  if (leaflet && !extra && main) extra = 1;
+  const out = [];
+  if (main >= 4) { [['C', 'Cyan'], ['M', 'Magenta'], ['Y', 'Yellow'], ['K', 'Black']].forEach(([slot, def]) => out.push({ slot, def })); for (let k = 1; k <= main - 4; k++) out.push({ slot: 'Spot ' + k, def: '' }); }
+  else for (let k = 1; k <= main; k++) out.push({ slot: 'Spot ' + k, def: '' });
+  for (let k = 1; k <= extra; k++) out.push({ slot: extra === 1 ? 'Leaflet' : 'Leaflet ' + k, def: '' });
+  const sv = (saved && typeof saved === 'object') ? saved : {};
+  return out.map(x => ({ ...x, name: Object.prototype.hasOwnProperty.call(sv, x.slot) ? String(sv[x.slot] || '') : x.def }));
+}
+// How a plate reads: "Y · Pantone 123", "Spot 1 · Gold", or just "Spot 1".
+function plateSlotText(x) { return x.name ? `${x.slot} · ${x.name}` : x.slot; }
+function productPlateSlots(key, jobsOf) {
+  const c = productColorsOf(key, jobsOf);
+  const pm = typeof productMasterOf === 'function' ? productMasterOf(key) : null;
+  return plateSlotsOf(c.colors, c.leaflet, pm && pm.plate_colors);
+}
 function productColorsOf(key, jobsOf) {
   const list = (jobsOf || (jobs || []).filter(j => j && productOfName(j.name).key === key)).slice().sort((a, b) => b.id - a.id);
   for (const j of list) {
@@ -36015,8 +36041,7 @@ async function productPlateNames(key, jobsOf) {
     _productPlatesCache.set(key, real);
   }
   if (real.length) return [...new Set(real)];
-  const c = productColorsOf(key, jobsOf);
-  return defaultPlateNames(c.colors, c.leaflet);
+  return productPlateSlots(key, jobsOf).map(plateSlotText);
 }
 // Use -> Old job: which plates of the job (owner, 2026-11-24). Ticking them sets the quantity.
 async function plateUsePlatesSync() {
@@ -36048,14 +36073,32 @@ async function loadPlateRegister() {
   try { plateRegRows = await api('GET', `/api/plates/stock-tx?from=${plateRegFrom}&to=${plateRegTo}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
   renderPlateRegister();
 }
+// Green column filters on the Register (owner, 2026-11-24): Plate, Reason; Usage also Job No., Job Name, Plates,
+// Damaged by. Each sub-tab keeps its own.
+const plateRegColState = { in: { colPick: {} }, use: { colPick: {} } };
+const plateRegPlateOf = t => [t.size_name, t.size_brand].filter(Boolean).join(' · ') || '(none)';
+const plateRegJobNo = t => t.job_id ? 'E-' + t.job_id : (t.job_no || '');
+const PR_COL_DEFS = {
+  plate:   { label: 'Plate',               vals: t => [plateRegPlateOf(t)] },
+  reason:  { label: 'Reason',              vals: t => [PLATE_TX_TXT[t.reason] || t.reason || '(none)'] },
+  jobno:   { label: 'Job No.',             vals: t => [plateRegJobNo(t) || '(none)'] },
+  jobname: { label: 'Job Name',            vals: t => [String(t.job_name || '').trim() || '(none)'] },
+  plates:  { label: 'Plates',              vals: t => { const v = String(t.plate_names || '').split(',').map(x => x.trim()).filter(Boolean); return v.length ? v : ['(none)']; } },
+  damaged: { label: 'Damaged by / reason', vals: t => [String(t.damaged_by || '').trim() || '(none)'] },
+};
+// The rows of the sub-tab picked, by the search box (the column filters come on top).
+function plateRegBaseRows() {
+  const isIn = plateRegSub !== 'use';
+  const q = String(plateRegQ || '').trim().toLowerCase();
+  return (plateRegRows || []).filter(t => isIn ? t.change > 0 : t.change < 0)
+    .filter(t => !q || [plateRegPlateOf(t), PLATE_TX_TXT[t.reason] || t.reason, plateRegJobNo(t), t.job_name, t.plate_names, t.damaged_by, t.challan_no, t.notes, t.actor_name, t.user_email].join(' ').toLowerCase().includes(q));
+}
 function renderPlateRegister() {
   const el = document.getElementById('plate-store-body'); if (!el) return;
   const isIn = plateRegSub !== 'use';
-  const q = String(plateRegQ || '').trim().toLowerCase();
-  const plateOf = t => [t.size_name, t.size_brand].filter(Boolean).join(' · ');
-  const jobNo = t => t.job_id ? 'E-' + t.job_id : (t.job_no || '');
-  const all = (plateRegRows || []).filter(t => isIn ? t.change > 0 : t.change < 0);
-  const rows = all.filter(t => !q || [plateOf(t), PLATE_TX_TXT[t.reason] || t.reason, jobNo(t), t.job_name, t.damaged_by, t.challan_no, t.notes, t.actor_name, t.user_email].join(' ').toLowerCase().includes(q));
+  const plateOf = plateRegPlateOf, jobNo = plateRegJobNo;
+  const picks = invColState('pr').colPick || {};
+  const rows = plateRegBaseRows().filter(t => invColPass(picks, PR_COL_DEFS, t));
   const total = rows.reduce((a, t) => a + Math.abs(t.change), 0);
   const inCount = (plateRegRows || []).filter(t => t.change > 0).length, useCount = (plateRegRows || []).filter(t => t.change < 0).length;
   const th = l => `<th style="text-align:left;padding:7px 8px;white-space:nowrap;">${l}</th>`;
@@ -36063,9 +36106,11 @@ function renderPlateRegister() {
   const dash = '<span style="color:var(--text3)">&mdash;</span>';
   const by = t => esc(t.actor_name || String(t.user_email || '').split('@')[0] || '');
   const date = t => `<span style="white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}</span>${t.recorded_at ? `<div style="font-size:10px;color:#92400e;font-weight:700;">LATE · entered ${esc(fmtDMY(t.recorded_at))}</div>` : ''}`;
+  const fh = (k, l) => th(invColHeadHtml('pr', k, l));   // a column with its green filter
   const head = isIn
-    ? th('Date') + th('Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + th('Reason') + th('Challan No.') + th('Notes') + th('By')
-    : th('Date') + th('Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + th('Reason') + th('Job No.') + th('Job Name') + th('Plates') + th('Damaged by / reason') + th('Notes') + th('By');
+    ? th('Date') + fh('plate', 'Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + fh('reason', 'Reason') + th('Challan No.') + th('Notes') + th('By')
+    : th('Date') + fh('plate', 'Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + fh('reason', 'Reason') + fh('jobno', 'Job No.') + fh('jobname', 'Job Name') + fh('plates', 'Plates') + fh('damaged', 'Damaged by / reason') + th('Notes') + th('By');
+  const anyPick = Object.values(picks).some(v => v && v.length);
   const body = rows.map(t => '<tr style="border-bottom:1px solid var(--border);">' + (isIn
     ? td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td('+' + t.change, 'text-align:right;font-weight:800;color:#166534;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(t.challan_no || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t))
     : td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td(String(Math.abs(t.change)), 'text-align:right;font-weight:800;color:#b91c1c;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(jobNo(t)) || dash, 'font-weight:700;') + td(esc(t.job_name || '') || dash) + td(esc(t.plate_names || '') || dash, 'font-weight:700;color:#1e3a8a;') + td(esc(t.damaged_by || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t))) + '</tr>').join('');
@@ -36075,6 +36120,7 @@ function renderPlateRegister() {
       <div><div class="dash-flbl">From</div><input type="date" class="filter" value="${plateRegFrom}" onchange="plateRegFrom = this.value; loadPlateRegister()"></div>
       <div><div class="dash-flbl">To</div><input type="date" class="filter" value="${plateRegTo}" onchange="plateRegTo = this.value; loadPlateRegister()"></div>
       <div><div class="dash-flbl">Search</div><input type="search" class="filter" value="${esc(plateRegQ)}" placeholder="plate, job, reason, challan" oninput="plateRegQ = this.value; renderPlateRegister()"></div>
+      ${anyPick ? `<button class="btn btn-sm" onclick="plateRegColState[plateRegSub === 'use' ? 'use' : 'in'].colPick = {}; renderPlateRegister()">Clear filters</button>` : ''}
       <div style="margin-left:auto;font-size:13px;">Total <b style="color:${isIn ? '#166534' : '#b91c1c'};">${total.toLocaleString()}</b> plates ${isIn ? 'in' : 'used'}</div>
     </div>
     <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
@@ -36099,12 +36145,24 @@ async function openProductPlates(i) {
   const chip = (t, title) => `<span title="${esc(title || '')}" style="display:inline-block;padding:4px 10px;margin:2px;border-radius:999px;background:#e0e7ff;color:#1e3a8a;font-weight:800;font-size:12.5px;">${esc(t)}</span>`;
   // No plates recorded by CTP yet: the set from its colours (owner, 2026-11-24) - it was printed, so it has them.
   const c = productColorsOf(g.key, g.jobs);
-  const fromColors = defaultPlateNames(c.colors, c.leaflet);
-  const setHtml = bySize.size
-    ? [...bySize.entries()].map(([sz, list]) => `<div style="margin-bottom:6px;"><span style="font-size:12px;color:var(--text2);font-weight:700;">${esc(sz)}:</span> ${list.map(pl => chip(pl.color_name, `Made ${fmtDMY(pl.made_at)}${pl.made_job_id ? ' on E-' + pl.made_job_id : ''} by ${pl.made_by || ''}`)).join('')}</div>`).join('')
-    : fromColors.length
-      ? `<div>${fromColors.map(n => chip(n)).join('')}</div><div style="font-size:11.5px;color:var(--text2);margin-top:3px;">${fromColors.length} plates from its ${c.leaflet && !/\+/.test(c.colors) ? c.colors + ' plates + inside leaflet' : 'No. of Colors ' + esc(c.colors)} - the spot colours get their names later.</div>`
-      : '<div style="color:var(--text3);">No. of Colors / Plates is not on its jobs yet.</div>';
+  // Each plate: its slot (C, M, Y, K, Spot 1, Leaflet) and under it the colour it prints - change it when a plate
+  // prints another colour (owner, 2026-11-24).
+  const slots = productPlateSlots(g.key, g.jobs);
+  const canName = isSuperAdmin() || hasPerm('products_btn_new', 'yes') || hasPerm('products_btn_specials', 'yes');
+  const slotBg = { C: '#00aeef', M: '#ec008c', Y: '#ffe600', K: '#231f20' };
+  const slotHtml = slots.length ? `<div style="display:flex;flex-wrap:wrap;gap:10px;">${slots.map((x, k) => `
+      <div style="width:120px;border:1px solid var(--border);border-radius:10px;padding:8px;background:#fff;text-align:center;">
+        <div style="font-size:18px;font-weight:900;padding:6px 0;border-radius:7px;background:${slotBg[x.slot] || '#e5e7eb'};color:${x.slot === 'Y' || !slotBg[x.slot] ? '#111' : '#fff'};">${esc(x.slot)}</div>
+        <input type="text" class="pp-name" data-slot="${esc(x.slot)}" value="${esc(x.name)}" placeholder="colour name" ${canName ? '' : 'disabled'} style="width:100%;margin-top:6px;padding:5px 6px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;text-align:center;box-sizing:border-box;">
+      </div>`).join('')}</div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap;">
+        <span style="font-size:11.5px;color:var(--text2);">${slots.length} plates from its ${c.leaflet && !/\+/.test(c.colors) ? esc(c.colors) + ' plates + inside leaflet' : 'No. of Colors ' + esc(c.colors)}. Under each plate, the colour it prints.</span>
+        ${canName ? `<button class="btn btn-sm btn-primary" style="margin-left:auto;" onclick="saveProductPlateNames(${i})">Save names</button>` : ''}
+      </div>`
+    : '<div style="color:var(--text3);">No. of Colors / Plates is not on its jobs yet.</div>';
+  const setHtml = (bySize.size
+    ? `<div style="font-size:12px;color:var(--text2);margin-bottom:4px;">Made at the CTP Station:</div>` + [...bySize.entries()].map(([sz, list]) => `<div style="margin-bottom:6px;"><span style="font-size:12px;color:var(--text2);font-weight:700;">${esc(sz)}:</span> ${list.map(pl => chip(pl.color_name, `Made ${fmtDMY(pl.made_at)}${pl.made_job_id ? ' on E-' + pl.made_job_id : ''} by ${pl.made_by || ''}`)).join('')}</div>`).join('') + '<div style="height:8px;"></div>'
+    : '') + slotHtml;
   const th = l => `<th style="text-align:left;padding:6px 8px;">${l}</th>`;
   const td = v => `<td style="padding:5px 8px;">${v}</td>`;
   const dash = '<span style="color:var(--text3)">&mdash;</span>';
@@ -36120,6 +36178,19 @@ async function openProductPlates(i) {
       <thead><tr>${th('When')}${th('Job')}${th('Plate')}${th('Size')}${th('What')}${th('Reason')}${th('By')}</tr></thead>
       <tbody>${d.events.map(e => `<tr>${td(esc(fmtDMYT12(e.created_at)))}${td(e.job_id ? 'E-' + e.job_id : dash)}${td('<b>' + esc(e.color_name || '') + '</b>')}${td(esc(e.size_name || ''))}${td(act(e.action))}${td(esc(PLATE_REASON_TXT[e.reason] || e.reason || '') || dash)}${td(esc(e.by_name || ''))}</tr>`).join('')}</tbody>
     </table></div>` : ''}`;
+}
+async function saveProductPlateNames(i) {
+  const g = __productGroupsCache[i]; if (!g) return;
+  const colors = {};
+  document.querySelectorAll('.pp-name').forEach(el => { colors[el.dataset.slot] = String(el.value || '').trim(); });
+  showSaving(true);
+  try {
+    await api('PUT', `/api/products/${encodeURIComponent(g.key)}/plate-colors`, { name: g.name, colors });
+    await loadProductsMaster();
+    _productPlatesCache.delete(g.key);
+    notify('Plate names saved');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 // ── + New Product / Details / Delete (owner, 2026-11-23) ─────────────
 // A product without a job card: name, company, item code, No. of Colors, UPS, Rate. Its tile shows in red (no job)

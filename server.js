@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-plate-names';   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-plate-colors';   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -2076,6 +2076,9 @@ async function initDb() {
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS job_no TEXT`;
     // Which plates of the job a Use was for (owner, 2026-11-24): "Cyan, Spot 1".
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS plate_names TEXT`;
+    // A product's plate names (owner, 2026-11-24): { "C": "Cyan", "Y": "Pantone 123", "Spot 1": "Gold" } - the colour
+    // each plate prints, when it is not the usual one.
+    await sql`ALTER TABLE finance.products ADD COLUMN IF NOT EXISTS plate_colors JSONB`;
     await sql`
       CREATE TABLE IF NOT EXISTS plate_events (
         id          SERIAL PRIMARY KEY,
@@ -11559,7 +11562,7 @@ app.get('/api/products', requireAuth, async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
-    res.json(await sql`SELECT key, name, company, code, colors, ups, created_at, updated_at FROM finance.products ORDER BY name ASC`);
+    res.json(await sql`SELECT key, name, company, code, colors, ups, plate_colors, created_at, updated_at FROM finance.products ORDER BY name ASC`);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 app.post('/api/products', requirePermission('products_btn_new'), async (req, res) => {
@@ -11601,6 +11604,33 @@ app.put('/api/products/:key', requirePermission('products_btn_new'), async (req,
     const label = { company: 'Company', code: 'Code', colors: 'No. of Colors', ups: 'UPS' };
     const changes = PRODUCT_FIELDS.filter(f => String((before && before[f]) || '') !== String(v[f] || '')).map(f => `${label[f]}: "${(before && before[f]) || '—'}" -> "${v[f] || '—'}"`);
     if (changes.length) await logAudit(sql, req, { action: 'product.update', entityType: 'product', entityId: key, summary: `Product details: "${row.name}" — ${changes.join('; ')}` });
+    res.json(row);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// A product's plate names (owner, 2026-11-24): under each plate (C, M, Y, K, Spot 1 ...) the colour it prints. A
+// product from job cards with no row yet gets one.
+app.put('/api/products/:key/plate-colors', requireAnyBtn(['products_btn_new', 'products_btn_specials']), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const key = String(req.params.key || '').trim().toLowerCase();
+    if (!key) return res.status(400).json({ error: 'Which product?' });
+    const raw = (req.body && req.body.colors && typeof req.body.colors === 'object') ? req.body.colors : {};
+    const colors = {};
+    for (const [slot, v] of Object.entries(raw).slice(0, 24)) {
+      const s = String(slot || '').trim().slice(0, 20), n = String(v == null ? '' : v).trim().replace(/\s+/g, ' ').slice(0, 60);
+      if (s) colors[s] = n;
+    }
+    const name = productText(req.body && req.body.name) || key;
+    const [before] = await sql`SELECT plate_colors FROM finance.products WHERE key = ${key}`;
+    const [row] = await sql`
+      INSERT INTO finance.products (key, name, plate_colors, created_by, updated_by)
+      VALUES (${key}, ${name}, ${JSON.stringify(colors)}::jsonb, ${req.user.email}, ${req.user.email})
+      ON CONFLICT (key) DO UPDATE SET plate_colors = EXCLUDED.plate_colors, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+      RETURNING key, name, plate_colors`;
+    const old = (before && before.plate_colors) || {};
+    const changes = Object.keys(colors).filter(s => String(old[s] || '') !== String(colors[s] || '')).map(s => `${s}: "${old[s] || '—'}" -> "${colors[s] || '—'}"`);
+    if (changes.length) await logAudit(sql, req, { action: 'product.plate_colors', entityType: 'product', entityId: key, summary: `Plate names: "${name}" — ${changes.join('; ')}` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
