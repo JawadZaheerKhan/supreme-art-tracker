@@ -9920,7 +9920,7 @@ function stationCartonsWanted(particulars) {
 }
 // Bring the job's Station carton issues in line with its rows. Returns the
 // carton types now below zero (for the operator's message).
-async function syncStationCartons(sql, jobId, particulars, user, issuedTo) {
+async function syncStationCartons(sql, jobId, particulars, user, issuedTo, where = 'Station') {
   const held = await takeOpLocks(sql, [`job-cartons:${jobId}`], { wait: true });
   if (!held) throw new Error('Carton stock is being updated for this job - save again in a moment.');
   try {
@@ -9942,7 +9942,8 @@ async function syncStationCartons(sql, jobId, particulars, user, issuedTo) {
       if (!diff) continue;
       const r = await applyCartonChange(sql, {
         typeId: id, change: -diff, kind: 'out', reason: 'e-job', jobId, issuedTo, user, source: 'station', allowNegative: true,
-        notes: diff > 0 ? null : `Station count lowered - ${(-diff).toLocaleString()} back to stock`,
+        // Where it was lowered - the Station or the job card - and by whom (owner, 2026-11-24).
+        notes: diff > 0 ? null : `${where} count lowered${issuedTo ? ' (' + issuedTo + ')' : ''} - ${(-diff).toLocaleString()} back to stock`,
       });
       if (r.error) throw new Error(r.error);
       moved.push({ type: t, diff, balance: r.balance });
@@ -13788,7 +13789,8 @@ app.post('/api/jobs/:id/particulars/delete-entry', requireAuth, async (req, res)
     let cartonWarning = null, cartonError = null;
     if (keys.some(k => STATION_CARTON_KEYS.includes(k))) {
       try {
-        const below = await syncStationCartons(sql, id, particulars, { ...req.user, station_actor: actorLabel }, actorLabel);
+        const byName = (req.user && req.user.name) || actorLabel;   // a name on the carton entry, not the login
+        const below = await syncStationCartons(sql, id, particulars, { ...req.user, station_actor: byName }, byName, 'Job card');
         if (below.length) cartonWarning = below;
       } catch (e) { console.error('delete-entry carton sync', e); cartonError = e.message || 'Carton stock was not updated.'; }
     }
@@ -16497,7 +16499,7 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
     if (touchesCartons) {
       try {
         const stationUser = { ...req.user, station_actor: person.name || operator.name };
-        const below = await syncStationCartons(sql, id, particulars, stationUser, person.name || operator.name);
+        const below = await syncStationCartons(sql, id, particulars, stationUser, person.name || operator.name, viaJobCard ? 'Job card' : 'Station');
         if (below.length) cartonWarning = below;
       } catch (e) {
         console.error('station carton sync', e);
