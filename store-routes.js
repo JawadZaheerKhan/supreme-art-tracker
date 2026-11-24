@@ -932,15 +932,16 @@ module.exports = function registerStoreRoutes(app, deps) {
   // history is kept), every stock in / out with its date, time, person, batch, P.O. / Invoice No., orders, ignored
   // warnings and hidden dropdown names. The ERP is only READ. What is in this store is REPLACED (until the switch the
   // ERP is the real store). Then every item is checked against the ERP: quantity, entries, in, out, each batch.
+  // (Times come over as text, so they keep their microseconds - a JS Date would drop them.)
   const ERP_COPY = [
     { from: 'categories', to: 'store_categories', cols: 'id, name, module' },
     { from: 'machines', to: 'store_machines', cols: 'id, name, module' },
-    { from: 'store_recipients', to: 'store_recipients', cols: 'id, name, created_at' },
-    { from: 'parts', to: 'store_parts', cols: 'id, sku, name, category, module, machine, brand, supplier, rack_no, unit, qty, min_qty, description, image_url, deleted_at, archived_at' },
-    { from: 'store_orders', to: 'store_orders', cols: 'id, part_id, qty, supplier, po_no, order_date::text AS order_date, expected_date::text AS expected_date, notes, cancelled_at, created_by, created_at, item_name, unit, module, po_id, po_sr' },
-    { from: 'transactions', to: 'store_tx', cols: 'id, type, part_id, qty, date::text AS date, ref, notes, issued_to, purpose, challan_no, created_by, batch, po_no, invoice_no, batch_label, created_at, order_id' },
-    { from: 'store_ledger_ignores', to: 'store_ledger_ignores', cols: 'part_id, diff, ignored_by, ignored_at', noId: true },
-    { from: 'store_dropdown_hidden', to: 'store_dropdown_hidden', cols: 'field, value, hidden_by, hidden_at', noId: true },
+    { from: 'store_recipients', to: 'store_recipients', cols: 'id, name, created_at::text AS created_at' },
+    { from: 'parts', to: 'store_parts', cols: 'id, sku, name, category, module, machine, brand, supplier, rack_no, unit, qty, min_qty, description, image_url, deleted_at::text AS deleted_at, archived_at::text AS archived_at' },
+    { from: 'store_orders', to: 'store_orders', cols: 'id, part_id, qty, supplier, po_no, order_date::text AS order_date, expected_date::text AS expected_date, notes, cancelled_at::text AS cancelled_at, created_by, created_at::text AS created_at, item_name, unit, module, po_id, po_sr' },
+    { from: 'transactions', to: 'store_tx', cols: 'id, type, part_id, qty, date::text AS date, ref, notes, issued_to, purpose, challan_no, created_by, batch, po_no, invoice_no, batch_label, created_at::text AS created_at, order_id' },
+    { from: 'store_ledger_ignores', to: 'store_ledger_ignores', cols: 'part_id, diff, ignored_by, ignored_at::text AS ignored_at', noId: true },
+    { from: 'store_dropdown_hidden', to: 'store_dropdown_hidden', cols: 'field, value, hidden_by, hidden_at::text AS hidden_at', noId: true },
   ];
   // One side's figures per item: quantity, entries, in, out, and each batch.
   async function storeFigures(q, partsT, txT) {
@@ -954,6 +955,31 @@ module.exports = function registerStoreRoutes(app, deps) {
     for (const p of parts) m.set(Number(p.id), { qty: roundQty(Number(p.qty)), n: Number(p.n), i: roundQty(Number(p.i)), o: roundQty(Number(p.o)), b: {} });
     for (const r of batches) { const x = m.get(Number(r.part_id)); if (x) x.b[Number(r.b)] = roundQty(Number(r.bal)); }
     return m;
+  }
+  // Every table, every row, every column: a fingerprint of all of it on each side (owner, 2026-11-24: "confirm that its
+  // right"). Times are compared as moments, so the two databases' time zones don't matter.
+  const FP = [
+    { erp: 'categories', here: 'store_categories', key: 'id', cols: ['id', 'name', 'module'] },
+    { erp: 'machines', here: 'store_machines', key: 'id', cols: ['id', 'name', 'module'] },
+    { erp: 'store_recipients', here: 'store_recipients', key: 'id', cols: ['id', 'name', 'created_at:t'] },
+    { erp: 'parts', here: 'store_parts', key: 'id', cols: ['id', 'sku', 'name', 'category', 'module', 'machine', 'brand', 'supplier', 'rack_no', 'unit', 'qty', 'min_qty', 'description', 'image_url', 'deleted_at:t', 'archived_at:t'] },
+    { erp: 'store_orders', here: 'store_orders', key: 'id', cols: ['id', 'part_id', 'qty', 'supplier', 'po_no', 'order_date', 'expected_date', 'notes', 'cancelled_at:t', 'created_by', 'created_at:t', 'item_name', 'unit', 'module', 'po_id', 'po_sr'] },
+    { erp: 'transactions', here: 'store_tx', key: 'id', cols: ['id', 'type', 'part_id', 'qty', 'date', 'ref', 'notes', 'issued_to', 'purpose', 'challan_no', 'created_by', 'batch', 'po_no', 'invoice_no', 'batch_label', 'created_at:t', 'order_id'] },
+    { erp: 'store_ledger_ignores', here: 'store_ledger_ignores', key: 'part_id', cols: ['part_id', 'diff', 'ignored_by', 'ignored_at:t'] },
+    { erp: 'store_dropdown_hidden', here: 'store_dropdown_hidden', key: "field || '|' || value", cols: ['field', 'value', 'hidden_by', 'hidden_at:t'] },
+  ];
+  const fpSql = (t, table) => {
+    const parts = t.cols.map(c => { const [n, k] = c.split(':'); return k === 't' ? `COALESCE(EXTRACT(EPOCH FROM ${n})::text, '~')` : `COALESCE(${n}::text, '~')`; });
+    return `SELECT COUNT(*)::int AS n, md5(COALESCE(string_agg(x, E'\\n' ORDER BY k), '')) AS h
+              FROM (SELECT (${t.key})::text AS k, ${parts.join(` || '|' || `)} AS x FROM ${table}) s`;
+  };
+  async function fingerprints(sql, erp) {
+    const out = [];
+    for (const t of FP) {
+      const [[a], [b]] = await Promise.all([erp(fpSql(t, t.erp), []), sql(fpSql(t, t.here), [])]);
+      out.push({ table: t.erp, erp: Number(a.n), here: Number(b.n), match: a.h === b.h && Number(a.n) === Number(b.n) });
+    }
+    return out;
   }
   async function compareWithErp(sql, erp) {
     const [a, b] = await Promise.all([storeFigures((s, p) => erp(s, p), 'parts', 'transactions'), storeFigures((s, p) => sql(s, p), 'store_parts', 'store_tx')]);
@@ -1018,9 +1044,11 @@ module.exports = function registerStoreRoutes(app, deps) {
         for (const t of ERP_COPY) await sql(`TRUNCATE ${t.to}__stage`, []);
       }
       const check = await compareWithErp(sql, erp);
+      const tables = await fingerprints(sql, erp);
+      const tablesOff = tables.filter(t => !t.match);
       await log(sql, req, checkOnly ? 'store.erp_check' : 'store.erp_copy',
-        `${checkOnly ? 'Checked the Store against the ERP' : 'Copied the whole Store from the ERP (' + Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ') + ')'}: ${check.items} items, ${check.diffs.length ? check.diffs.length + ' do not match' : 'all match'}`);
-      res.json({ ok: true, copied: checkOnly ? null : counts, items: check.items, diffs: check.diffs.slice(0, 200), diffCount: check.diffs.length });
+        `${checkOnly ? 'Checked the Store against the ERP' : 'Copied the whole Store from the ERP (' + Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ') + ')'}: ${check.items} items, ${check.diffs.length ? check.diffs.length + ' do not match' : 'all match'}; every row and column of ${tables.length - tablesOff.length} of ${tables.length} tables identical${tablesOff.length ? ' (not: ' + tablesOff.map(t => t.table).join(', ') + ')' : ''}`);
+      res.json({ ok: true, copied: checkOnly ? null : counts, items: check.items, diffs: check.diffs.slice(0, 200), diffCount: check.diffs.length, tables });
     } catch (e) { fail(res, e); } finally { _copying = false; }
   });
 
