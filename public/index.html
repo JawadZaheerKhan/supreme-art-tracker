@@ -34998,7 +34998,9 @@ function jobForm(j={}, opts) {
 function deliveriesSection(j, opts) {
   if (!j || !j.id) return '';
   // Finance / CEO / Super Admin (job_btn_pricing) get the invoicing layout; everyone else keeps the classic table.
-  if (!(opts && opts.managerStationMode) && hasPerm('job_btn_pricing', 'view')) return deliveriesSectionFinance(j, opts);
+  // The Ready to Deliver station (owner, 2026-11-24): this classic form - the delivery fields only - saved with its PIN.
+  const stationMode = !!(opts && opts.stationDeliverMode);
+  if (!(opts && opts.managerStationMode) && !stationMode && hasPerm('job_btn_pricing', 'view')) return deliveriesSectionFinance(j, opts);
   // Station Manager flow (see stationManagerOpenJobCard): the shared
   // Station terminal's browser session usually isn't logged in with a
   // delivery_write role, so canRecordDelivery() alone would hide this
@@ -35043,8 +35045,9 @@ function deliveriesSection(j, opts) {
   // deliveriesSectionFinance for the same split.
   const canRecordNow = managerMode
     ? !!j.is_shade_card
+    : stationMode ? true
     : (typeof canRecordDelivery === 'function' && canRecordDelivery());
-  const canFillNow = !managerMode && typeof canFillDeliveryDetails === 'function' && canFillDeliveryDetails();
+  const canFillNow = !managerMode && !stationMode && typeof canFillDeliveryDetails === 'function' && canFillDeliveryDetails();
   const canAddDelivery = canDeliverNow(j) && !isDelivered && (canRecordNow || canFillNow);
   const isAdminUser = typeof hasPerm === 'function' && seeBtn('job_btn_delete_delivery');
   // Pre-fill Unit Cartons with whatever's ready and not yet shipped (Ready
@@ -35115,7 +35118,7 @@ function deliveriesSection(j, opts) {
   const _draft = (!managerMode && j && j.delivery_draft && typeof j.delivery_draft === 'object') ? j.delivery_draft : {};
   const draftVal = (key, fallback) => (_draft[key] !== undefined && _draft[key] !== null && _draft[key] !== '')
     ? _draft[key] : fallback;
-  const draftSave = (key) => managerMode ? '' : ` onchange="saveDeliveryDraft(${j.id}, '${key}', this.value)"`;
+  const draftSave = (key) => (managerMode || stationMode) ? '' : ` onchange="saveDeliveryDraft(${j.id}, '${key}', this.value)"`;
   // Cartons/Packets belongs to the delivery, not to invoicing: it is what went
   // out, and whoever records the shipment is the one who knows it.
   const cartonsPackets = cartonsPacketsFor(j);
@@ -35147,11 +35150,11 @@ function deliveriesSection(j, opts) {
         </div>
         <div style="min-width:0;">
           ${canRecordNow
-            ? `<button type="button" class="btn btn-primary" style="background:#facc15;border-color:#eab308;color:#422006;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>`
+            ? `<button type="button" class="btn btn-primary" style="background:#facc15;border-color:#eab308;color:#422006;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : stationMode ? `recordDeliveryStation(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>`
             : `<div style="font-size:11px;color:var(--text2);line-height:1.35;">Saved as you type.<br>Recording the delivery is done by whoever holds that button.</div>`}
           <div id="deliv-draft-state" style="font-size:11px;font-weight:700;margin-top:4px;opacity:0;transition:opacity 0.25s;">&nbsp;</div>
         </div>
-      </div>${(j.linked_job_id && canRecordNow) ? `<div style="margin-top:8px;">
+      </div>${(j.linked_job_id && canRecordNow && !stationMode) ? `<div style="margin-top:8px;">
         <button type="button" class="btn btn-sm" style="background:#facc15;border-color:#eab308;color:#422006;" onclick="openDeliverLinkedModal(${j.id})" title="Ship this job together with linked Job E-${j.linked_job_id} under one challan">&#128279; Deliver Linked (with E-${j.linked_job_id})</button>
       </div>` : ''}`
     : (stageIdx < 5
@@ -44461,8 +44464,14 @@ function stationQueueHtml() {
         return `<span class="${cls}">${esc(c)}</span>`;
       }).join(' ');
     }
+    // Ready to Deliver (Production Office, owner 2026-11-24): the stage pills - Delivered sends the job on - and
+    // Record Delivery (the delivery fields only).
+    const readyRow = stIdx === STAGES.length - 2 && (isSuperAdmin() || hasPerm('station_btn_deliver'))
+      ? `<div class="pipeline" style="flex-basis:100%;flex-wrap:wrap;row-gap:6px;overflow:visible;margin-top:8px;align-items:center;" onclick="event.stopPropagation()">${stationReadyPipelineHtml(j)}
+          <span role="button" tabindex="0" class="btn btn-sm" style="margin-left:auto;background:#facc15;border-color:#eab308;color:#422006;font-weight:700;" onclick="event.stopPropagation();stationOpenDeliver(${j.id})" title="Record a delivery of this job">&#128666; Record Delivery</span></div>`
+      : '';
     return `
-    <button class="station-job${pending ? ' is-pending' : ''}" onclick="stationOpenJob(${j.id})">
+    <button class="station-job${pending ? ' is-pending' : ''}" onclick="stationOpenJob(${j.id})"${readyRow ? ' style="flex-wrap:wrap;"' : ''}>
       <div class="station-job-number">
         <div class="sj-id">#${j.id}</div>
         ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
@@ -44474,6 +44483,7 @@ function stationQueueHtml() {
         ${finishBadges ? `<div class="sj-finishes" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;">${finishBadges}</div>` : ''}
       </div>
       <div class="sj-go">›</div>
+      ${readyRow}
     </button>`;
   }).join('') : `<div class="empty">${emptyMsg}</div>`;
   // Full keyboard (names and item codes have letters); big for a tablet.
@@ -44810,6 +44820,64 @@ function stationManagerPipelineHtml(j) {
     return `${i>0?'<span class="arrow">›</span>':''}${pill}`;
   }).join('');
 }
+// Ready to Deliver station (owner, 2026-11-24): the job's stage pills; only Delivered can be tapped - it sends a job
+// that is at Ready to Deliver on, the same as the station's own Done.
+function stationReadyPipelineHtml(j) {
+  const si = j.stage_index || 0, last = STAGES.length - 1;
+  return STAGES.map((s, i) => {
+    let cls = 's-pending';
+    if (i < si || (j.stages && j.stages[i] && j.stages[i].status === 'done')) cls = 's-done';
+    else if (i === si) cls = 's-active';
+    const pill = i === last && si === last - 1
+      ? `<span class="stage-pill ${cls}" title="Send to Delivered" onclick="event.stopPropagation();stationSendDelivered(${j.id})" style="cursor:pointer;outline:2px dashed #16a34a;outline-offset:1px;">${SHORT[i]}</span>`
+      : `<span class="stage-pill ${cls}" style="cursor:default;">${SHORT[i]}</span>`;
+    return `${i > 0 ? '<span class="arrow">›</span>' : ''}${pill}`;
+  }).join('');
+}
+async function stationSendDelivered(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j || !stationOperator) return;
+  if (!await confirmDialog({ title: `Send #${id} to Delivered?`, message: `${j.name || ''}\nIt leaves Ready to Deliver.`, confirmText: 'Delivered' })) return;
+  showSaving(true);
+  try {
+    const body = { pin: stationOperator.pin, particulars_patch: {}, advance: true };
+    if (stationPerson && stationPerson.name) body.person_name = stationPerson.name;
+    const updated = await api('POST', `/api/jobs/${id}/station-update`, body);
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+    notify(`#${id} sent to Delivered`);
+    stationRender();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
+// Record Delivery at the Ready to Deliver station: the delivery fields the Production Manager sees (no invoicing),
+// saved with the station's PIN.
+function stationOpenDeliver(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j || !stationOperator) return;
+  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width:900px !important;">
+    <h2>&#128666; Record Delivery &middot; #${j.id} ${esc(j.name || '')}</h2>
+    ${deliveriesSection(j, { stationDeliverMode: true })}
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Close</button></div></div>`);
+}
+async function recordDeliveryStation(jobId) {
+  if (!stationOperator) return;
+  const val = id => ((document.getElementById(id) || {}).value || '').trim();
+  const cartons = val('deliv-cartons'), date = val('deliv-date');
+  const cartonsN = parseFloat(cartons);
+  if (!Number.isFinite(cartonsN) || cartonsN <= 0) { await alertDialog({ title: 'Enter delivery cartons', kind: 'warn' }); return; }
+  if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  const body = { pin: stationOperator.pin, cartons, date, notes: val('deliv-notes'), po_no: val('deliv-po'), batch_no: val('deliv-batch'), cartons_packets: val('deliv-cartons-packets') };
+  if (stationPerson && stationPerson.name) body.person_name = stationPerson.name;
+  showSaving(true);
+  try {
+    const updated = await api('POST', `/api/jobs/${jobId}/station-deliver`, body);
+    jobs = jobs.map(x => x.id === jobId ? { ...x, ...updated } : x);
+    closeModal();
+    stationRender();
+    notify('Delivery recorded');
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
 async function stationManagerMoveToStage(id, target) {
   const j = jobs.find(x => x.id === id);
   if (!j || !stationOperator) return;
@@ -44939,12 +45007,14 @@ function stationManagerQueueHtml() {
   // Every offcut request, any stage and any paper (owner, 2026-10-31).
   if (stationPapercutRequests == null && !_mgrReqLoading) { _mgrReqLoading = true; stationLoadPapercut().finally(() => { _mgrReqLoading = false; }); }
   const reqTab = `<button class="btn btn-sm${!q && stationManagerTab==='requests'?' btn-primary':''}" style="font-weight:700;" onclick="stationManagerSetTab('requests')">&#128230; Offcut Requests${Array.isArray(stationPapercutRequests) ? ' (' + stationPapercutRequests.length + ')' : ''}</button>`;
-  const tabs = reqTab + STAGES.map((s, i) => `<button class="btn btn-sm${!q && stationManagerTab===i?' btn-primary':''}" onclick="stationManagerSetTab(${i})">${esc(SHORT[i]||s)}</button>`).join('');
+  // QC runs a job from CTP to Ready to Deliver - no Delivered tab; a delivered job is not theirs (owner, 2026-11-24).
+  if (stationManagerTab === STAGES.length - 1) stationManagerTab = 0;
+  const tabs = reqTab + STAGES.slice(0, -1).map((s, i) => `<button class="btn btn-sm${!q && stationManagerTab===i?' btn-primary':''}" onclick="stationManagerSetTab(${i})">${esc(SHORT[i]||s)}</button>`).join('');
   const searchBar = stationSearchBarHtml('station-mgr-search-input', stationManagerSearch, '\u{1F50D} Search by job #, name, company or item code\u2026', 'stationManagerSearchInput(this.value)', 'stationManagerClearSearch()');
   let listHtml;
   if (q) {
-    const results = jobs.filter(j => !isNewJob(j) && stationJobMatches(j, q));
-    listHtml = `<div class="station-queue">${results.length ? results.map(j => stationManagerJobRow(j)).join('') : `<div class="empty">No jobs match "${esc(stationManagerSearch)}".</div>`}</div>`;
+    const results = jobs.filter(j => !isNewJob(j) && (j.stage_index || 0) < STAGES.length - 1 && stationJobMatches(j, q));
+    listHtml = `<div class="station-queue">${results.length ? results.map(j => stationManagerJobRow(j)).join('') : `<div class="empty">No jobs match "${esc(stationManagerSearch)}" (delivered jobs are not shown here).</div>`}</div>`;
   } else if (stationManagerTab === 'requests') {
     listHtml = stationPapercutRequestsHtml();
   } else {
@@ -46865,6 +46935,7 @@ const ACC_PRODUCTS_TAB_ROWS = [
 // Station tab: one View/Hidden row for the whole tab.
 const ACC_STATION_TAB_ROWS = [
   { key: 'station_access', type: 'tab' },
+  { key: 'station_btn_deliver', type: 'action' },   // Ready to Deliver: Delivered pill + Record Delivery (owner, 2026-11-24)
 ];
 // Users tab. user_accessregister_tab_access is special-cased in
 // accGroupRow: every role except super_admin renders as a locked HIDDEN
