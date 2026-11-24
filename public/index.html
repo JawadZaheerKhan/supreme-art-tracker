@@ -16924,7 +16924,7 @@ function canEditPaperTx(t) {
 function editPaperBtnHtml(t, ids, itemId) {
   if (!canEditPaperTx(t) || !itemId) return '';
   const list = (ids && ids.length ? ids : [t.id]).join(',');
-  return `<button class="btn btn-sm" data-acc="inv_btn_edit_paper" style="${EDIT_PAPER_BTN_STYLE}" onclick="event.stopPropagation(); editTxPaper([${list}], ${itemId}, ${Math.abs(+t.change || 0)}, ${t.job_id || 'null'}, '${esc(String(t.created_at || ''))}')" title="Wrong paper? Move this stock-out to the right paper - same date and job; the job card follows">&#9998; Edit paper</button>`;
+  return `<button class="btn btn-sm" data-acc="inv_btn_edit_paper" style="${EDIT_PAPER_BTN_STYLE}" onclick="event.stopPropagation(); editTxPaper([${list}], ${itemId}, ${Math.abs(+t.change || 0)}, ${t.job_id || 'null'}, '${esc(String(t.created_at || ''))}', ${t.reason === 'job-consumed' && t.job_id ? 'true' : 'false'})" title="Wrong paper or wrong job? Move this stock-out to the right paper / job - same date; the job card follows">&#9998; Edit paper</button>`;
 }
 function editPaperLabel(it) {
   return [it.paper_type, it.size, it.gsm ? it.gsm + 'gsm' : ''].filter(Boolean).join(' ') + (it.is_offcut ? ' (offcut)' : '') + (it.brand ? ' · ' + it.brand : '');
@@ -16936,29 +16936,41 @@ function editPaperFilter() {
   for (const o of sel.options) o.hidden = !q.every(w => o.dataset.s.includes(w));
   if (sel.selectedIndex >= 0 && sel.options[sel.selectedIndex].hidden) sel.selectedIndex = -1;
 }
-async function editTxPaper(txIds, itemId, sheets, jobId, when) {
+async function editTxPaper(txIds, itemId, sheets, jobId, when, canMove) {
   const from = (inventoryAll || []).find(x => x.id === itemId);
   if (!from) { notify('Open this paper again - the inventory list is still loading'); return; }
+  canMove = !!(canMove && jobId);
   const fmtP = (it, sh) => { const v = Math.round(sh / packetSize(it.paper_type) * 100) / 100; return `${v} ${packetUnitLabel(it.paper_type).toLowerCase()}`; };
   const choices = (inventoryAll || []).filter(x => x && !x.deleted_at && x.id !== itemId)
     .sort((a, b) => (+(!!a.is_offcut !== !!from.is_offcut) - +(!!b.is_offcut !== !!from.is_offcut)) || editPaperLabel(a).localeCompare(editPaperLabel(b), undefined, { numeric: true }));
   const opts = choices.map(x => `<option value="${x.id}" data-s="${esc(editPaperLabel(x).toLowerCase() + (x.is_offcut ? ' offcut' : ''))}">${esc(editPaperLabel(x))} — ${esc(fmtP(x, +x.current_balance || 0))}</option>`).join('');
+  // Job (owner, 2026-11-24): the issue was written to the wrong job - move it to the right one (the paper can stay).
+  const jobList = canMove ? [...(jobs || [])].filter(j => j && !j.deleted_at && j.id !== jobId).sort((a, b) => b.id - a.id).slice(0, 3000) : [];
+  const jobBox = canMove ? `<div style="display:flex;align-items:center;gap:8px;margin:2px 0 6px;">
+      <label for="dlg-job" style="font-size:12.5px;font-weight:700;white-space:nowrap;">Job No.</label>
+      <input id="dlg-job" class="dlg-input" type="text" list="dlg-job-dl" autocomplete="off" value="${jobId}" style="margin:0;flex:1;" placeholder="the right job, e.g. 1518" oninput="editPaperJobHint(${jobId})">
+      <datalist id="dlg-job-dl">${jobList.map(j => `<option value="${j.id}">E-${j.id} · ${esc(j.name || '')}</option>`).join('')}</datalist>
+    </div><div id="dlg-job-hint" style="text-align:left;font-size:11.5px;color:var(--text2);margin:-2px 0 6px;">Change it to move this issue to another job.</div>` : '';
   const body = `<div style="text-align:left;font-size:12.5px;margin:4px 0 6px;">Now: <b>${esc(editPaperLabel(from))}</b> · ${esc(fmtP(from, sheets))}${jobId ? ' · Job E-' + jobId : ''}</div>
+    ${jobBox}
     <input id="dlg-paper-q" class="dlg-input" type="text" placeholder="Search paper, size, gsm, offcut ..." value="${esc([from.paper_type, from.gsm].filter(Boolean).join(' '))}" oninput="editPaperFilter()" onkeydown="if(event.key==='Escape'){dlgClose(null);}">
-    <select id="dlg-paper" size="9" style="width:100%;margin-top:6px;font-size:12.5px;border:1px solid var(--border);border-radius:8px;padding:4px;" ondblclick="dlgClose(this.value || null)">${opts}</select>
-    <div style="text-align:left;font-size:11.5px;color:var(--text2);margin-top:6px;">The wrong paper's issue is reversed (its stock comes back) and the same sheets go out of the paper you pick, on the same date${jobId ? ' - the job card\'s paper changes too and the job stays issued' : ''}.</div>`;
+    <select id="dlg-paper" size="9" style="width:100%;margin-top:6px;font-size:12.5px;border:1px solid var(--border);border-radius:8px;padding:4px;" ondblclick="editPaperNext(${canMove}, ${jobId || 0})">${opts}</select>
+    <div style="text-align:left;font-size:11.5px;color:var(--text2);margin-top:6px;">The wrong paper's issue is reversed (its stock comes back) and the same sheets go out of the paper you pick, on the same date${jobId ? ' - the job card\'s paper changes too and the job stays issued' : ''}.${canMove ? ' Moving it to another job: no paper picked = the same paper.' : ''}</div>`;
   const buttons = `<button class="btn" onclick="dlgClose(null)">Cancel</button>
-    <button class="btn btn-primary" onclick="const v = (document.getElementById('dlg-paper') || {}).value; if (!v) { notify('Pick the right paper in the list'); return; } dlgClose(v)">Next</button>`;
+    <button class="btn btn-primary" onclick="editPaperNext(${canMove}, ${jobId || 0})">Next</button>`;
   const pickP = _showDialog(_dialogTpl({ kind: 'prompt', icon: '&#9998;', iconBg: '#dbeafe', iconColor: '#1e40af', title: 'Edit paper of this stock-out', message: '', body, buttons }), 'prompt', '#dlg-paper-q');
   setTimeout(() => { editPaperFilter(); const sel = document.getElementById('dlg-paper'); if (sel) sel.selectedIndex = -1; }, 0);
-  const newId = parseInt(await pickP, 10);
-  if (!newId) return;   // cancelled, or Next with no paper picked
-  const to = (inventoryAll || []).find(x => x.id === newId);
-  if (!to) return;
-  if ((+to.current_balance || 0) < sheets) {
+  let pick = null;
+  try { pick = JSON.parse((await pickP) || 'null'); } catch (e) { pick = null; }
+  if (!pick) return;   // cancelled
+  const newId = pick.paper ? parseInt(pick.paper, 10) : null;
+  const to = newId ? (inventoryAll || []).find(x => x.id === newId) : null;
+  if (newId && !to) return;
+  if (to && (+to.current_balance || 0) < sheets) {
     await alertDialog({ title: 'Not enough stock', message: `${editPaperLabel(to)} has ${fmtP(to, +to.current_balance || 0)}; this entry needs ${fmtP(to, sheets)}. Stock it in first, then edit again.`, kind: 'warn' });
     return;
   }
+  if (pick.job) return editTxMoveJob(txIds, itemId, sheets, jobId, when, pick.job, from, to, fmtP);
   const ok = await confirmDialog({ title: 'Move this stock-out?', confirmText: 'Move it',
     message: `${fmtP(from, sheets)}${jobId ? ' of Job E-' + jobId : ''}\nfrom: ${editPaperLabel(from)}\nto: ${editPaperLabel(to)}\n\nThe old entry is reversed (${fmtP(from, sheets)} back into ${editPaperLabel(from)}) and the same sheets go out of ${editPaperLabel(to)} on ${when ? fmtDMY(when) : 'the same date'}.${jobId ? ' The job card\'s paper changes too.' : ''}` });
   if (!ok) return;
@@ -16980,6 +16992,66 @@ async function editTxPaper(txIds, itemId, sheets, jobId, when) {
     if (document.getElementById('ledger-content')) await renderInvHistory(itemId);
     refreshVisibleStockMovement();
   } catch (uiErr) { console.error('Post-edit-paper UI refresh failed (the edit itself is saved):', uiErr); }
+  showSaving(false);
+}
+// The job number typed in Edit paper -> the job it is.
+function editPaperJobOf(raw) {
+  const m = /^\s*E?-?\s*(\d+)/i.exec(String(raw || ''));
+  return m ? parseInt(m[1], 10) : null;
+}
+function editPaperJobHint(curJob) {
+  const el = document.getElementById('dlg-job-hint'); if (!el) return;
+  const id = editPaperJobOf((document.getElementById('dlg-job') || {}).value);
+  const j = id ? (jobs || []).find(x => x && x.id === id) : null;
+  el.innerHTML = !id || id === curJob ? 'Change it to move this issue to another job.'
+    : j ? `Move to <b>E-${j.id} · ${esc(j.name || '')}</b>` : `<span style="color:#b91c1c;">Job E-${id} is not in the app.</span>`;
+}
+function editPaperNext(canMove, curJob) {
+  const v = (document.getElementById('dlg-paper') || {}).value || '';
+  let job = null;
+  if (canMove) {
+    const raw = String((document.getElementById('dlg-job') || {}).value || '').trim();
+    const id = editPaperJobOf(raw);
+    if (raw && !id) { notify('Write the job number, e.g. 1518'); return; }
+    if (id && id !== curJob) {
+      if (!(jobs || []).some(x => x && x.id === id)) { notify(`Job E-${id} is not in the app`); return; }
+      job = id;
+    }
+  }
+  if (!v && !job) { notify('Pick the right paper in the list'); return; }
+  dlgClose(JSON.stringify({ paper: v ? parseInt(v, 10) : null, job }));
+}
+// Move the issue to the right job (owner, 2026-11-24): the wrong job's issue is reversed (it goes back to Pending
+// Stock) and the same packets are issued to the right job on the same date - not issued yet: its card's paper becomes
+// this one with these packets; issued already: it goes on as its 2nd (or 3rd) paper.
+async function editTxMoveJob(txIds, itemId, sheets, oldJob, when, newJob, from, to, fmtP) {
+  const nj = (jobs || []).find(x => x && x.id === newJob);
+  if (!nj) { notify(`Job E-${newJob} is not in the app`); return; }
+  const paper = to || from;
+  const pk = fmtP(paper, sheets);
+  const np = nj.particulars || {};
+  const issuedAlready = (Array.isArray(nj.issued_items) && nj.issued_items.length > 0) || nj.issuance_status === 'issued' || (nj.issuance_status === 'ctp' && !!nj.issued_at);
+  const slot = !issuedAlready ? null : !(np.secondary_paper && np.secondary_paper.inventory_item_id) ? '2nd' : !(np.third_paper && np.third_paper.inventory_item_id) ? '3rd' : null;
+  if (issuedAlready && !slot) { await alertDialog({ title: 'No place for it', message: `Job E-${newJob} is issued and already has a 2nd and a 3rd paper.`, kind: 'warn' }); return; }
+  const newText = issuedAlready
+    ? `Job E-${newJob} is issued already - this goes on it as its ${slot} paper (${pk}).`
+    : `Job E-${newJob}: its card's paper becomes ${editPaperLabel(paper)} with ${pk}, and it is issued.`;
+  const ok = await confirmDialog({ title: 'Move this issue to another job?', confirmText: 'Move it',
+    message: `${pk} of ${editPaperLabel(paper)}${to ? ` (was ${editPaperLabel(from)})` : ''}\nfrom: Job E-${oldJob}\nto: Job E-${newJob} · ${nj.name || ''}\n\nJob E-${oldJob}: this issue is reversed - it goes back to Pending Stock.\n${newText}\nSame date (${when ? fmtDMY(when) : 'the same date'}) and challan.` });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const r = await api('POST', '/api/inventory/transactions/move-job', { tx_ids: txIds, job_id: newJob, item_id: to ? to.id : null });
+    notify(`Moved to Job E-${newJob}${r && r.slot ? ' as its ' + r.slot + ' paper' : ''} · Job E-${oldJob} back to Pending Stock`);
+  } catch (e) {
+    await alertDialog({ title: 'Not moved', message: e.message, kind: 'error' });
+  }
+  try {
+    await loadInventory();
+    await loadJobs();
+    if (document.getElementById('ledger-content')) await renderInvHistory(itemId);
+    refreshVisibleStockMovement();
+  } catch (uiErr) { console.error('Post-move UI refresh failed (the move itself is saved):', uiErr); }
   showSaving(false);
 }
 

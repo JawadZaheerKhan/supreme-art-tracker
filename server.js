@@ -14536,7 +14536,153 @@ app.post('/api/inventory/transactions/:id/change-paper', requirePermission('inv_
     } finally { await releaseOpLocks(sql, held); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.post('/api/inventory/transactions/:id/reverse', requireAuth, async (req, res) => {
+// Edit paper -> another job (owner, 2026-11-24): the issue was written to the wrong job. The old job's issue is
+// reversed exactly as Reverse does (it goes back to Pending Stock, or only these sheets are owed again), and the same
+// sheets are issued to the right job exactly as Issue Stock does, on the same date and challan:
+//   - not issued yet: its card's paper becomes this paper and its Quantity of Packets these packets (its Sheets
+//     are left - they depend on the cut);
+//   - already issued: this goes on it as its 2nd (or 3rd) paper with these packets, its Sheets and packets total
+//     grow by them.
+// The paper can change at the same time (item_id) or stay. If the issue to the right job fails, the right job's card
+// is put back and the sheets are issued to the old job again.
+app.post('/api/inventory/transactions/move-job', requirePermission('inv_btn_edit_paper'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const txIds = [...new Set((Array.isArray(req.body && req.body.tx_ids) ? req.body.tx_ids : []).map(x => parseInt(x, 10)).filter(Number.isFinite))];
+    const newJobId = parseInt(req.body && req.body.job_id, 10);
+    const pickId = req.body && req.body.item_id != null && req.body.item_id !== '' ? parseInt(req.body.item_id, 10) : null;
+    if (!txIds.length || !Number.isFinite(newJobId)) return res.status(400).json({ error: 'Pick the job to move it to.' });
+    const txs = await sql`SELECT * FROM inventory_transactions WHERE id = ANY(${txIds}) ORDER BY id`;
+    if (txs.length !== txIds.length) return res.status(404).json({ error: 'Entry not found' });
+    const oldJobId = txs[0].job_id;
+    for (const t of txs) {
+      if (t.reason !== 'job-consumed' || !(t.change < 0) || t.reverses_tx_id || !t.job_id) return res.status(400).json({ error: 'Only a job issue can be moved to another job.' });
+      if (t.job_id !== oldJobId) return res.status(400).json({ error: 'These parts are of different jobs - move them one at a time.' });
+    }
+    if (oldJobId === newJobId) return res.status(400).json({ error: `It is already Job E-${newJobId}'s.` });
+    if ((await sql`SELECT 1 FROM inventory_transactions WHERE reverses_tx_id = ANY(${txIds}) LIMIT 1`).length) return res.status(409).json({ error: 'This entry was already reversed - there is nothing to move.' });
+    const sentOff = await sql`
+      SELECT 1 FROM inventory_transactions o WHERE o.paired_tx_id = ANY(${txIds}) AND o.reverses_tx_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = o.id) LIMIT 1`;
+    if (sentOff.length) return res.status(400).json({ error: 'Part of this issue was sent to offcut - reverse that offcut entry first.' });
+    const [oldJob] = await sql`SELECT * FROM jobs WHERE id = ${oldJobId}`;
+    const [nj] = await sql`SELECT * FROM jobs WHERE id = ${newJobId} AND deleted_at IS NULL`;
+    if (!nj) return res.status(404).json({ error: `Job E-${newJobId} is not in the app.` });
+    const np = { ...(nj.particulars || {}) };
+    if (np.paper_waived) return res.status(400).json({ error: `Job E-${newJobId} was processed without paper - send it back to Pending Stock first.` });
+    // The sheets go out of the paper picked, or each part stays on its own paper (brands of one paper).
+    const splitsMap = new Map();
+    for (const t of txs) { const it = pickId || t.item_id; splitsMap.set(it, (splitsMap.get(it) || 0) + Math.round(-parseFloat(t.change))); }
+    const splits = [...splitsMap.entries()].map(([item_id, sheets]) => ({ item_id, sheets }));
+    const total = splits.reduce((a, s) => a + s.sheets, 0);
+    const itemIds = [...new Set([...splits.map(s => s.item_id), ...txs.map(t => t.item_id)])];
+    const its = await sql`SELECT * FROM inventory_items WHERE id = ANY(${itemIds})`;
+    const itById = new Map(its.map(x => [x.id, x]));
+    const anchorId = [...splits].sort((a, b) => b.sheets - a.sheets)[0].item_id;
+    const anchor = itById.get(anchorId);
+    if (!anchor || (pickId && anchor.deleted_at)) return res.status(400).json({ error: 'That paper is not in Inventory.' });
+    for (const s of splits) if (paperKeySrv(itById.get(s.item_id)) !== paperKeySrv(anchor)) return res.status(400).json({ error: 'These parts are of different papers - pick the paper to move them to.' });
+    const ps = packetSize(anchor.paper_type), unit = isReamPaperSrv(anchor.paper_type) ? 'reams' : 'packets';
+    // Stock: what comes back from the reversed parts counts (same paper kept = nothing extra needed).
+    for (const s of splits) {
+      const back = txs.filter(t => t.item_id === s.item_id).reduce((a, t) => a + Math.round(-parseFloat(t.change)), 0);
+      const bal = (parseFloat(itById.get(s.item_id).current_balance) || 0) + back;
+      if (bal < s.sheets) return res.status(400).json({ error: `Not enough stock of ${paperNameSrv(itById.get(s.item_id))}: it has ${+(bal / ps).toFixed(2)} ${unit}, this needs ${+(s.sheets / ps).toFixed(2)}. Stock it in first.` });
+    }
+    // Is the right job issued already? Then this goes on as its 2nd (or 3rd) paper.
+    const issuedAlready = (Array.isArray(nj.issued_items) && nj.issued_items.length > 0) || nj.issuance_status === 'issued' || (nj.issuance_status === 'ctp' && !!nj.issued_at);
+    let slot = null;
+    if (issuedAlready) {
+      slot = EXTRA_PAPERS.find(e => !(np[e.key] && typeof np[e.key] === 'object' && np[e.key].inventory_item_id));
+      if (!slot) return res.status(400).json({ error: `Job E-${newJobId} is issued and already has a 2nd and a 3rd paper - there is no place for this one.` });
+    } else if (nj.issuance_status !== 'pending' && nj.issuance_status !== 'ctp') {
+      return res.status(400).json({ error: `Job E-${newJobId} is not waiting for paper yet (it has not reached CTP).` });
+    }
+    const packets = +(total / ps).toFixed(4);
+    const shownPk = +(total / ps).toFixed(2);
+    const oldName = (() => { const it = itById.get(txs[0].item_id); return it ? paperNameSrv(it) + (it.is_offcut ? ' (offcut)' : '') : 'paper'; })();
+    const newName = paperNameSrv(anchor) + (anchor.is_offcut ? ' (offcut)' : '') + (anchor.brand && splits.length === 1 ? ' · ' + anchor.brand : '');
+    const day = businessDateISO(new Date(txs[0].created_at));
+    const challan = txs[0].challan_no || '';
+    const oldSourceOf = t => { const x = (Array.isArray(oldJob && oldJob.issued_items) ? oldJob.issued_items : []).find(y => y && Number(y.tx_id) === t.id); return (x && x.source) || 'primary'; };
+
+    // 1) the old job's issue is reversed - one part at a time, exactly as Reverse.
+    const reversed = [];
+    const runReverse = async (t) => {
+      const r2 = Object.create(req); r2.params = { id: String(t.id) }; r2.body = {};
+      const out = { code: 200, body: null };
+      const fake = { status(c) { out.code = c; return this; }, json(b) { out.body = b; return this; } };
+      await invH.reverse(r2, fake);
+      if (out.code !== 200) throw new Error((out.body && out.body.error) || 'Reverse failed');
+      return out.body;
+    };
+    // Put back what was reversed (when a later step failed).
+    const reissueOld = async () => {
+      const bySrc = new Map();
+      for (const t of reversed) { const s = oldSourceOf(t); if (!bySrc.has(s)) bySrc.set(s, []); bySrc.get(s).push({ item_id: t.item_id, sheets: Math.round(-parseFloat(t.change)) }); }
+      const errs = [];
+      for (const [source, sp] of bySrc) {
+        const r = await performIssueStock(sql, req, oldJobId, { source, splits: sp, challan_no: challan, entry_date: day });
+        if (r.error) errs.push(r.error);
+      }
+      return errs;
+    };
+    try {
+      for (const t of txs) { await runReverse(t); reversed.push(t); }
+    } catch (e) {
+      const errs = reversed.length ? await reissueOld() : [];
+      return res.status(400).json({ error: `Could not reverse it on Job E-${oldJobId}: ${e.message}${reversed.length ? (errs.length ? ` - and issuing it back failed (${errs[0]}); issue it to E-${oldJobId} again from Pending Stock.` : ' - nothing changed.') : ''}` });
+    }
+
+    // 2) the right job's card, then the issue - exactly as Issue Stock.
+    const before = { particulars: nj.particulars, inventory_item_id: nj.inventory_item_id, size: nj.size, sheets: nj.sheets, cut_size: nj.cut_size, offcut_size: nj.offcut_size };
+    let cardNote;
+    if (slot) {
+      const cut = String(np.sheet_cut || '1/1');
+      const pieces = parseInt(cut.split('/')[1], 10) || 1;
+      np[slot.key] = { inventory_item_id: anchorId, packets, sheet_cut: cut };
+      np.quantity_of_packets = String(+((parseFloat(np.quantity_of_packets) || 0) + packets).toFixed(4));
+      const sheetsNow = Math.round((parseFloat(nj.sheets) || 0) + packets * ps * pieces);
+      await sql`UPDATE jobs SET particulars = ${JSON.stringify(np)}, sheets = ${sheetsNow}, updated_at = NOW() WHERE id = ${newJobId}`;
+      cardNote = `added as its ${slot.label} paper (${shownPk} ${unit})`;
+    } else {
+      // Its 2nd / 3rd papers stay; the packets total = these packets + theirs.
+      const extrasPk = EXTRA_PAPERS.reduce((a, e) => a + ((np[e.key] && np[e.key].inventory_item_id) ? (parseFloat(np[e.key].packets) || 0) : 0), 0);
+      np.quantity_of_packets = String(+(packets + extrasPk).toFixed(4));
+      delete np.partial_pending_sheets;
+      const size = (anchor.size || anchor.gsm) ? `${anchor.size || ''}${anchor.size && anchor.gsm ? ' / ' : ''}${anchor.gsm ? anchor.gsm + 'gsm' : ''}` : nj.size;
+      // Its cut was for its old paper: another size of paper = no cut (no offcut of the wrong size comes back).
+      const [oldMain] = nj.inventory_item_id ? await sql`SELECT size FROM inventory_items WHERE id = ${nj.inventory_item_id}` : [];
+      const keepCut = !!oldMain && String(oldMain.size || '').trim().toLowerCase() === String(anchor.size || '').trim().toLowerCase();
+      await sql`UPDATE jobs SET particulars = ${JSON.stringify(np)}, inventory_item_id = ${anchorId}, size = ${size},
+                       cut_size = ${keepCut ? nj.cut_size : null}, offcut_size = ${keepCut ? nj.offcut_size : null}, updated_at = NOW() WHERE id = ${newJobId}`;
+      cardNote = `its card's paper is now ${newName}, ${shownPk} ${unit}${!keepCut && (nj.cut_size || nj.offcut_size) ? ' (its cut was for the old paper - set the cut again if it has one)' : ''}`;
+    }
+    const issued = await performIssueStock(sql, req, newJobId, { source: slot ? slot.source : 'primary', splits, challan_no: challan, entry_date: day });
+    if (issued.error) {
+      await sql`UPDATE jobs SET particulars = ${JSON.stringify(before.particulars || {})}, inventory_item_id = ${before.inventory_item_id}, size = ${before.size}, sheets = ${before.sheets}, cut_size = ${before.cut_size}, offcut_size = ${before.offcut_size} WHERE id = ${newJobId}`;
+      const errs = await reissueOld();
+      return res.status(400).json({ error: `Could not issue it to Job E-${newJobId}: ${issued.error} - ${errs.length ? `and issuing it back to E-${oldJobId} failed (${errs[0]}); issue it to E-${oldJobId} again from Pending Stock.` : `nothing changed (E-${oldJobId} has it again).`}` });
+    }
+    // The new stock-out rows say where they came from.
+    const newItems = (Array.isArray(issued.job && issued.job.issued_items) ? issued.job.issued_items : []).slice(-splits.length);
+    const newTxIds = newItems.map(x => x && x.tx_id).filter(Boolean);
+    const by = txs[0].actor_name || (txs[0].user_email ? String(txs[0].user_email).split('@')[0] : '');
+    if (newTxIds.length) await sql`UPDATE inventory_transactions SET user_notes = ${`Moved from Job E-${oldJobId}${by ? ' (issued by ' + by + ')' : ''}${pickId ? ' · paper was ' + oldName : ''}`} WHERE id = ANY(${newTxIds})`;
+    const amount = `${shownPk} ${unit} (${total.toLocaleString()} sheets)`;
+    const meta = { tx_ids: txIds, new_tx_ids: newTxIds, from_job: oldJobId, to_job: newJobId, item_id: anchorId, sheets: total, slot: slot ? slot.source : 'primary' };
+    await logAudit(sql, req, { action: 'job.issue_moved', entityType: 'job', entityId: oldJobId, metadata: meta,
+      summary: `Issuance reversed - moved to Job E-${newJobId}: ${amount} of ${oldName}. This job needs its paper again (Pending Stock).` });
+    await logAudit(sql, req, { action: 'job.issue_moved', entityType: 'job', entityId: newJobId, metadata: meta,
+      summary: `Issuance moved here from Job E-${oldJobId}: ${amount} of ${newName} - ${cardNote}.` });
+    await logAudit(sql, req, { action: 'inventory.issue_moved', entityType: 'inventory', entityId: anchorId, metadata: meta,
+      summary: `Issue moved from Job E-${oldJobId} to Job E-${newJobId}: ${amount}${pickId ? ` · paper ${oldName} -> ${newName}` : ''}` });
+    res.json({ ok: true, to_job: newJobId, from_job: oldJobId, slot: slot ? slot.label : null, new_tx_ids: newTxIds });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+const invH = {};
+app.post('/api/inventory/transactions/:id/reverse', requireAuth, invH.reverse = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
