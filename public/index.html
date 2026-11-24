@@ -46388,11 +46388,38 @@ function enterStore(section) {
   try { localStorage.setItem('storeSection', storeSection); } catch (e) {}
   const v = encodeURIComponent(document.documentElement.dataset.build || String(Date.now()).slice(0, 7));
   const src = `/store/index.html?module=${storeSection}&v=${v}`;
-  const tabs = allowed.length > 1 ? `<div class="store-subtabs">${allowed.map(s => `<button type="button" class="btn btn-sm${s.id === storeSection ? ' is-on' : ''}" onclick="enterStore('${s.id}')">${s.icon} ${esc(s.label)}</button>`).join('')}</div>` : '';
+  // Super Admin: Copy from ERP / Check against ERP (owner, 2026-11-24).
+  const erpBtns = isSuperAdmin() ? `<span style="margin-left:auto;display:flex;gap:6px;">
+      <button type="button" class="btn btn-sm" data-acc="super_admin" onclick="storeErpCopy(true)" title="Compare every item here with the ERP: quantity, entries, in, out, each batch - nothing changes">&#10003; Check against ERP</button>
+      <button type="button" class="btn btn-sm" data-acc="super_admin" onclick="storeErpCopy(false)" title="Copy the whole ERP store here (replaces what is here), then check it">&#8681; Copy from ERP</button></span>` : '';
+  const tabs = (allowed.length > 1 || erpBtns) ? `<div class="store-subtabs">${allowed.length > 1 ? allowed.map(s => `<button type="button" class="btn btn-sm${s.id === storeSection ? ' is-on' : ''}" onclick="enterStore('${s.id}')">${s.icon} ${esc(s.label)}</button>`).join('') : ''}${erpBtns}</div>` : '';
   const frame = document.getElementById('store-frame');
   if (frame && frame.dataset.section === storeSection) { storeFrameFit(); return; }   // already open - keep its place
   root.innerHTML = `${tabs}<iframe id="store-frame" data-section="${storeSection}" src="${src}" title="Store" style="width:100%;border:0;display:block;background:#f5f5f3;"></iframe>`;
   storeFrameFit();
+}
+// Copy the whole ERP store here (same ids; what is here is replaced), or only compare - then every item is checked
+// against the ERP: quantity, entries, in, out and each batch.
+async function storeErpCopy(checkOnly) {
+  if (!checkOnly) {
+    const ok = await confirmDialog({ title: 'Copy the whole Store from the ERP?', danger: true, confirmText: 'Copy from ERP',
+      message: 'Every item, stock in / out (with date, person, batch, P.O. / Invoice), order, category, machine and Issued To name comes from the ERP with the same numbers.\n\nWhat is in this Store now is REPLACED by the ERP\'s (until the switch the ERP is the real store). The ERP itself is only read - nothing there changes.\n\nThen every item is checked against the ERP.' });
+    if (!ok) return;
+  }
+  showSaving(true);
+  let r;
+  try { r = await api('POST', '/api/store/erp-copy', { check_only: !!checkOnly }); }
+  catch (e) { showSaving(false); await alertDialog({ title: checkOnly ? 'Check failed' : 'Copy failed', message: e.message, kind: 'error' }); return; }
+  showSaving(false);
+  const copied = r.copied ? Object.entries(r.copied).map(([k, v]) => `${k}: ${Number(v).toLocaleString()}`).join(' · ') : '';
+  const list = (r.diffs || []).map(d => `<tr><td style="padding:4px 8px;font-weight:700;">${esc(d.item)}</td><td style="padding:4px 8px;color:#b91c1c;">${esc(d.what)}</td></tr>`).join('');
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:760px;">
+    <h2>${checkOnly ? '&#10003; Checked against the ERP' : '&#8681; Copied from the ERP'}</h2>
+    ${copied ? `<div style="font-size:12.5px;color:var(--text2);margin-bottom:8px;">${esc(copied)}</div>` : ''}
+    <div style="font-size:15px;font-weight:800;margin:6px 0 10px;color:${r.diffCount ? '#b91c1c' : '#166534'};">${Number(r.items).toLocaleString()} items - ${r.diffCount ? r.diffCount + ' do not match the ERP' : 'every item matches the ERP (quantity, entries, in, out, each batch)'}</div>
+    ${list ? `<div class="report-scroll-wrap" style="max-height:50vh;"><table class="ss-table" style="width:100%;font-size:12.5px;border-collapse:collapse;"><thead><tr><th style="text-align:left;padding:6px 8px;">Item</th><th style="text-align:left;padding:6px 8px;">Difference</th></tr></thead><tbody>${list}</tbody></table></div>${r.diffCount > (r.diffs || []).length ? `<div style="font-size:12px;color:var(--text2);margin-top:6px;">First ${(r.diffs || []).length} shown.</div>` : ''}` : ''}
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">OK</button></div></div>`);
+  if (!checkOnly) { const f = document.getElementById('store-frame'); if (f) f.contentWindow.location.reload(); }
 }
 // The store page fills the rest of the window (it has its own sidebar and scrolling).
 function storeFrameFit() {

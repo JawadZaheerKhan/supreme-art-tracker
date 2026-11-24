@@ -912,5 +912,85 @@ module.exports = function registerStoreRoutes(app, deps) {
     } catch (e) { fail(res, e); }
   });
 
+  // ── Copy from the ERP (Super Admin; owner 2026-11-24: "wholeee... even the past data") ──
+  // Everything of the ERP store comes over with the SAME ids, so every link (an entry's item, an order's stock ins)
+  // stays as it was: categories, machines, Issued To names, items (also those in the Trash or removed from it, whose
+  // history is kept), every stock in / out with its date, time, person, batch, P.O. / Invoice No., orders, ignored
+  // warnings and hidden dropdown names. The ERP is only READ. What is in this store is REPLACED (until the switch the
+  // ERP is the real store). Then every item is checked against the ERP: quantity, entries, in, out, each batch.
+  const ERP_COPY = [
+    { from: 'categories', to: 'store_categories', cols: 'id, name, module' },
+    { from: 'machines', to: 'store_machines', cols: 'id, name, module' },
+    { from: 'store_recipients', to: 'store_recipients', cols: 'id, name, created_at' },
+    { from: 'parts', to: 'store_parts', cols: 'id, sku, name, category, module, machine, brand, supplier, rack_no, unit, qty, min_qty, description, image_url, deleted_at, archived_at' },
+    { from: 'store_orders', to: 'store_orders', cols: 'id, part_id, qty, supplier, po_no, order_date::text AS order_date, expected_date::text AS expected_date, notes, cancelled_at, created_by, created_at, item_name, unit, module, po_id, po_sr' },
+    { from: 'transactions', to: 'store_tx', cols: 'id, type, part_id, qty, date::text AS date, ref, notes, issued_to, purpose, challan_no, created_by, batch, po_no, invoice_no, batch_label, created_at, order_id' },
+    { from: 'store_ledger_ignores', to: 'store_ledger_ignores', cols: 'part_id, diff, ignored_by, ignored_at', noId: true },
+    { from: 'store_dropdown_hidden', to: 'store_dropdown_hidden', cols: 'field, value, hidden_by, hidden_at', noId: true },
+  ];
+  // One side's figures per item: quantity, entries, in, out, and each batch.
+  async function storeFigures(q, partsT, txT) {
+    const parts = await q(`SELECT p.id, p.qty, COUNT(t.id)::int AS n,
+                                  COALESCE(SUM(CASE WHEN t.type = 'in' THEN t.qty END), 0) AS i,
+                                  COALESCE(SUM(CASE WHEN t.type = 'out' THEN t.qty END), 0) AS o
+                             FROM ${partsT} p LEFT JOIN ${txT} t ON t.part_id = p.id GROUP BY p.id, p.qty`, []);
+    const batches = await q(`SELECT part_id, COALESCE(batch, 1) AS b, SUM(CASE WHEN type = 'in' THEN qty ELSE -qty END) AS bal
+                               FROM ${txT} GROUP BY 1, 2`, []);
+    const m = new Map();
+    for (const p of parts) m.set(Number(p.id), { qty: roundQty(Number(p.qty)), n: Number(p.n), i: roundQty(Number(p.i)), o: roundQty(Number(p.o)), b: {} });
+    for (const r of batches) { const x = m.get(Number(r.part_id)); if (x) x.b[Number(r.b)] = roundQty(Number(r.bal)); }
+    return m;
+  }
+  async function compareWithErp(sql, erp) {
+    const [a, b] = await Promise.all([storeFigures((s, p) => erp(s, p), 'parts', 'transactions'), storeFigures((s, p) => sql(s, p), 'store_parts', 'store_tx')]);
+    const names = new Map((await sql`SELECT id, sku, name, module FROM store_parts`).map(p => [Number(p.id), p]));
+    const diffs = [];
+    for (const [id, e] of a) {
+      const t = b.get(id);
+      const nm = names.get(id) ? labelOf(names.get(id)) : `#${id}`;
+      if (!t) { diffs.push({ id, item: nm, what: 'missing here' }); continue; }
+      const out = [];
+      for (const k of ['qty', 'n', 'i', 'o']) if (Math.abs(e[k] - t[k]) > 0.0005) out.push(`${{ qty: 'quantity', n: 'entries', i: 'in', o: 'out' }[k]} ERP ${e[k]} / here ${t[k]}`);
+      for (const bn of new Set([...Object.keys(e.b), ...Object.keys(t.b)])) {
+        if (Math.abs((e.b[bn] || 0) - (t.b[bn] || 0)) > 0.0005) out.push(`${ordinal(Number(bn))} batch ERP ${e.b[bn] || 0} / here ${t.b[bn] || 0}`);
+      }
+      if (out.length) diffs.push({ id, item: nm, what: out.join('; ') });
+    }
+    for (const id of b.keys()) if (!a.has(id)) diffs.push({ id, item: names.get(id) ? labelOf(names.get(id)) : `#${id}`, what: 'not in the ERP' });
+    return { items: a.size, diffs };
+  }
+  let _copying = false;
+  app.post('/api/store/erp-copy', requireAuth, async (req, res) => {
+    if (!isSA(req.user)) return res.status(403).json({ error: 'Super Admin only' });
+    const erp = erpSql();
+    if (!erp) return res.status(400).json({ error: 'The ERP link is not set (ERP_DATABASE_URL).' });
+    const checkOnly = !!(req.body && req.body.check_only);
+    if (_copying) return res.status(409).json({ error: 'A copy is already running - wait for it to finish.' });
+    _copying = true;
+    try {
+      const sql = await db();
+      const counts = {};
+      if (!checkOnly) {
+        // Read everything first - nothing here changes unless the whole ERP store was read.
+        const data = {};
+        for (const t of ERP_COPY) data[t.to] = await erp(`SELECT ${t.cols} FROM ${t.from}${t.noId ? '' : ' ORDER BY id'}`, []);
+        // Replace this store's contents (the children first), then put the ERP's in, the parents first.
+        for (const t of ['store_ledger_ignores', 'store_tx', 'store_orders', 'store_parts', 'store_categories', 'store_machines', 'store_recipients', 'store_dropdown_hidden']) await sql(`DELETE FROM ${t}`, []);
+        for (const t of ERP_COPY) {
+          const rows = data[t.to];
+          for (let k = 0; k < rows.length; k += 1500) {
+            await sql(`INSERT INTO ${t.to} SELECT * FROM json_populate_recordset(NULL::${t.to}, $1::json)`, [JSON.stringify(rows.slice(k, k + 1500))]);
+          }
+          if (!t.noId) await sql(`SELECT setval(pg_get_serial_sequence('${t.to}', 'id'), GREATEST((SELECT COALESCE(MAX(id), 0) FROM ${t.to}), 1), (SELECT COUNT(*) > 0 FROM ${t.to}))`, []);
+          counts[t.from] = rows.length;
+        }
+      }
+      const check = await compareWithErp(sql, erp);
+      await log(sql, req, checkOnly ? 'store.erp_check' : 'store.erp_copy',
+        `${checkOnly ? 'Checked the Store against the ERP' : 'Copied the whole Store from the ERP (' + Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ') + ')'}: ${check.items} items, ${check.diffs.length ? check.diffs.length + ' do not match' : 'all match'}`);
+      res.json({ ok: true, copied: checkOnly ? null : counts, items: check.items, diffs: check.diffs.slice(0, 200), diffCount: check.diffs.length });
+    } catch (e) { fail(res, e); } finally { _copying = false; }
+  });
+
   return { ensureStore, modulesFor, erpSql };
 };
