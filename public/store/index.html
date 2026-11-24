@@ -228,6 +228,9 @@ input:focus,select:focus{outline:none;border-color:#8C2326;box-shadow:0 0 0 3px 
 .ig-b.out{background:#d93a1d;color:#fff;border-color:#d93a1d}
 .ig-b.edit,.ig-b.ghost{background:#fff;color:#111;border-color:#d9c4c0}
 .ig-b.del{background:#111;color:#fff;border-color:#111}
+.ig-thumb{width:34px;height:34px;font-size:15px;border-radius:7px}
+.ig-mach{margin-top:2px}.ig-mach .machine-chip{font-size:10.5px;padding:1px 7px}
+.ig-side-sku{font-size:10.5px;font-weight:800;color:#555;font-family:monospace;margin-bottom:-3px}
 .ig-flag{display:inline-block;margin-left:8px;font-size:10px;font-weight:700;padding:0 6px;border-radius:999px;vertical-align:middle;text-transform:none}
 .ig-flag.low{background:#fef3c7;color:#92400E}
 .ig-flag.out{background:#fee2e2;color:#991B1B}
@@ -647,13 +650,13 @@ td>.reorder-flag{margin-left:0;flex-direction:column;align-items:flex-start;gap:
           <button class="btn btn-sm btn-primary write-only" onclick="openModal('addPart')"><i class="ti ti-plus"></i> Add Part</button>
         </div>
       </div>
-      <div class="card fit-card machinery-only">
+      <div class="card fit-card machinery-only" style="display:none">
         <table>
           <thead id="inv-thead"></thead>
           <tbody id="inv-table"></tbody>
         </table>
       </div>
-      <div class="inv-groups consumables-only" id="inv-groups"></div>
+      <div class="inv-groups" id="inv-groups"></div>
     </div>
 
     <!-- STOCK IN -->
@@ -4490,8 +4493,25 @@ function renderInkGroups(visible,sortV){
     const all=state.parts.filter(p=>inkKey(p)===k);
     const t=inkGroupTotal(all);
     const n=all.length;
+    const inks=isInks();
     const rowHtml=rows.map(p=>{
       const flag=p.qty===0?'<span class="ig-flag out">Out</span>':(p.qty<=p.minQty?'<span class="ig-flag low">Low</span>':'');
+      if(!inks){
+        // Parts Store: the photo, the part no., its machines, min qty / description; no batches.
+        const img=p.imageUrl?_escHtml(p.imageUrl):'';
+        const mach=parseMachines(p.machine).map(m=>'<span class="machine-chip">'+e(m)+'</span>').join('');
+        const pmeta=[p.minQty?'Min '+fmtQty(p.minQty):'',p.desc?e(p.desc):''].filter(Boolean).join(' · ');
+        return '<div class="ig-row">'
+          +'<div class="inv-thumb ig-thumb"'+(img?' onclick="openLightbox(\''+img+'\')" title="Click to enlarge"':'')+'>'+(img?'<img src="'+img+'" alt="">':'<i class="ti ti-photo"></i>')+'</div>'
+          +'<div class="ig-who"><b>'+(p.sku?e(p.sku):'<i>No part no.</i>')+'</b>'+flag+(mach?'<div class="ig-mach">'+mach+'</div>':'')+(pmeta?'<div class="ig-meta">'+pmeta+'</div>':'')+'</div>'
+          +'<div class="ig-qty"><b>'+fmtQty(p.qty)+'</b><small>'+e(p.unit)+'</small></div>'
+          +'<div class="ig-btns">'
+          +'<button class="ig-b in write-only" title="Stock in this part" onclick="openSingleIn('+p.id+')">+ Stock</button>'
+          +'<button class="ig-b out write-only" title="Issue / stock out this part" onclick="openSingleOut('+p.id+')">\u2212 Stock</button>'
+          +'<button class="ig-b edit write-only" title="Edit this part" onclick="openEditPart('+p.id+')">Edit</button>'
+          +'<button class="ig-b del write-only" title="Move this part to trash" onclick="deletePart('+p.id+')">Delete</button>'
+          +'</div></div>';
+      }
       const meta=[p.sku?'['+e(p.sku)+']':'',p.rackNo?'Rack '+e(p.rackNo):''].filter(Boolean).join(' · ');
       const bl=partBatches(p);
       const bmeta=bl.length>1?'<span class="ig-batches">'+bl.map(b=>e(batchCode(p.id,b.n))+' '+fmtQty(b.qty)).join(' \u00B7 ')+'</span>':'';
@@ -4508,15 +4528,19 @@ function renderInkGroups(visible,sortV){
     }).join('');
     return '<div class="ig">'
       +'<div class="ig-head">'
-      +'<div class="ig-title"><span class="ig-name">'+e(all[0].name)+'</span>'+(all[0].category?'<span class="ig-chip">'+e(all[0].category)+'</span>':'')+'<span class="ig-badge">'+n+(n===1?' brand':' brands')+'</span>'
+      +'<div class="ig-title"><span class="ig-name">'+e(all[0].name)+'</span>'+(all[0].category?'<span class="ig-chip">'+e(all[0].category)+'</span>':'')+'<span class="ig-badge">'+n+(inks?(n===1?' brand':' brands'):(n===1?' part':' parts'))+'</span>'
       +'</div>'
       +'<div class="ig-total"><span class="tot"><b>'+(t.mixed?'\u2014':fmtQty(t.sum))+'</b><small>'+e(t.mixed?'mixed units':t.unit)+' total</small></span>'
-      +'<button class="ig-b ghost" data-k="'+e(k)+'" title="Every stock in and out of this product, all suppliers and brands" onclick="openGroupHistory(this.dataset.k)">History</button>'
-      +'<button class="ig-b ghost write-only" data-k="'+e(k)+'" title="Add another supplier / brand of this product" onclick="openAddBrand(this.dataset.k)">+ Brand</button></div>'
+      +(inks||n>1?'<button class="ig-b ghost" data-k="'+e(k)+'" title="'+(inks?'Every stock in and out of this product, all suppliers and brands':'Every stock in and out of these parts')+'" onclick="openGroupHistory(this.dataset.k)">History</button>'
+        :'<button class="ig-b ghost" title="Every stock in and out of this part" onclick="openPartHistory('+all[0].id+')">History</button>')
+      +(inks?'<button class="ig-b ghost write-only" data-k="'+e(k)+'" title="Add another supplier / brand of this product" onclick="openAddBrand(this.dataset.k)">+ Brand</button></div>'
+        :'<button class="ig-b ghost write-only" data-k="'+e(k)+'" title="Add another part no. (size / model) of this part" onclick="openAddPartNo(this.dataset.k)">+ Part No.</button></div>')
       +'</div>'+rowHtml+'</div>'
+      // Parts Store: each part's own reorder warning beside the card (no orders in the Parts Store).
+      +(!inks?'<div class="ig-side">'+all.map(p=>{const f=reorderFlag([p]);return f?(n>1?'<div class="ig-side-sku">'+(p.sku?e(p.sku):'No part no.')+'</div>':'')+f:'';}).join('')+'</div>':'')
       // Beside the card, in the space to its right: the reorder warning and + Order (owner, 2026-11-14).
-      +'<div class="ig-side">'+reorderFlag(all)
-      +'<button class="ig-order write-only" title="Book an order of this item" onclick="openOrderForm({partId:'+all.slice().sort((a,b)=>usedSince3Months(b.id)-usedSince3Months(a.id))[0].id+',qty:'+(r=>r&&r.need-pendingOrdered(all.map(p=>p.id))>0.0005?Math.round((r.need-pendingOrdered(all.map(p=>p.id)))*1000)/1000:0)(reorderOf(all))+'})">+ Order</button></div>';
+      +(!inks?'':'<div class="ig-side">'+reorderFlag(all)
+      +'<button class="ig-order write-only" title="Book an order of this item" onclick="openOrderForm({partId:'+all.slice().sort((a,b)=>usedSince3Months(b.id)-usedSince3Months(a.id))[0].id+',qty:'+(r=>r&&r.need-pendingOrdered(all.map(p=>p.id))>0.0005?Math.round((r.need-pendingOrdered(all.map(p=>p.id)))*1000)/1000:0)(reorderOf(all))+'})">+ Order</button></div>');
   }).join('');
 }
 
@@ -4531,6 +4555,18 @@ function openAddBrand(k){
   document.getElementById('f-part-unit').value=first.unit;
   syncInkCombos();
   document.getElementById('f-part-supplier__select').focus();
+}
+
+// "+ Part No." (Parts Store): the add form with the part's name, category and unit already in.
+function openAddPartNo(k){
+  const first=state.parts.find(p=>inkKey(p)===k);
+  if(!first)return;
+  openModal('addPart');
+  ['f-part-sku','f-part-qty'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  document.getElementById('f-part-name').value=first.name;
+  document.getElementById('f-part-cat').value=first.category;
+  document.getElementById('f-part-unit').value=first.unit;
+  const sku=document.getElementById('f-part-sku');if(sku)sku.focus();
 }
 
 // History of a product: the movements of every brand under it, newest first, each naming its
@@ -4559,27 +4595,28 @@ function openGroupHistory(k,brandId){
     const before=bal[t.id]==null?'—':fmtQty(Math.round((bal[t.id]-(t.type==='in'?Number(t.qty):-Number(t.qty)))*1000)/1000)+un;
     return (isPairTx(t)?'<tr style="'+pairRowStyle(t)+'">':'<tr class="txn-row-link" onclick="closeModal(\'partHistory\');openTxnInReport('+t.id+',{page:\'inventory\',groupKey:_ghKey,brandId:'+(brandId?"\'"+brandId+"\'":'null')+'})" title="Open this entry in the '+(t.type==='in'?'Stock In':'Stock Out')+' report">')
       +'<td style="'+cell+';white-space:nowrap">'+whenHtml(t)+'</td>'
-      +'<td style="'+cell+'"><b>'+e(p?(p.supplier||'No supplier'):'—')+'</b>'+(p&&p.brand?'<div style="color:#555">'+e(p.brand)+'</div>':'')+'</td>'
+      +(isInks()?'<td style="'+cell+'"><b>'+e(p?(p.supplier||'No supplier'):'—')+'</b>'+(p&&p.brand?'<div style="color:#555">'+e(p.brand)+'</div>':'')+'</td>'
+        :'<td style="'+cell+'"><b>'+e(p?(p.sku||'No part no.'):'—')+'</b>'+(p&&p.machine?'<div style="color:#555">'+e(parseMachines(p.machine).join(', '))+'</div>':'')+'</td>')
       +'<td style="'+cell+';color:#666;white-space:nowrap">'+before+'</td>'
       +'<td class="'+sgnCls(t)+'" style="'+cell+';white-space:nowrap">'+sgnQty(t)+un+'</td>'
       +'<td style="'+cell+';font-weight:600;white-space:nowrap">'+(bal[t.id]==null?'—':fmtQty(bal[t.id])+un)+'</td>'
       +'<td style="'+cell+';white-space:nowrap">'+(t.reversesId?pairBadge(t):'<span class="badge badge-'+t.type+'">'+txnReason(t)+'</span>'+pairBadge(t))+'</td>'
-      +'<td style="'+cell+';font-weight:700;white-space:nowrap">'+_escHtml(txnBatchCode(t))+'</td>'
+      +(isInks()?'<td style="'+cell+';font-weight:700;white-space:nowrap">'+_escHtml(txnBatchCode(t))+'</td>':'')
       +'<td style="'+cell+';font-family:monospace;color:#555">'+(t.challanNo||'—')+'</td>'
       +'<td style="'+cell+'">'+e(userText(t.type==='in'?t.ref:t.issuedTo)||'—')+'</td>'
       +'<td style="'+cell+';color:#888">'+e(userText(t.type==='in'?t.notes:t.purpose)||'—')+'</td>'
       +'<td style="'+cell+'">'+(t.createdBy?e(t.createdBy):'<span style="color:#bbb">—</span>')+'</td>'
       +'</tr>';
   }).join(''):'<tr><td colspan="11"><div class="empty" style="padding:1.5rem"><i class="ti ti-search"></i>No stock in or out recorded yet</div></td></tr>';
-  const pick='<select onchange="openGroupHistory(_ghKey,this.value)" style="margin-bottom:12px;max-width:100%"><option value="">All suppliers / brands ('+members.length+')</option>'
-    +members.map(p=>'<option value="'+p.id+'"'+(String(p.id)===String(brandId||'')?' selected':'')+'>'+e((p.supplier||'No supplier')+(p.brand?' · '+p.brand:''))+'</option>').join('')+'</select>';
+  const pick='<select onchange="openGroupHistory(_ghKey,this.value)" style="margin-bottom:12px;max-width:100%"><option value="">'+(isInks()?'All suppliers / brands':'All part nos.')+' ('+members.length+')</option>'
+    +members.map(p=>'<option value="'+p.id+'"'+(String(p.id)===String(brandId||'')?' selected':'')+'>'+e(isInks()?(p.supplier||'No supplier')+(p.brand?' · '+p.brand:''):(p.sku||'No part no.'))+'</option>').join('')+'</select>';
   document.getElementById('ph-title').textContent=members[0].name+' - history';
   document.getElementById('ph-body').innerHTML=
     '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
     +stat('On hand',fmtQty(have)+(u?' '+u:''))+stat('Total in','+'+fmtQty(totIn)+(u?' '+u:''),'#2d6a10')+stat('Total out','\u2212'+fmtQty(totOut)+(u?' '+u:''),'#993C1D')+'</div>'
     +(members.length>1?pick:'')
     +'<div style="max-height:52vh;overflow:auto;border:1px solid #e8e1d3;border-radius:8px"><table class="hist-table hist-group" style="width:100%"><thead><tr>'
-    +['When','Supplier · Brand','Before','Change','After','Reason','Batch','Challan','Supplier / Issued to','Notes / Purpose','By'].map(h=>'<th style="'+cell+'">'+h+'</th>').join('')
+    +(isInks()?['When','Supplier · Brand','Before','Change','After','Reason','Batch','Challan','Supplier / Issued to','Notes / Purpose','By']:['When','Part No. · Machine','Before','Change','After','Reason','Challan','Supplier / Issued to','Notes / Purpose','By']).map(h=>'<th style="'+cell+'">'+h+'</th>').join('')
     +'</tr></thead><tbody>'+rows+'</tbody></table></div>';
   document.getElementById('modal-partHistory').classList.add('open');
 }
@@ -4684,7 +4721,7 @@ function renderInventory(){
     reN?[reN,'Reorder','out',(inks?'Used more in the last 3 months than is in stock and on order':'Used more in the last 3 months than is in stock')+tip('reorder'),"invQuick('reorder')",_invQuick==='reorder']:null
   ]);
   const sortV=(document.getElementById('inv-sort')||{value:''}).value;
-  if(inks){renderInkGroups(parts,sortV);return;}
+  renderInkGroups(parts,sortV);return;   // both stores as cards (owner, 2026-11-24)
   sortParts(parts,sortV);
 
   // Header follows the module.
