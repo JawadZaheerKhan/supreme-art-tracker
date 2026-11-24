@@ -12833,7 +12833,7 @@ let jhRevTx = new Set(), jhSentTx = new Map();
 // before that also gets "Sent to offcut", even with the same paper on the card (owner, 2026-11-19: E-1491, E-1210 - their
 // paper went to another job).
 let jhReissueAt = 0;
-const JH_REISSUE_ACTIONS = ['job.paper_change_reissue', 'job.move_to_pending_stock'];
+const JH_REISSUE_ACTIONS = ['job.paper_change_reissue', 'job.move_to_pending_stock', 'job.move_to_ctp'];
 function jhWithReversals(audit, revs) {
   const rows = Array.isArray(audit) ? audit.slice() : [];
   const all = Array.isArray(revs) ? revs : [];
@@ -16970,7 +16970,7 @@ async function editTxPaper(txIds, itemId, sheets, jobId, when, canMove) {
     await alertDialog({ title: 'Not enough stock', message: `${editPaperLabel(to)} has ${fmtP(to, +to.current_balance || 0)}; this entry needs ${fmtP(to, sheets)}. Stock it in first, then edit again.`, kind: 'warn' });
     return;
   }
-  if (pick.job) return editTxMoveJob(txIds, itemId, sheets, jobId, when, pick.job, from, to, fmtP);
+  if (pick.job) return editTxMoveJob(txIds, itemId, sheets, jobId, when, pick.job, from, to, fmtP);   // true = moved
   const ok = await confirmDialog({ title: 'Move this stock-out?', confirmText: 'Move it',
     message: `${fmtP(from, sheets)}${jobId ? ' of Job E-' + jobId : ''}\nfrom: ${editPaperLabel(from)}\nto: ${editPaperLabel(to)}\n\nThe old entry is reversed (${fmtP(from, sheets)} back into ${editPaperLabel(from)}) and the same sheets go out of ${editPaperLabel(to)} on ${when ? fmtDMY(when) : 'the same date'}.${jobId ? ' The job card\'s paper changes too.' : ''}` });
   if (!ok) return;
@@ -16993,6 +16993,7 @@ async function editTxPaper(txIds, itemId, sheets, jobId, when, canMove) {
     refreshVisibleStockMovement();
   } catch (uiErr) { console.error('Post-edit-paper UI refresh failed (the edit itself is saved):', uiErr); }
   showSaving(false);
+  return done > 0;
 }
 // The job number typed in Edit paper -> the job it is.
 function editPaperJobOf(raw) {
@@ -17040,8 +17041,10 @@ async function editTxMoveJob(txIds, itemId, sheets, oldJob, when, newJob, from, 
     message: `${pk} of ${editPaperLabel(paper)}${to ? ` (was ${editPaperLabel(from)})` : ''}\nfrom: Job E-${oldJob}\nto: Job E-${newJob} · ${nj.name || ''}\n\nJob E-${oldJob}: this issue is reversed - it goes back to Pending Stock.\n${newText}\nSame date (${when ? fmtDMY(when) : 'the same date'}) and challan.` });
   if (!ok) return;
   showSaving(true);
+  let moved = false;
   try {
     const r = await api('POST', '/api/inventory/transactions/move-job', { tx_ids: txIds, job_id: newJob, item_id: to ? to.id : null });
+    moved = true;
     notify(`Moved to Job E-${newJob}${r && r.slot ? ' as its ' + r.slot + ' paper' : ''} · Job E-${oldJob} back to Pending Stock`);
   } catch (e) {
     await alertDialog({ title: 'Not moved', message: e.message, kind: 'error' });
@@ -17053,6 +17056,27 @@ async function editTxMoveJob(txIds, itemId, sheets, oldJob, when, newJob, from, 
     refreshVisibleStockMovement();
   } catch (uiErr) { console.error('Post-move UI refresh failed (the move itself is saved):', uiErr); }
   showSaving(false);
+  return moved;
+}
+// Edit paper from the job card too (owner, 2026-11-24): each paper issued to the job (1st / 2nd / 3rd) - the same
+// window as in the Stock Out report (another paper and / or another job). The card is opened again afterwards, so
+// a Save there can't put the old paper back.
+function jobCardEditPaperBtns(j) {
+  if (!j || !j.id || !(isSuperAdmin() || hasPerm('inv_btn_edit_paper'))) return '';
+  const items = (Array.isArray(j.issued_items) ? j.issued_items : []).filter(x => x && x.tx_id);
+  if (!items.length) return '';
+  const srcs = [...new Set(items.map(x => x.source || 'primary'))];
+  const lbl = { primary: '1st', secondary: '2nd', third: '3rd' };
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">${srcs.map(s => `<button type="button" class="btn btn-sm" data-acc="inv_btn_edit_paper" style="${EDIT_PAPER_BTN_STYLE}" onclick="event.stopPropagation(); jobCardEditPaper(${j.id}, '${s}')" title="Wrong paper or wrong job? Change the paper issued to this job, or move it to another job">&#9998; Edit paper${srcs.length > 1 ? ' (' + (lbl[s] || s) + ')' : ''}</button>`).join('')}</div>`;
+}
+async function jobCardEditPaper(jobId, source) {
+  const j = (jobs || []).find(x => x && x.id === jobId); if (!j) return;
+  const list = (Array.isArray(j.issued_items) ? j.issued_items : []).filter(x => x && x.tx_id && (x.source || 'primary') === source);
+  if (!list.length) { notify('Nothing of this paper is issued to the job'); return; }
+  const anchor = [...list].sort((a, b) => (+b.sheets || 0) - (+a.sheets || 0))[0];
+  const sheets = list.reduce((a, x) => a + (+x.sheets || 0), 0);
+  const done = await editTxPaper(list.map(x => Number(x.tx_id)), Number(anchor.item_id), sheets, jobId, j.issued_at || '', true);
+  if (done) { closeModal(); if ((jobs || []).some(x => x && x.id === jobId)) openEdit(jobId); }
 }
 
 // Reverse every source-brand row belonging to one combined split issue.
@@ -34730,6 +34754,7 @@ function jobForm(j={}, opts) {
                    style="width:13px;height:13px;margin:0;cursor:pointer;">
             <span>+ Add 2nd paper (offcut / additional)</span>
           </label>
+          ${opts.editPaperBtns ? jobCardEditPaperBtns(j) : ''}
         </td>
         <td colspan="1"><span class="jc-lbl">Cutting Size / GSM</span><input type="text" id="f-cutting-size" class="lc-input" value="${esc((j.particulars||{}).cutting_size_gsm||'')}" placeholder="25x36" oninput="renderCutPreview(); updateOffcutAvail()"><div id="offcut-avail-cut"></div></td>
         ${(() => {
@@ -40247,7 +40272,7 @@ function openEdit(id, opts) {
     </div>
     ${managerBanner}
     ${adjustBanner}
-    ${jobForm(j, opts)}
+    ${jobForm(j, { ...opts, editPaperBtns: !managerMode && !adjustMode })}
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">${managerMode ? 'Close' : 'Cancel'}</button>
       ${processBtn}
@@ -40423,7 +40448,7 @@ async function moveJobToCtp(id) {
   if (j.issuance_status === 'ctp' || j.issuance_status === 'new') return;
   const ok = await confirmDialog({
     title: `Send Job E-${id} back to CTP?`,
-    message: `"${j.name}" will leave ${STAGES[j.stage_index || 0]} and reset to the CTP queue.\n\n• Any issued paper stays on the OLD paper's ledger (store keeper enters any physical return manually).\n• Coatings-done history for this job is cleared — coatings will need to be recorded again.\n• Stage progress past CTP is cleared.\n\nContinue?`,
+    message: `"${j.name}" will leave ${STAGES[j.stage_index || 0]} and reset to the CTP queue.\n\n• Any issued paper stays on the OLD paper's ledger - its issue in the job's History gets "Sent to offcut" for what is left of it.\n• Coatings-done history for this job is cleared — coatings will need to be recorded again.\n• Stage progress past CTP is cleared.\n\nContinue?`,
     danger: true,
     confirmText: 'Send back to CTP',
   });
@@ -40445,7 +40470,7 @@ async function moveJobToPendingStock(id) {
   if (j.issuance_status === 'pending' && (j.stage_index || 0) === 1) return;
   const ok = await confirmDialog({
     title: `Send Job E-${id} to Pending Stock?`,
-    message: `"${j.name}" will leave ${STAGES[j.stage_index || 0]} and go back to Pending Stock so the store keeper can re-issue paper.\n\n• Any issued paper stays on the OLD paper's ledger (store keeper enters any physical return manually).\n• Coatings-done history is cleared — coatings will need to be recorded again.\n• Stage progress past Printing is cleared.\n\nContinue?`,
+    message: `"${j.name}" will leave ${STAGES[j.stage_index || 0]} and go back to Pending Stock so the store keeper can re-issue paper.\n\n• Any issued paper stays on the OLD paper's ledger - its issue in the job's History gets "Sent to offcut" for what is left of it.\n• Coatings-done history is cleared — coatings will need to be recorded again.\n• Stage progress past Printing is cleared.\n\nContinue?`,
     danger: true,
     confirmText: 'Send back to Pending Stock',
   });
