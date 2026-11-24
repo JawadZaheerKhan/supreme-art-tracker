@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-plates-from-store';   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-cartons-in-store';   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -731,8 +731,8 @@ const ROLE_PERMISSION_DEFAULTS = {
   inv_btn_plate_store:  { label: 'Plate Store tab — see the plates in stock, their History, the Register and In Process (the buttons have their own rows below)', levels: { admin: 'yes', store_manager: 'yes', production_manager: 'view', ceo: 'view' } },
   // Plate Store buttons, each its own row (owner, 2026-11-24). They start with what each role had on the Plate Store row.
   plate_btn_add:      { label: 'Plate Store — + Add Plate, and Edit on a plate (size, machine, brand, supplier)', levels: { admin: 'yes', store_manager: 'yes' } },
-  plate_btn_stock_in: { label: 'Plate Store — + Stock In (Delivery with its challan / Adjustment)', levels: { admin: 'yes', store_manager: 'yes' } },
-  plate_btn_use:      { label: 'Plate Store — Use (New job / Old job / Damaged / Adjustment)', levels: { admin: 'yes', store_manager: 'yes' } },
+  plate_btn_stock_in: { label: 'Plate Store — + Stock In (Delivery with its challan / Adjustment)', levels: { admin: 'yes', store_manager: 'yes', procurement: 'yes' } },
+  plate_btn_use:      { label: 'Store — CTCP plates: Use (New job / Old job / Damaged / Adjustment) from the Store', levels: { admin: 'yes', store_manager: 'yes', procurement: 'yes' } },
   plate_btn_pickup:   { label: 'Plate Store — In Process: Picked up (CTP took the plates back)', levels: { admin: 'yes', store_manager: 'yes' } },
   plate_btn_delete:   { label: 'Store — CTP Station plates: Delete a wrong Use / Stock In entry in the Register (the Store stock goes back)', levels: { admin: 'yes', procurement: 'yes' } },
   products_btn_new:     { label: 'New / edit product — + New Product (a product without a job card), its details on a tile (company, item code, No. of Colors, UPS) and Delete for a product with no jobs', levels: { admin: 'yes', finance: 'yes' } },
@@ -9730,6 +9730,7 @@ async function applyCartonChange(sql, { typeId, change, kind, reason, jobId, man
               COALESCE(${occurredIso}::timestamptz, NOW()),
               CASE WHEN ${occurredIso}::timestamptz IS NULL THEN NULL ELSE NOW() END)
       RETURNING id`)[0];
+    await cartonStoreSyncSafe(sql, [typeId]);   // the Store's carton item follows (owner, 2026-11-24)
     return { id: row.id, balance: moved[0].current_balance };
   } catch (e) {
     await sql`UPDATE carton_types SET current_balance = current_balance - ${change} WHERE id = ${typeId}`;
@@ -9737,6 +9738,82 @@ async function applyCartonChange(sql, { typeId, change, kind, reason, jobId, man
     throw e;
   }
 }
+// ── Carton Shippers in the Store (owner, 2026-11-24) ──
+// Every carton type is a Store item (Inks & Consumables, category "Carton Shippers") and every carton entry a Store
+// entry - the carton system stays the one that records them (its Issue with E-Job / Manual Job / Other, the Station's
+// automatic issue, reversals), the Store shows them. What the Store has no column for goes into its Notes:
+//   item:  Size, Ply (and "hidden in the pickers") -> the item's Notes; Reorder level -> Min Qty;
+//   entry: Supplier, For (E-Job E-123 name / Manual Job / Other - reason), "taken by the Station", the carton notes ->
+//          the entry's Notes; Issued To, Challan No., date, time and who -> their own columns.
+// The Store's quantity of a carton item is always the carton balance. Runs after every carton change and can rebuild
+// everything (after a Copy from ERP replaced the Store).
+async function cartonStoreSync(sql, typeIds) {
+  await storeApi.ensureStore();
+  const ids = Array.isArray(typeIds) && typeIds.length ? typeIds.map(Number) : null;
+  await sql`INSERT INTO store_categories (name, module) VALUES ('Carton Shippers', 'consumables') ON CONFLICT (module, name) DO NOTHING`;
+  await sql`
+    INSERT INTO store_parts (name, category, module, unit, qty, min_qty, description, deleted_at, carton_type_id)
+    SELECT c.name, 'Carton Shippers', 'consumables', 'pcs', c.current_balance, COALESCE(c.reorder_level, 0),
+           concat_ws(' · ', 'Size: ' || c.size, 'Ply: ' || c.ply, CASE WHEN c.hidden THEN 'Hidden in the carton pickers' END),
+           c.deleted_at, c.id
+      FROM carton_types c
+     WHERE (${ids}::int[] IS NULL OR c.id = ANY(${ids}))
+       AND NOT EXISTS (SELECT 1 FROM store_parts p WHERE p.carton_type_id = c.id)`;
+  await sql`
+    UPDATE store_parts p SET name = c.name, category = 'Carton Shippers', module = 'consumables', unit = 'pcs', qty = c.current_balance,
+           min_qty = COALESCE(c.reorder_level, 0), deleted_at = c.deleted_at,
+           description = concat_ws(' · ', 'Size: ' || c.size, 'Ply: ' || c.ply, CASE WHEN c.hidden THEN 'Hidden in the carton pickers' END)
+      FROM carton_types c
+     WHERE p.carton_type_id = c.id AND (${ids}::int[] IS NULL OR c.id = ANY(${ids}))`;
+  // Entries: one Store entry per carton entry (a deleted carton entry takes its Store entry with it).
+  await sql`
+    DELETE FROM store_tx x USING store_parts p
+     WHERE x.part_id = p.id AND p.carton_type_id IS NOT NULL AND (${ids}::int[] IS NULL OR p.carton_type_id = ANY(${ids}))
+       AND (x.carton_tx_id IS NULL OR NOT EXISTS (SELECT 1 FROM carton_transactions t WHERE t.id = x.carton_tx_id))`;
+  await sql`
+    INSERT INTO store_tx (type, part_id, qty, date, ref, notes, issued_to, purpose, challan_no, created_by, created_at, carton_tx_id)
+    SELECT CASE WHEN t.change > 0 THEN 'in' ELSE 'out' END, p.id, ABS(t.change)::double precision,
+           (t.created_at AT TIME ZONE 'Asia/Karachi')::date, COALESCE(t.supplier, ''),
+           concat_ws(' · ',
+             CASE WHEN t.supplier IS NOT NULL AND t.supplier <> '' THEN 'Supplier: ' || t.supplier END,
+             CASE t.reason WHEN 'e-job' THEN 'For: E-Job E-' || t.job_id || COALESCE(' ' || j.name, '')
+                           WHEN 'manual-job' THEN 'For: Manual Job ' || COALESCE(t.manual_job, '')
+                           WHEN 'other' THEN 'For: Other - ' || COALESCE(t.other_reason, '') END,
+             CASE WHEN t.source = 'station' THEN 'Taken by the Station (Pasting / QC)' END,
+             NULLIF(t.notes, '')),
+           COALESCE(t.issued_to, ''), '', COALESCE(t.challan_no, ''),
+           COALESCE(t.actor_name, split_part(COALESCE(t.user_email, ''), '@', 1)), COALESCE(t.recorded_at, t.created_at), t.id
+      FROM carton_transactions t
+      JOIN store_parts p ON p.carton_type_id = t.type_id
+      LEFT JOIN jobs j ON j.id = t.job_id
+     WHERE t.change <> 0 AND (${ids}::int[] IS NULL OR t.type_id = ANY(${ids}))
+       AND NOT EXISTS (SELECT 1 FROM store_tx x WHERE x.carton_tx_id = t.id)`;
+}
+// Never stops a carton entry: if the Store could not follow, it is logged (and the next change, or the rebuild, fixes it).
+async function cartonStoreSyncSafe(sql, typeIds) {
+  try { await cartonStoreSync(sql, typeIds); } catch (e) { console.error('carton -> Store sync failed:', e.message); }
+}
+// Bring every carton into the Store / check them (Super Admin): each carton type's Store quantity and entries against
+// the carton system.
+app.post('/api/cartons/store-sync', requireSuperAdmin, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    await cartonStoreSync(sql, null);
+    const rows = await sql`
+      SELECT c.id, c.name, c.size, c.ply, c.current_balance, c.deleted_at, p.qty AS store_qty,
+             (SELECT COUNT(*)::int FROM carton_transactions t WHERE t.type_id = c.id AND t.change <> 0) AS carton_entries,
+             (SELECT COUNT(*)::int FROM store_tx x WHERE x.part_id = p.id) AS store_entries,
+             (SELECT COALESCE(SUM(CASE WHEN x.type = 'in' THEN x.qty ELSE -x.qty END), 0) FROM store_tx x WHERE x.part_id = p.id) AS store_sum
+        FROM carton_types c LEFT JOIN store_parts p ON p.carton_type_id = c.id ORDER BY lower(c.name)`;
+    const list = rows.map(r => ({ name: cartonTypeLabel(r), deleted: !!r.deleted_at, balance: Number(r.current_balance), store_qty: r.store_qty == null ? null : Number(r.store_qty),
+      carton_entries: r.carton_entries, store_entries: r.store_entries, store_sum: Number(r.store_sum),
+      match: r.store_qty != null && Number(r.store_qty) === Number(r.current_balance) && r.carton_entries === r.store_entries }));
+    await logAudit(sql, req, { action: 'carton.store_sync', entityType: 'carton_type', summary: `Carton Shippers brought into the Store: ${list.length} types, ${list.filter(x => x.match).length} match` });
+    res.json({ ok: true, types: list });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // Two people saving the same type name at the same moment both pass the
 // name check; the unique index then refuses one - say so plainly (409)
 // instead of a raw database error (2026-10-16 review). null = answered.
@@ -9900,6 +9977,7 @@ app.post('/api/cartons/types', requirePermission('carton_btn_types'), async (req
       RETURNING *`);
     if (!t) return;
     await logAudit(sql, req, { action: 'carton.type_create', entityType: 'carton_type', entityId: t.id, summary: `Carton type added: ${cartonTypeLabel(t)}` });
+    await cartonStoreSyncSafe(sql, [t.id]);
     res.json(t);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -9919,6 +9997,7 @@ app.put('/api/cartons/types/:id', requirePermission('carton_btn_types'), async (
        WHERE id = ${cur.id} RETURNING *`);
     if (!t) return;
     const what = cur.hidden !== hidden ? (hidden ? 'hidden' : 'shown again') : 'edited';
+    await cartonStoreSyncSafe(sql, [t.id]);
     await logAudit(sql, req, { action: 'carton.type_edit', entityType: 'carton_type', entityId: t.id, summary: `Carton type ${what}: ${cartonTypeLabel(cur)}${what === 'edited' ? ' -> ' + cartonTypeLabel(t) : ''}` });
     res.json(t);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -9935,6 +10014,7 @@ app.delete('/api/cartons/types/:id', requireSuperAdmin, async (req, res) => {
     if (!cur) return;
     const n = Number((await sql`SELECT COUNT(*)::int AS n FROM carton_transactions WHERE type_id = ${cur.id}`)[0].n) || 0;
     await sql`UPDATE carton_types SET deleted_at = NOW(), deleted_by = ${req.user.email} WHERE id = ${cur.id} AND deleted_at IS NULL`;
+    await cartonStoreSyncSafe(sql, [cur.id]);
     await logAudit(sql, req, {
       action: 'carton.type_delete', entityType: 'carton_type', entityId: cur.id,
       summary: `Carton type deleted: ${cartonTypeLabel(cur)} (${(cur.current_balance || 0).toLocaleString()} on hand; its ${n.toLocaleString()} In / Out entr${n === 1 ? 'y' : 'ies'} kept)`,
@@ -9962,6 +10042,7 @@ app.delete('/api/cartons/transactions/:id', requireSuperAdmin, async (req, res) 
       const undo = rows.reduce((a, r) => a + (Number(r.change) || 0), 0);
       await sql`DELETE FROM carton_transactions WHERE id = ANY(${ids})`;
       const type = (await sql`UPDATE carton_types SET current_balance = current_balance - ${undo} WHERE id = ${tx.type_id} RETURNING *`)[0];
+      await cartonStoreSyncSafe(sql, [tx.type_id]);
       await logAudit(sql, req, {
         action: 'carton.tx_delete', entityType: 'carton_type', entityId: tx.type_id,
         summary: `Carton entry #${tx.id} deleted (${tx.kind === 'correction' ? 'reversal' : tx.kind === 'in' ? 'Stock In' : 'Stock Out'} ${tx.change > 0 ? '+' : ''}${tx.change.toLocaleString()} ${type ? cartonTypeLabel(type) : ''}${ids.length > 1 ? ', with its reversal' : ''}); stock now ${type ? (type.current_balance || 0).toLocaleString() : '?'}`,
@@ -10142,7 +10223,8 @@ app.post('/api/cartons/bulk-out', requirePermission('carton_btn_issue'), async (
 
 // Undo a wrong entry with an opposite "correction" row (both stay in the
 // log). 'yes' = any entry, any age; '30-day' = entries from the last 30 days.
-app.post('/api/cartons/transactions/:id/reverse', requireAuth, async (req, res) => {
+const cartonH = {};
+app.post('/api/cartons/transactions/:id/reverse', requireAuth, cartonH.reverse = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -17003,7 +17085,17 @@ app.get('/api/admin/transfer-stats', async (req, res) => {
 });
 
 // The Store - moved from the ERP (owner, 2026-11-24): its own routes and tables, see store-routes.js.
-const storeApi = require('./store-routes')(app, { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon });
+const storeApi = require('./store-routes')(app, { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon,
+  // Carton Shippers in the Store (owner, 2026-11-24): rebuilt after a Copy from ERP; a carton entry reversed from the Store
+  // is a carton reversal.
+  afterErpCopy: sql => cartonStoreSync(sql, null),
+  cartonReverse: async (req, cartonTxId) => {
+    const r2 = Object.create(req); r2.params = { id: String(cartonTxId) }; r2.body = {};
+    const out = { code: 200, body: null };
+    await cartonH.reverse(r2, { status(c) { out.code = c; return this; }, json(b) { out.body = b; return this; } });
+    return out;
+  },
+});
 
 app.get('*', (req, res) => {
   // Deep links (/jobs, /station, …) fall through to here and get the app

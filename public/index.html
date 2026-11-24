@@ -3997,7 +3997,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn" data-mode="dashboard" id="mode-dashboard-btn" onclick="setMode('dashboard')" style="display:none;">&#128202; Dashboard</button>
     <button class="mode-btn products-tab-only" data-mode="products" id="mode-products-btn" onclick="setMode('products')">Product Rate</button>
     <button class="mode-btn" data-mode="inventory" id="mode-inventory-btn" onclick="setMode('inventory')">Inventory</button>
-    <button class="mode-btn" data-mode="carton-shippers" id="mode-carton-shippers-btn" onclick="setMode('carton-shippers')" style="display:none;">&#128230; Carton Shippers</button>
     <button class="mode-btn" data-mode="store" id="mode-store-btn" onclick="setMode('store')" style="display:none;">Store</button>
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="openReportsTab()">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
@@ -7008,7 +7007,7 @@ function tabAllowed(m) {
     case 'client-view': return hasPerm('client_view_preview', 'view');
     case 'factory':     return hasRole('ceo');   // the 3D factory view: Super Admin and the CEO (owner, 2026-10-24 / 2026-10-26)
     case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
-    case 'carton-shippers': return hasPerm('carton_tab_access', 'view');
+    case 'carton-shippers': return false;   // in the Store now (category Carton Shippers, owner 2026-11-24)
     case 'plates':      return false;   // no Plate Store tab: plates are Store items, the CTP Station keeps its screens (owner, 2026-11-24)
     case 'store':       return hasPerm('store_tab_access', 'view') && (hasPerm('store_sec_consumables', 'view') || hasPerm('store_sec_machinery', 'view'));   // Store (moved from the ERP, 2026-11-24)
     case 'mgr-operators': return mgrOpsUnlocked();
@@ -8180,7 +8179,6 @@ function renderUserChip() {
   showTab('mode-dashboard-btn', 'dashboard');
   showTab('mode-products-btn', 'products');
   showTab('mode-inventory-btn', 'inventory');
-  showTab('mode-carton-shippers-btn', 'carton-shippers');
   showTab('mode-store-btn', 'store');
   showTab('mode-reports-btn', 'reports');
   showTab('mode-stickers-btn', 'stickers');
@@ -9257,6 +9255,7 @@ async function loadCartons() {
     cartonLoaded = true;
   } catch (e) { notify('Error loading carton shippers: ' + e.message); }
   if (mode === 'carton-shippers') renderCartons();
+  storeFrameReload();
 }
 async function loadCartonPeople() {
   if (cartonPeople) return;
@@ -36256,6 +36255,7 @@ async function plateStockSave(id, dir) {
     notify(`${dir === 'in' ? '+' : '-'}${qty} ${z ? z.name : ''} plates`);
     plateRegRows = null;
     await renderPlateStore();
+    storeFrameReload();
   } catch (e) { notify('Error: ' + e.message); }
   showSaving(false);
 }
@@ -46431,7 +46431,8 @@ function enterStore(section) {
   // Super Admin: Copy from ERP / Check against ERP (owner, 2026-11-24).
   const erpBtns = isSuperAdmin() ? `<span style="margin-left:auto;display:flex;gap:6px;">
       <button type="button" class="btn btn-sm" data-acc="super_admin" onclick="storeErpCopy(true)" title="Compare every item here with the ERP: quantity, entries, in, out, each batch - nothing changes">&#10003; Check against ERP</button>
-      <button type="button" class="btn btn-sm" data-acc="super_admin" onclick="storeErpCopy(false)" title="Copy the whole ERP store here (replaces what is here), then check it">&#8681; Copy from ERP</button></span>` : '';
+      <button type="button" class="btn btn-sm" data-acc="super_admin" onclick="storeErpCopy(false)" title="Copy the whole ERP store here (replaces what is here), then check it">&#8681; Copy from ERP</button>
+      <button type="button" class="btn btn-sm" data-acc="super_admin" onclick="storeCartonCheck()" title="Bring every Carton Shipper into the Store (if anything is missing) and check each type's quantity and entries">&#10003; Cartons</button></span>` : '';
   const tabs = (allowed.length > 1 || erpBtns) ? `<div class="store-subtabs">${allowed.length > 1 ? allowed.map(s => `<button type="button" class="btn btn-sm${s.id === storeSection ? ' is-on' : ''}" onclick="enterStore('${s.id}')">${esc(s.label)}</button>`).join('') : ''}${erpBtns}</div>` : '';
   const frame = document.getElementById('store-frame');
   if (frame && frame.dataset.section === storeSection) { storeFrameFit(); return; }   // already open - keep its place
@@ -46477,6 +46478,51 @@ async function storeErpCopy(checkOnly) {
     <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">OK</button></div></div>`);
   if (!checkOnly) { const f = document.getElementById('store-frame'); if (f) f.contentWindow.location.reload(); }
 }
+// Carton Shippers and CTCP Plates keep their own windows (owner, 2026-11-24): the Store page hands their buttons here -
+// a carton's + Stock / − Stock / Edit / Delete open the carton Stock In / Issue (E-Job, Manual Job, Other) / type / delete,
+// a CTCP plate's − Stock opens the plate Use (reason, job, plates, damaged by).
+// Every Carton Shipper in the Store, checked: its quantity and its number of entries against the carton system.
+async function storeCartonCheck() {
+  showSaving(true);
+  let r;
+  try { r = await api('POST', '/api/cartons/store-sync'); } catch (e) { showSaving(false); await alertDialog({ title: 'Carton check failed', message: e.message, kind: 'error' }); return; }
+  showSaving(false);
+  const bad = r.types.filter(t => !t.match);
+  openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:760px;">
+    <h2>&#10003; Carton Shippers in the Store</h2>
+    <div style="font-size:15px;font-weight:800;margin:6px 0 10px;color:${bad.length ? '#b91c1c' : '#166534'};">${r.types.length} carton types - ${bad.length ? bad.length + ' do not match' : 'every one matches (quantity and entries)'}</div>
+    <div class="report-scroll-wrap" style="max-height:55vh;"><table class="ss-table" style="width:100%;font-size:12.5px;border-collapse:collapse;"><thead><tr><th style="text-align:left;padding:5px 8px;">Carton type</th><th style="text-align:right;padding:5px 8px;">Carton stock</th><th style="text-align:right;padding:5px 8px;">Store qty</th><th style="text-align:right;padding:5px 8px;">Entries</th><th style="text-align:right;padding:5px 8px;">In the Store</th><th></th></tr></thead><tbody>
+    ${r.types.map(t => `<tr><td style="padding:4px 8px;">${esc(t.name)}${t.deleted ? ' <span style="color:var(--text3);">(deleted - in the Trash)</span>' : ''}</td><td style="padding:4px 8px;text-align:right;">${Number(t.balance).toLocaleString()}</td><td style="padding:4px 8px;text-align:right;">${t.store_qty == null ? '—' : Number(t.store_qty).toLocaleString()}</td><td style="padding:4px 8px;text-align:right;">${t.carton_entries}</td><td style="padding:4px 8px;text-align:right;">${t.store_entries}</td><td style="padding:4px 8px;font-weight:800;color:${t.match ? '#166534' : '#b91c1c'};">${t.match ? '&#10003;' : '&#10007;'}</td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">OK</button></div></div>`);
+  storeFrameReload();
+}
+function storeFrameReload() {
+  const f = document.getElementById('store-frame');
+  if (f && typeof mode !== 'undefined' && mode === 'store') { try { f.contentWindow.postMessage({ type: 'store-reload' }, location.origin); } catch (e) {} }
+}
+window.addEventListener('message', async event => {
+  const f = document.getElementById('store-frame');
+  if (!f || event.source !== f.contentWindow || event.origin !== location.origin) return;
+  const m = event.data;
+  if (!m || m.type !== 'store-special') return;
+  if (m.kind === 'carton') {
+    await loadCartons();
+    const typeId = Number(m.cartonTypeId) || null;
+    const t = typeId ? cartonTypeById(typeId) : null;
+    if (!t) { await alertDialog({ title: 'Carton type not found', message: 'Refresh the page and try again.', kind: 'warn' }); return; }
+    if (m.action === 'in') return openCartonStockIn(t.id);
+    if (m.action === 'out') { await loadCartonPeople(); return openCartonIssue(t.id); }
+    if (m.action === 'edit') return openCartonTypeModal(t.id);
+    if (m.action === 'delete') return deleteCartonType(t.id);
+  }
+  if (m.kind === 'plate' && m.action === 'out') {
+    try { plateSizesCache = await api('GET', '/api/plates/sizes'); } catch (e) { notify('Error: ' + e.message); return; }
+    const z = plateSizesCache.find(x => Number(x.store_part_id) === Number(m.partId));
+    if (!z) { await alertDialog({ title: 'Plate not found', message: 'Refresh the page and try again.', kind: 'warn' }); return; }
+    return plateUseForm(z.id);
+  }
+});
 // The store page fills the rest of the window (it has its own sidebar and scrolling).
 function storeFrameFit() {
   const f = document.getElementById('store-frame'); if (!f) return;
@@ -46798,7 +46844,6 @@ const ACC_PLATES_TAB_ROWS = [
   { key: 'inv_btn_plate_store', type: 'button' },
   { key: 'plate_btn_add',       type: 'action' },
   { key: 'plate_btn_stock_in',  type: 'action' },
-  { key: 'plate_btn_use',       type: 'action' },
   { key: 'plate_btn_pickup',    type: 'action' },
 ];
 // Store tab (moved from the ERP, owner 2026-11-24): one row per grant the ERP's store had.
@@ -46815,6 +46860,7 @@ const ACC_STORE_TAB_ROWS = [
   { key: 'store_btn_reconcile',      type: 'action' },
   { key: 'store_btn_settings',       type: 'action' },
   { key: 'store_btn_orders',         type: 'action' },
+  { key: 'plate_btn_use',            type: 'action' },   // CTCP plates: Use from the Store (owner, 2026-11-24)
   { key: 'plate_btn_delete',         type: 'action' },   // CTP Station plates: Delete an entry (owner, 2026-11-24)
 ];
 const ACC_DASHBOARD_TAB_ROWS = [

@@ -9,7 +9,7 @@
 'use strict';
 
 module.exports = function registerStoreRoutes(app, deps) {
-  const { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon } = deps;
+  const { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon, afterErpCopy, cartonReverse } = deps;
 
   // The ERP grant -> its Access Register row here.
   const GRANT_ROW = {
@@ -108,6 +108,11 @@ module.exports = function registerStoreRoutes(app, deps) {
       // A photo brought from the ERP keeps the link it came from (a later copy reuses it instead of fetching again).
       await sql`ALTER TABLE store_images ADD COLUMN IF NOT EXISTS source_url TEXT`;
       await sql`CREATE INDEX IF NOT EXISTS store_images_source_idx ON store_images (source_url)`;
+      // Carton Shippers (owner, 2026-11-24): the Store item of a carton type, the Store entry of a carton entry.
+      await sql`ALTER TABLE store_parts ADD COLUMN IF NOT EXISTS carton_type_id INTEGER`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_parts_carton_type_uq ON store_parts (carton_type_id) WHERE carton_type_id IS NOT NULL`;
+      await sql`ALTER TABLE store_tx ADD COLUMN IF NOT EXISTS carton_tx_id INTEGER`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_tx_carton_tx_uq ON store_tx (carton_tx_id) WHERE carton_tx_id IS NOT NULL`;
     })().catch(e => { _ready = null; throw e; });
     return _ready;
   }
@@ -185,7 +190,7 @@ module.exports = function registerStoreRoutes(app, deps) {
 
   // (Plain text: this database library can't put one query piece inside another.)
   const PART_COLS = `id, sku, name, category, machine, brand, supplier, rack_no AS "rackNo", module, unit, qty,
-                     min_qty AS "minQty", description AS "desc", image_url AS "imageUrl"`;
+                     min_qty AS "minQty", description AS "desc", image_url AS "imageUrl", carton_type_id AS "cartonTypeId"`;
   const TX_COLS = `t.id, t.type, t.part_id AS "partId", t.qty, t.date::text AS date, t.ref, t.notes, t.issued_to AS "issuedTo",
                    t.purpose, t.challan_no AS "challanNo", t.batch, t.po_no AS "poNo", t.invoice_no AS "invoiceNo",
                    t.batch_label AS "batchLabel", t.order_id AS "orderId", t.created_by AS "createdBy", t.created_at AS "createdAt"`;
@@ -271,8 +276,9 @@ module.exports = function registerStoreRoutes(app, deps) {
       const sku = String(b.sku || '').trim() || null;
       const imageProvided = Object.prototype.hasOwnProperty.call(b, 'imageUrl');
       const qtyVal = b.qty === undefined || b.qty === null || b.qty === '' ? null : roundQty(Math.max(0, Number(b.qty) || 0));
-      const [before] = await sql`SELECT id, name, sku, unit, module, qty FROM store_parts WHERE id = ${id}`;
+      const [before] = await sql`SELECT id, name, sku, unit, module, qty, carton_type_id FROM store_parts WHERE id = ${id}`;
       if (!before) return res.status(404).json({ error: 'Part not found' });
+      if (before.carton_type_id) return res.status(409).json({ error: `"${before.name}" is a Carton Shipper - change it with Edit on its row (name, size, ply, reorder level).` });
       try {
         await sql`
           UPDATE store_parts SET sku = ${sku}, name = ${name}, category = ${String(b.category || '')}, machine = ${String(b.machine || '')},
@@ -308,6 +314,8 @@ module.exports = function registerStoreRoutes(app, deps) {
       const id = parseInt(req.query.id, 10);
       if (!id) return res.status(400).json({ error: 'ID required' });
       if (await partsDenied(sql, req, res, [id])) return;
+      const [ct] = await sql`SELECT name FROM store_parts WHERE id = ${id} AND carton_type_id IS NOT NULL`;
+      if (ct) return res.status(409).json({ error: `"${ct.name}" is a Carton Shipper - delete it with Delete on its row (the carton type).` });
       // (A CTCP plate deleted here leaves the CTP Station's list too - its plate sizes come from the Store.)
       const [p] =await sql`UPDATE store_parts SET deleted_at = now() WHERE id = ${id} RETURNING name, sku, module`;
       await log(sql, req, `store.${(p && p.module) || 'unknown'}.part.trash`, `moved store part "${p ? labelOf(p) : '#' + id}" to trash`, id);
@@ -371,8 +379,10 @@ module.exports = function registerStoreRoutes(app, deps) {
       if (await partsDenied(sql, req, res, [partId])) return;
       if (!isFinite(qty) || qty <= 0) return res.status(400).json({ error: 'Quantity must be greater than zero' });
       if (type !== 'in' && type !== 'out') return res.status(400).json({ error: "type must be 'in' or 'out'" });
-      const [p] = await sql`SELECT qty, name, sku, unit, module FROM store_parts WHERE id = ${partId}`;
+      const [p] = await sql`SELECT qty, name, sku, unit, module, category, carton_type_id FROM store_parts WHERE id = ${partId}`;
       if (!p) return res.status(400).json({ error: 'Part not found' });
+      if (p.carton_type_id) return res.status(409).json({ error: `"${p.name}" is a Carton Shipper - use + Stock / − Stock on its row (the carton Stock In / Issue with E-Job, Manual Job, Other).` });
+      if (type === 'out' && /ctcp|plates/i.test(String(p.category || ''))) return res.status(409).json({ error: `"${p.name}" is a CTCP plate - issue it with − Stock on its row (the plate Use with its reason, job and plates), or at the CTP Station.` });
       if (type === 'out' && p.qty < qty) return res.status(400).json({ error: `Not enough stock! Available: ${p.qty}` });
       let batch = null;
       if (p.module === 'consumables') {
@@ -443,6 +453,13 @@ module.exports = function registerStoreRoutes(app, deps) {
       if (await txnsDenied(sql, req, res, ids)) return;
       // A plate Use / Stock In made at the CTP Station: it is changed there (its Delete puts the Store stock back too),
       // so the station's Register and the Store never disagree.
+      const cartonRows = await sql`SELECT id, carton_tx_id FROM store_tx WHERE id = ANY(${ids}) AND carton_tx_id IS NOT NULL`;
+      if (cartonRows.length) {
+        if (historyOnly || ids.length > 1) return res.status(409).json({ error: 'Carton Shipper entries are reversed one at a time (Reverse on the entry) - they stay in the history.' });
+        const r = await cartonReverse(req, cartonRows[0].carton_tx_id);
+        if (r.code !== 200) return res.status(r.code).json(r.body || { error: 'Reverse failed' });
+        return res.json({ ok: true, deleted: 0, reload: true });
+      }
       const [pe] = await sql`SELECT id, reason, job_id, job_no FROM plate_stock_tx WHERE store_tx_ids && ${ids}::int[] LIMIT 1`;
       if (pe) return res.status(409).json({ error: `This entry was made at the CTP Station${pe.job_id ? ' (Job E-' + pe.job_id + ')' : pe.job_no ? ' (Job ' + pe.job_no + ')' : ''}. ${pe.reason === 'plate-made' ? 'A plate made at CTP is not deleted.' : 'Delete it in the CTP Station Register - the Store stock comes back with it.'}` });
       const txns = await sql`SELECT id, type, part_id, qty, date::text AS date, ref, issued_to FROM store_tx WHERE id = ANY(${ids})`;
@@ -945,11 +962,11 @@ module.exports = function registerStoreRoutes(app, deps) {
     { from: 'store_dropdown_hidden', to: 'store_dropdown_hidden', cols: 'field, value, hidden_by, hidden_at::text AS hidden_at', noId: true },
   ];
   // One side's figures per item: quantity, entries, in, out, and each batch.
-  async function storeFigures(q, partsT, txT) {
+  async function storeFigures(q, partsT, txT, where) {
     const parts = await q(`SELECT p.id, p.qty, COUNT(t.id)::int AS n,
                                   COALESCE(SUM(CASE WHEN t.type = 'in' THEN t.qty END), 0) AS i,
                                   COALESCE(SUM(CASE WHEN t.type = 'out' THEN t.qty END), 0) AS o
-                             FROM ${partsT} p LEFT JOIN ${txT} t ON t.part_id = p.id GROUP BY p.id, p.qty`, []);
+                             FROM ${partsT} p LEFT JOIN ${txT} t ON t.part_id = p.id ${where || ''} GROUP BY p.id, p.qty`, []);
     const batches = await q(`SELECT part_id, COALESCE(batch, 1) AS b, SUM(CASE WHEN type = 'in' THEN qty ELSE -qty END) AS bal
                                FROM ${txT} GROUP BY 1, 2`, []);
     const m = new Map();
@@ -960,12 +977,12 @@ module.exports = function registerStoreRoutes(app, deps) {
   // Every table, every row, every column: a fingerprint of all of it on each side (owner, 2026-11-24: "confirm that its
   // right"). Times are compared as moments, so the two databases' time zones don't matter.
   const FP = [
-    { erp: 'categories', here: 'store_categories', key: 'id', cols: ['id', 'name', 'module'] },
+    { erp: 'categories', here: 'store_categories', key: 'id', cols: ['id', 'name', 'module'], hereWhere: "NOT (module = 'consumables' AND name = 'Carton Shippers')" },
     { erp: 'machines', here: 'store_machines', key: 'id', cols: ['id', 'name', 'module'] },
     { erp: 'store_recipients', here: 'store_recipients', key: 'id', cols: ['id', 'name', 'created_at:t'] },
-    { erp: 'parts', here: 'store_parts', key: 'id', cols: ['id', 'sku', 'name', 'category', 'module', 'machine', 'brand', 'supplier', 'rack_no', 'unit', 'qty', 'min_qty', 'description', 'image_url:img', 'deleted_at:t', 'archived_at:t'] },
+    { erp: 'parts', here: 'store_parts', key: 'id', cols: ['id', 'sku', 'name', 'category', 'module', 'machine', 'brand', 'supplier', 'rack_no', 'unit', 'qty', 'min_qty', 'description', 'image_url:img', 'deleted_at:t', 'archived_at:t'], hereWhere: 'carton_type_id IS NULL' },
     { erp: 'store_orders', here: 'store_orders', key: 'id', cols: ['id', 'part_id', 'qty', 'supplier', 'po_no', 'order_date', 'expected_date', 'notes', 'cancelled_at:t', 'created_by', 'created_at:t', 'item_name', 'unit', 'module', 'po_id', 'po_sr'] },
-    { erp: 'transactions', here: 'store_tx', key: 'id', cols: ['id', 'type', 'part_id', 'qty', 'date', 'ref', 'notes', 'issued_to', 'purpose', 'challan_no', 'created_by', 'batch', 'po_no', 'invoice_no', 'batch_label', 'created_at:t', 'order_id'] },
+    { erp: 'transactions', here: 'store_tx', key: 'id', cols: ['id', 'type', 'part_id', 'qty', 'date', 'ref', 'notes', 'issued_to', 'purpose', 'challan_no', 'created_by', 'batch', 'po_no', 'invoice_no', 'batch_label', 'created_at:t', 'order_id'], hereWhere: 'carton_tx_id IS NULL' },
     { erp: 'store_ledger_ignores', here: 'store_ledger_ignores', key: 'part_id', cols: ['part_id', 'diff', 'ignored_by', 'ignored_at:t'] },
     { erp: 'store_dropdown_hidden', here: 'store_dropdown_hidden', key: "field || '|' || value", cols: ['field', 'value', 'hidden_by', 'hidden_at:t'] },
   ];
@@ -979,7 +996,7 @@ module.exports = function registerStoreRoutes(app, deps) {
       return `COALESCE(${n}::text, '~')`;
     });
     return `SELECT COUNT(*)::int AS n, md5(COALESCE(string_agg(x, E'\\n' ORDER BY k), '')) AS h
-              FROM (SELECT (${t.key})::text AS k, ${parts.join(` || '|' || `)} AS x FROM ${table}) s`;
+              FROM (SELECT (${t.key})::text AS k, ${parts.join(` || '|' || `)} AS x FROM ${table}${here && t.hereWhere ? ' WHERE ' + t.hereWhere : ''}) s`;
   };
   async function fingerprints(sql, erp) {
     const out = [];
@@ -990,8 +1007,8 @@ module.exports = function registerStoreRoutes(app, deps) {
     return out;
   }
   async function compareWithErp(sql, erp) {
-    const [a, b] = await Promise.all([storeFigures((s, p) => erp(s, p), 'parts', 'transactions'), storeFigures((s, p) => sql(s, p), 'store_parts', 'store_tx')]);
-    const names = new Map((await sql`SELECT id, sku, name, module FROM store_parts`).map(p => [Number(p.id), p]));
+    const [a, b] = await Promise.all([storeFigures((s, p) => erp(s, p), 'parts', 'transactions'), storeFigures((s, p) => sql(s, p), 'store_parts', 'store_tx', 'WHERE p.carton_type_id IS NULL')]);
+    const names = new Map((await sql`SELECT id, sku, name, module FROM store_parts WHERE carton_type_id IS NULL`).map(p => [Number(p.id), p]));
     const diffs = [];
     for (const [id, e] of a) {
       const t = b.get(id);
@@ -1025,8 +1042,9 @@ module.exports = function registerStoreRoutes(app, deps) {
         // 1) The ERP's rows go into staging tables first (same columns) - the Store itself is not touched yet, so a
         //    failure or a time-out here changes nothing.
         for (const t of ERP_COPY) {
-          await sql(`CREATE TABLE IF NOT EXISTS ${t.to}__stage (LIKE ${t.to})`, []);
-          await sql(`TRUNCATE ${t.to}__stage`, []);
+          // Made fresh each time, so it always has the table's current columns.
+          await sql(`DROP TABLE IF EXISTS ${t.to}__stage`, []);
+          await sql(`CREATE TABLE ${t.to}__stage (LIKE ${t.to})`, []);
           const rows = data[t.to];
           for (let k = 0; k < rows.length; k += 1500) {
             await sql(`INSERT INTO ${t.to}__stage SELECT * FROM json_populate_recordset(NULL::${t.to}, $1::json)`, [JSON.stringify(rows.slice(k, k + 1500))]);
@@ -1050,6 +1068,8 @@ module.exports = function registerStoreRoutes(app, deps) {
         }
         await sql.transaction(steps);
         for (const t of ERP_COPY) await sql(`TRUNCATE ${t.to}__stage`, []);
+        // The Carton Shippers are the Job Tracker's own (the ERP has none): they come back into the Store.
+        if (afterErpCopy) { try { await afterErpCopy(sql); counts.carton_shippers = 'rebuilt'; } catch (e) { counts.carton_shippers = 'NOT rebuilt: ' + e.message; } }
       }
       const check = await compareWithErp(sql, erp);
       const tables = await fingerprints(sql, erp);
