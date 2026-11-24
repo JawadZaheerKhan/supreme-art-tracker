@@ -1960,13 +1960,8 @@ async function initDb() {
         `;
       }
     }
-    // The Store is Procurement's (owner, 2026-11-24): the Store rows the paper store keeper got by default on the
-    // preview go (only rows nobody changed in the Access Register).
-    await sql`DELETE FROM role_permissions WHERE role = 'store_manager' AND left(permission_key, 6) = 'store_' AND updated_by IS NULL`;
-    await sql`DELETE FROM role_permissions
-               WHERE role <> 'procurement'
-                 AND (left(permission_key, 6) = 'store_' OR permission_key IN ('plate_btn_use', 'plate_btn_delete', 'carton_tab_access', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse'))
-                 AND (updated_by IS NULL OR updated_by LIKE 'copied from %')`;
+    // (No Access Register row is ever removed or changed here - the owner sets who has what, 2026-11-24. New rows only
+    // get their defaults above.)
     // QC and QA (owner, 2026-11-11) - their own Operator columns, starting with what Operator has.
     for (const r of Object.values(OPERATOR_KIND_ROLE)) {
       await sql`
