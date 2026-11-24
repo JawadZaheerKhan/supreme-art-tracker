@@ -135,6 +135,9 @@
     background: rgba(255,255,255,0.10); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
     border: 1px solid rgba(255,255,255,0.18); border-radius: 9px;
   }
+  /* Tighter tabs (owner, 2026-11-24): less space between and inside them, so more tabs fit the bar. */
+  #mode-switch { gap: 1px; padding: 2px; }
+  #mode-switch .mode-btn { padding: 6px 8px; }
   #mode-switch .mode-btn {
     color: rgba(255,255,255,0.82); border: 1px solid transparent;
     transition: background 0.22s ease, color 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
@@ -3792,7 +3795,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
   .topbar:has(#topbar-add-offcut:not([style*="display:none"]):not([style*="display: none"])) .topbar-brand-text { display: none; }
   #user-chip { margin-left: 0 !important; padding-left: 0 !important; border-left: none !important; }
   .topbar-right .btn { padding: 5px 10px; font-size: 12px; }
-  #mode-switch .mode-btn { padding: 6px 11px; font-size: 13px; }
+  #mode-switch .mode-btn { padding: 6px 8px; font-size: 13px; }
   body:not([data-mode="station"]) #app-date { padding: 6px 12px 0; }
   body:not([data-mode="station"]) #app-date-refresh { padding: 3px 10px; font-size: 11px; }
   body:not([data-mode="station"]) #app-date .ad-day { font-size: 9px; }
@@ -3979,6 +3982,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn products-tab-only" data-mode="products" id="mode-products-btn" onclick="setMode('products')">Product Rate</button>
     <button class="mode-btn" data-mode="inventory" id="mode-inventory-btn" onclick="setMode('inventory')">Inventory</button>
     <button class="mode-btn" data-mode="carton-shippers" id="mode-carton-shippers-btn" onclick="setMode('carton-shippers')" style="display:none;">&#128230; Carton Shippers</button>
+    <button class="mode-btn" data-mode="plates" id="mode-plates-btn" onclick="setMode('plates')" style="display:none;">&#129513; Plate Store</button>
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="openReportsTab()">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
     <button class="mode-btn" data-mode="station" id="mode-station-btn" onclick="setMode('station')">&#127981; Station</button>
@@ -4120,7 +4124,7 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="btn ceo-hide" onclick="openBulkStockOut()" style="background:#DC2626;color:#fff;border-color:#DC2626;">&#128228; Stock Out (Bulk)</button>
     <button class="btn" data-acc="inv_btn_print_sticker" onclick="openInvSticker(0)" title="Print a pallet sticker with every detail typed by hand - no Stock In needed">&#128424; Print Sticker</button>
     <button class="btn" id="inv-brands-btn" data-acc="inv_btn_brands" data-acc-need="view" onclick="openInvBrands()" title="Every brand and supplier - fix a spelling, or change an item's brand / supplier">&#127991; Brands &amp; Suppliers</button>
-    <button class="btn" id="inv-plates-btn" data-acc="inv_btn_plate_store" data-acc-need="view" onclick="openPlateStore()" title="Blank plates per size, Stock In, and the Plate Register (every plate made, reused or removed)">&#129513; Plate Store</button>
+    <button class="btn" id="inv-plates-btn" data-acc="inv_btn_plate_store" data-acc-need="view" onclick="setMode('plates')" title="Blank plates per size, Stock In, and the Plate Register - its own tab at the top">&#129513; Plate Store</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -4633,6 +4637,9 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
 </div>
 
 <!-- Carton Shippers (owner, 2026-10-14): carton shipper stock, Stock In, Issue and the In / Out log. -->
+<div class="main" id="plates-mode" style="display:none;">
+  <div id="plates-root" style="max-width:1100px;margin:0 auto;padding:12px 16px;"></div>
+</div>
 <div class="main" id="carton-shippers-mode" style="display:none;">
   <div id="carton-shippers-root"></div>
 </div>
@@ -6983,11 +6990,12 @@ function tabAllowed(m) {
     case 'factory':     return hasRole('ceo');   // the 3D factory view: Super Admin and the CEO (owner, 2026-10-24 / 2026-10-26)
     case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
     case 'carton-shippers': return hasPerm('carton_tab_access', 'view');
+    case 'plates':      return hasPerm('inv_btn_plate_store', 'view');   // Plate Store tab (owner, 2026-11-24)
     case 'mgr-operators': return mgrOpsUnlocked();
     default:            return true;
   }
 }
-const TAB_ORDER = ['jobs', 'dashboard', 'products', 'inventory', 'carton-shippers', 'reports', 'stickers', 'station', 'users', 'client-view'];
+const TAB_ORDER = ['jobs', 'dashboard', 'products', 'inventory', 'carton-shippers', 'plates', 'reports', 'stickers', 'station', 'users', 'client-view'];
 function firstAllowedTab() { return TAB_ORDER.find(tabAllowed) || 'jobs'; }
 // ── CEO Dashboard ─────────────────────────────────────────────────
 // Owner, 2026-10-09: one place where the CEO sees everything, in small
@@ -8153,6 +8161,7 @@ function renderUserChip() {
   showTab('mode-products-btn', 'products');
   showTab('mode-inventory-btn', 'inventory');
   showTab('mode-carton-shippers-btn', 'carton-shippers');
+  showTab('mode-plates-btn', 'plates');
   showTab('mode-reports-btn', 'reports');
   showTab('mode-stickers-btn', 'stickers');
   showTab('mode-station-btn', 'station');
@@ -9057,6 +9066,8 @@ function setMode(m) {
   document.getElementById('inventory-mode').style.display = m === 'inventory' ? 'block' : 'none';
   const cartonEl = document.getElementById('carton-shippers-mode');
   if (cartonEl) cartonEl.style.display = m === 'carton-shippers' ? 'block' : 'none';
+  const platesEl = document.getElementById('plates-mode');
+  if (platesEl) platesEl.style.display = m === 'plates' ? 'block' : 'none';
   document.getElementById('reports-mode').style.display   = (m === 'reports' || m === 'mgr-dp') ? 'block' : 'none';
   document.body.classList.toggle('mgr-dp-on', m === 'mgr-dp');
   if (m === 'mgr-dp') { openReportsGroup('daily-production-group'); openDailyProduction(); }
@@ -9136,6 +9147,11 @@ function setMode(m) {
     exportBtn.style.display = 'none';
     if (refreshBtn) refreshBtn.style.display = 'none';
     enterCartonShippers();
+  } else if (m === 'plates') {
+    addBtn.style.display = 'none';
+    exportBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
+    openPlateStore();
   } else if (m === 'dashboard') {
     addBtn.style.display = 'none';
     exportBtn.style.display = 'none';
@@ -35771,15 +35787,17 @@ const PLATE_TX_TXT = { 'stock-in': 'Stock In', 'plate-made': 'Plate made', 'dama
 async function openPlateStore(tab) {
   plateStoreTab = tab || plateStoreTab || 'store';
   if (!plateRegFrom) { const t = localDateISO(); plateRegFrom = t.slice(0, 8) + '01'; plateRegTo = t; }
-  openModal(`<div class="modal modal-wide" onclick="event.stopPropagation()" style="max-width:1000px !important;">
-    <h2>&#129513; Plates</h2>
-    <div style="display:flex;gap:8px;margin-bottom:10px;">
+  // Its own top tab (owner, 2026-11-24): a page, not a popup.
+  const root = document.getElementById('plates-root');
+  if (!root) return;
+  if (typeof mode !== 'undefined' && mode !== 'plates') { setMode('plates'); return; }
+  root.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+      <h2 style="margin:0;">&#129513; Plates</h2>
       <button class="btn ${plateStoreTab === 'store' ? 'btn-primary' : ''}" onclick="openPlateStore('store')">Plate Store</button>
       <button class="btn ${plateStoreTab === 'register' ? 'btn-primary' : ''}" onclick="openPlateStore('register')">Plate Register</button>
     </div>
-    <div id="plate-store-body">Loading…</div>
-    <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Close</button></div>
-  </div>`);
+    <div id="plate-store-body" style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:12px;">Loading…</div>`;
   if (plateStoreTab === 'store') await renderPlateStore(); else await loadPlateRegister();
 }
 async function renderPlateStore() {
