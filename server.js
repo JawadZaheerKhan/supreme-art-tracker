@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-cartons-in-store';   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-store-procurement-only';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -732,33 +732,33 @@ const ROLE_PERMISSION_DEFAULTS = {
   // Plate Store buttons, each its own row (owner, 2026-11-24). They start with what each role had on the Plate Store row.
   plate_btn_add:      { label: 'Plate Store — + Add Plate, and Edit on a plate (size, machine, brand, supplier)', levels: { admin: 'yes', store_manager: 'yes' } },
   plate_btn_stock_in: { label: 'Plate Store — + Stock In (Delivery with its challan / Adjustment)', levels: { admin: 'yes', store_manager: 'yes', procurement: 'yes' } },
-  plate_btn_use:      { label: 'Store — CTCP plates: Use (New job / Old job / Damaged / Adjustment) from the Store', levels: { admin: 'yes', store_manager: 'yes', procurement: 'yes' } },
+  plate_btn_use: { label: "Store — CTCP plates: − Stock opens the plate Use (New job / Old job / Damaged / Adjustment; job, plates, damaged by)", levels: { procurement: 'yes' } },
   plate_btn_pickup:   { label: 'Plate Store — In Process: Picked up (CTP took the plates back)', levels: { admin: 'yes', store_manager: 'yes' } },
-  plate_btn_delete:   { label: 'Store — CTP Station plates: Reverse a wrong Use / Stock In entry in the CTP Register (the Store stock comes back; from the Store it is the Store\'s Reverse row)', levels: { admin: 'yes', procurement: 'yes' } },
+  plate_btn_delete: { label: "Store — CTCP plates: Reverse a CTP Station Use / Stock In (in the CTP Register; in the Store the Reverse row does it) - the stock comes back", levels: { procurement: 'yes' } },
   products_btn_new:     { label: 'New / edit product — + New Product (a product without a job card), its details on a tile (company, item code, No. of Colors, UPS) and Delete for a product with no jobs', levels: { admin: 'yes', finance: 'yes' } },
 
   // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
   // every role until a Super Admin turns it on, except Procurement, whose tab
   // this is (and who sees nothing else by default).
-  carton_tab_access:   { label: 'Carton Shippers tab — the carton shipper stock list and its In / Out log', levels: { procurement: 'view' } },
-  carton_btn_types:    { label: '+ Carton Type — also covers Edit and Hide on a type', levels: { procurement: 'yes' } },
-  carton_btn_stock_in: { label: 'Stock In — cartons received from a supplier', levels: { procurement: 'yes' } },
-  carton_btn_issue:    { label: 'Issue — cartons given out for an E-Job, a manual job or other', levels: { procurement: 'yes' } },
-  carton_btn_reverse:  { label: 'Reverse — undo a wrong carton entry', levels: { procurement: '30-day' }, extra: ['30-day'] },
+  carton_tab_access: { label: "Store — Carton Shippers: their windows (Stock In / Issue / Edit / Delete on a carton in the Store) can open", levels: { procurement: 'view' } },
+  carton_btn_types: { label: "Store — Carton Shippers: add one (+ Add Part with category Carton Shippers), Edit (name, size, reorder level) and Hide", levels: { procurement: 'yes' } },
+  carton_btn_stock_in: { label: "Store — Carton Shippers: + Stock (carton Stock In - supplier, challan)", levels: { procurement: 'yes' } },
+  carton_btn_issue: { label: "Store — Carton Shippers: − Stock (carton Issue - E-Job / Manual Job / Other)", levels: { procurement: 'yes' } },
+  carton_btn_reverse: { label: "Store — Carton Shippers: Reverse a carton entry (the Station's own issues are changed at the Station)", levels: { procurement: '30-day' }, extra: ['30-day'] },
 
   // Access Register — Store tab (moved from the ERP, owner 2026-11-24): one row per grant the ERP's store had.
-  store_tab_access:          { label: 'Store tab — the raw material store (moved from the ERP)', levels: { admin: 'view', procurement: 'view', ceo: 'view' } },
-  store_sec_consumables:     { label: 'Store — Inks & Consumables section', levels: { admin: 'view', procurement: 'view', ceo: 'view' } },
-  store_sec_machinery:       { label: 'Store — Parts Store (Machinery) section', levels: { admin: 'view', procurement: 'view', ceo: 'view' } },
-  store_btn_edit:            { label: 'Store — Add / Edit an item (photo, sticker P.O. / Invoice No., Issued To names)', levels: { admin: 'yes', procurement: 'yes' } },
-  store_btn_stock_in:        { label: 'Store — Stock In (also Receive on an order)', levels: { admin: 'yes', procurement: 'yes' } },
-  store_btn_stock_out:       { label: 'Store — Stock Out / Issue', levels: { admin: 'yes', procurement: 'yes' } },
-  store_btn_reverse:         { label: 'Store — Reverse an entry (the quantity comes back)', levels: { admin: 'yes', procurement: 'yes' } },
-  store_btn_delete_history:  { label: 'Store — Delete from History (the record only; the quantity stays)', levels: { admin: 'yes', procurement: 'yes' } },
-  store_btn_part_delete:     { label: 'Store — Delete an item (to the Trash), Restore, remove from the Trash', levels: { admin: 'yes', procurement: 'yes' } },
-  store_btn_reconcile:       { label: 'Store — "Does not add up": Reconcile / Ignore', levels: { admin: 'yes', procurement: 'yes' } },
-  store_btn_settings:        { label: 'Store — Settings: categories, machines, suppliers & brands', levels: { admin: 'yes', procurement: 'yes' } },
-  store_btn_orders:          { label: 'Store — Orders: book (also from a P.O.), change, cancel, delete', levels: { admin: 'yes', procurement: 'yes' } },
+  store_tab_access: { label: "Store tab — the raw material store (moved from the ERP)", levels: { procurement: 'view' } },
+  store_sec_consumables: { label: "Store — Inks & Consumables section (also Carton Shippers and CTCP plates)", levels: { procurement: 'view' } },
+  store_sec_machinery: { label: "Store — Parts Store (Machinery) section", levels: { procurement: 'view' } },
+  store_btn_edit: { label: "Store — Add / Edit an item (Size for Carton Shippers / CTCP plates, photo, sticker P.O. / Invoice No., Issued To names)", levels: { procurement: 'yes' } },
+  store_btn_stock_in: { label: "Store — Stock In (also Receive on an order)", levels: { procurement: 'yes' } },
+  store_btn_stock_out: { label: "Store — Stock Out / Issue", levels: { procurement: 'yes' } },
+  store_btn_reverse: { label: "Store — Reverse an entry (the quantity comes back; also a CTP plate entry, which leaves the CTP Register too)", levels: { procurement: 'yes' } },
+  store_btn_delete_history: { label: "Store — Delete from History (the record only; the quantity stays)", levels: { procurement: 'yes' } },
+  store_btn_part_delete: { label: "Store — Delete an item (to the Trash), Restore, remove from the Trash", levels: { procurement: 'yes' } },
+  store_btn_reconcile: { label: "Store — \"Does not add up\": Reconcile / Ignore", levels: { procurement: 'yes' } },
+  store_btn_settings: { label: "Store — Settings: categories (also the red bin on an empty category in Stock In / Out), machines, suppliers & brands", levels: { procurement: 'yes' } },
+  store_btn_orders: { label: "Store — Orders: book (also from a P.O.), change, cancel, delete", levels: { procurement: 'yes' } },
 };
 // In-memory cache, refreshed on write. Read on every request, so it must
 // never be empty/stale relative to the DB for longer than one write's
@@ -1944,8 +1944,7 @@ async function initDb() {
       )
     `;
     // Rows split off another (owner, 2026-10-26) start with what each role had on it.
-    for (const [to, from] of [['job_btn_stage_moves', 'job_btn_stage_forward'], ['inv_btn_print_sticker', 'inv_btn_batches'],
-                              ['plate_btn_add', 'inv_btn_plate_store'], ['plate_btn_stock_in', 'inv_btn_plate_store'], ['plate_btn_use', 'inv_btn_plate_store'], ['plate_btn_pickup', 'inv_btn_plate_store']]) {
+    for (const [to, from] of [['job_btn_stage_moves', 'job_btn_stage_forward'], ['inv_btn_print_sticker', 'inv_btn_batches']]) {
       await sql`
         INSERT INTO role_permissions (permission_key, role, level, updated_by)
         SELECT ${to}, role, level, 'copied from ' || ${from} FROM role_permissions WHERE permission_key = ${from}
@@ -1964,6 +1963,10 @@ async function initDb() {
     // The Store is Procurement's (owner, 2026-11-24): the Store rows the paper store keeper got by default on the
     // preview go (only rows nobody changed in the Access Register).
     await sql`DELETE FROM role_permissions WHERE role = 'store_manager' AND left(permission_key, 6) = 'store_' AND updated_by IS NULL`;
+    await sql`DELETE FROM role_permissions
+               WHERE role <> 'procurement'
+                 AND (left(permission_key, 6) = 'store_' OR permission_key IN ('plate_btn_use', 'plate_btn_delete', 'carton_tab_access', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse'))
+                 AND (updated_by IS NULL OR updated_by LIKE 'copied from %')`;
     // QC and QA (owner, 2026-11-11) - their own Operator columns, starting with what Operator has.
     for (const r of Object.values(OPERATOR_KIND_ROLE)) {
       await sql`
