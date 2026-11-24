@@ -8557,7 +8557,10 @@ async function plateStockOut(sql, req, sizeId, { jobId, plateId, reason, notes }
     try {
       storeIds = await storeApi.plateMove(sql, { partId: lk.store_part_id, change: -1, issuedTo: plateWho(req), by: plateWho(req), notes: notes || '',
         purpose: `CTP - plate made${jobId ? ' · Job E-' + jobId : ''}` });
-    } catch (e) { console.error('plate made: Store item not moved -', e.message); }
+    } catch (e) {
+      console.error('plate made: Store item not moved -', e.message);
+      await logAudit(sql, req, { action: 'plate_stock.store_skip', entityType: 'plate_size', entityId: sizeId, summary: `Plate made at CTP${jobId ? ' (Job E-' + jobId + ')' : ''} was NOT taken out of the Store: ${e.message}` });
+    }
   }
   await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, plate_id, notes, user_email, actor_name, store_tx_ids)
             VALUES (${sizeId}, -1, ${reason}, ${jobId || null}, ${plateId || null}, ${notes || null}, ${(req.user && req.user.email) || null}, ${(req.user && req.user.station_actor) || null}, ${storeIds})`;
@@ -8596,19 +8599,28 @@ async function plateSizesList(sql) {
      WHERE s.deleted_at IS NULL ORDER BY s.name`;
   return rows.map(r => r.store_part_id && r.store_name != null ? { ...r, balance: Math.round(Number(r.store_qty) * 1000) / 1000, linked: true } : { ...r, linked: false });
 }
+// One plate size's stock: the Store's quantity when linked, else its own.
+async function plateBalanceOf(sql, sizeId) {
+  const list = await plateSizesList(sql);
+  const z = list.find(x => Number(x.id) === Number(sizeId));
+  return z ? z.balance : null;
+}
 app.get('/api/plates/sizes', requireAuth, async (req, res) => {
   try {
     await dbReady;
     res.json(await plateSizesList(getDb()));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-async function plateStorePartOk(sql, raw) {
+async function plateStorePartOk(sql, raw, sizeId) {
   if (raw === undefined) return { keep: true };
   const id = parseInt(raw, 10);
   if (!id) return { id: null };
   await storeApi.ensureStore();
   const [p] = await sql`SELECT id FROM store_parts WHERE id = ${id} AND deleted_at IS NULL AND module = 'consumables'`;
-  return p ? { id } : { error: 'That Store item was not found.' };
+  if (!p) return { error: 'That Store item was not found.' };
+  // One plate size per Store item - two would draw on the same stock and show it twice.
+  const [other] = await sql`SELECT name FROM plate_sizes WHERE store_part_id = ${id} AND deleted_at IS NULL AND id <> ${sizeId || 0} LIMIT 1`;
+  return other ? { error: `That Store item is already the plate of "${other.name}". Unlink it there first.` } : { id };
 }
 // The Plate Store's handlers - the app's routes below, and the same at the CTP Station with the CTP PIN (owner,
 // 2026-11-24: "same as the Line Clearance at the QA station").
@@ -8664,7 +8676,7 @@ app.put('/api/plates/sizes/:id', requirePermission('plate_btn_add'), plateH.size
     const low = req.body.low_at === undefined ? before.low_at : Math.max(0, parseInt(req.body.low_at, 10) || 0);
     const brand = req.body.brand === undefined ? before.brand : (String(req.body.brand || '').trim().slice(0, 80) || null);
     const supplier = req.body.supplier === undefined ? before.supplier : (String(req.body.supplier || '').trim().slice(0, 80) || null);
-    const link = await plateStorePartOk(sql, req.body.store_part_id);
+    const link = await plateStorePartOk(sql, req.body.store_part_id, id);
     if (link.error) return res.status(400).json({ error: link.error });
     const storePartId = link.keep ? before.store_part_id : link.id;
     const [row] = await sql`UPDATE plate_sizes SET name = ${name}, machines = ${machines}, low_at = ${low}, brand = ${brand}, supplier = ${supplier}, store_part_id = ${storePartId} WHERE id = ${id} RETURNING *`;
@@ -8717,6 +8729,16 @@ app.post('/api/plates/stock', plateStockGate, plateH.stock = async (req, res) =>
     // damaged it stay here, the Store entry says the same in short.
     let storeIds = null;
     if (s.store_part_id) {
+      // Its Store item gone (deleted in the ERP and copied): the plate counts as not linked - CTP is never stopped.
+      await storeApi.ensureStore();
+      const [sp] = await sql`SELECT id FROM store_parts WHERE id = ${s.store_part_id} AND deleted_at IS NULL`;
+      if (!sp) {
+        await sql`UPDATE plate_sizes SET store_part_id = NULL WHERE id = ${sizeId}`;
+        await logAudit(sql, req, { action: 'plate_size.update', entityType: 'plate_size', entityId: sizeId, summary: `Plate size ${s.name} unlinked from the Store: its Store item #${s.store_part_id} is not there any more` });
+        s.store_part_id = null;
+      }
+    }
+    if (s.store_part_id) {
       const jobTxt = jobId ? `Job E-${jobId}` : jobNo ? `Job ${jobNo}` : '';
       const summary = [`CTP - ${reasons[reason]}`, jobTxt, jobName && !jobId ? jobName : '', plateNames ? 'plates: ' + plateNames : '', damagedBy || ''].filter(Boolean).join(' · ');
       try {
@@ -8725,12 +8747,18 @@ app.post('/api/plates/stock', plateStockGate, plateH.stock = async (req, res) =>
           challanNo: challan || '', notes: [dir === 'in' ? summary : '', notes || ''].filter(Boolean).join(' · ') });
       } catch (e) { return res.status(400).json({ error: e.message }); }
     }
-    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_no, job_name, damaged_by, plate_names, notes, challan_no, user_email, actor_name, created_at, recorded_at, store_tx_ids)
-              VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobNo}, ${jobName}, ${damagedBy}, ${plateNames}, ${notes}, ${challan}, ${req.user.email}, ${req.user.station_actor || null},
-                      COALESCE(${at}::timestamptz, NOW()), CASE WHEN ${at}::timestamptz IS NULL THEN NULL ELSE NOW() END, ${storeIds})`;
+    try {
+      await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_no, job_name, damaged_by, plate_names, notes, challan_no, user_email, actor_name, created_at, recorded_at, store_tx_ids)
+                VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobNo}, ${jobName}, ${damagedBy}, ${plateNames}, ${notes}, ${challan}, ${req.user.email}, ${req.user.station_actor || null},
+                        COALESCE(${at}::timestamptz, NOW()), CASE WHEN ${at}::timestamptz IS NULL THEN NULL ELSE NOW() END, ${storeIds})`;
+    } catch (e) {
+      // The station entry was not saved: its Store entries are taken back, so the two never disagree.
+      if (storeIds && storeIds.length) { try { await storeApi.plateUnmove(sql, storeIds); } catch (e2) { console.error('plate: Store entries not taken back', storeIds, e2.message); } }
+      throw e;
+    }
     const [row] = await sql`UPDATE plate_sizes SET balance = balance + ${change} WHERE id = ${sizeId} RETURNING *`;
     await logAudit(sql, req, { action: 'plate_stock.' + dir, entityType: 'plate_size', entityId: sizeId,
-      summary: `Plates ${dir === 'in' ? 'Stock In' : 'Use'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name} (${reasons[reason]})${jobId ? ' · Job E-' + jobId : jobNo ? ' · Job ' + jobNo : ''}${jobName && !jobId ? ' ' + jobName : ''}${plateNames ? ' · plates: ' + plateNames : ''}${damagedBy ? ' · ' + damagedBy : ''}${challan ? ' · challan ' + challan : ''}${entry.date ? ' · dated ' + entry.date + ' (late entry)' : ''} · balance ${row.balance}` });
+      summary: `Plates ${dir === 'in' ? 'Stock In' : 'Use'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name} (${reasons[reason]})${jobId ? ' · Job E-' + jobId : jobNo ? ' · Job ' + jobNo : ''}${jobName && !jobId ? ' ' + jobName : ''}${plateNames ? ' · plates: ' + plateNames : ''}${damagedBy ? ' · ' + damagedBy : ''}${challan ? ' · challan ' + challan : ''}${entry.date ? ' · dated ' + entry.date + ' (late entry)' : ''} · balance ${await plateBalanceOf(sql, sizeId)}${s.store_part_id ? ' (Store)' : ''}` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -8848,7 +8876,7 @@ app.get('/api/station/plates/job/:id', requireStationUser, async (req, res) => {
     const [job] = await sql`SELECT id, name, client, machine, particulars FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
     if (!job) return res.status(404).json({ error: 'Job not found' });
     const prod = await plateProductOfJob(sql, job);
-    const sizes = await sql`SELECT * FROM plate_sizes WHERE deleted_at IS NULL ORDER BY name`;
+    const sizes = await plateSizesList(sql);   // a linked plate shows the Store's quantity
     const [pm] = await sql`SELECT colors FROM finance.products WHERE key = ${prod.key}`;
     const plates = await sql`SELECT p.*, s.name AS size_name FROM plates p LEFT JOIN plate_sizes s ON s.id = p.size_id WHERE p.product_key = ${prod.key} AND p.status = 'active' ORDER BY p.size_id, p.id`;
     const done = await sql`SELECT e.*, p.color_name, s.name AS size_name FROM plate_events e LEFT JOIN plates p ON p.id = e.plate_id LEFT JOIN plate_sizes s ON s.id = e.size_id WHERE e.job_id = ${id} ORDER BY e.id`;
@@ -8944,8 +8972,7 @@ app.post('/api/station/plates/make', requireStationUser, async (req, res) => {
     for (const n of names) made.push(await makePlate(sql, req, { productKey: prod.key, productName: prod.name, colorName: n, sizeId, jobId: id, reason, by }));
     await logAudit(sql, req, { action: 'job.plates_made', entityType: 'job', entityId: id,
       summary: `Plates made: ${names.length} ${size.name} (${names.join(', ')}) for ${prod.name}${scrapped ? ` · the old ${scrapped} scrapped (${PLATE_REASONS[reason]})` : ''} · by ${by}` });
-    const [after] = await sql`SELECT balance FROM plate_sizes WHERE id = ${sizeId}`;
-    res.json({ ok: true, made: made.length, scrapped, balance: after ? after.balance : null });
+    res.json({ ok: true, made: made.length, scrapped, balance: await plateBalanceOf(sql, sizeId) });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Station - a repeat job prints with the product's plates in use of that size.

@@ -305,6 +305,9 @@ module.exports = function registerStoreRoutes(app, deps) {
       const id = parseInt(req.query.id, 10);
       if (!id) return res.status(400).json({ error: 'ID required' });
       if (await partsDenied(sql, req, res, [id])) return;
+      // The CTCP plate of a CTP Station plate size: unlink it there first, or the station would lose its stock.
+      const [lk] = await sql`SELECT name FROM plate_sizes WHERE store_part_id = ${id} AND deleted_at IS NULL LIMIT 1`;
+      if (lk) return res.status(409).json({ error: `This item is the plate of the CTP Station's "${lk.name}". Unlink it there first (CTP Station → Use → Edit → Store item), then delete it.` });
       const [p] = await sql`UPDATE store_parts SET deleted_at = now() WHERE id = ${id} RETURNING name, sku, module`;
       await log(sql, req, `store.${(p && p.module) || 'unknown'}.part.trash`, `moved store part "${p ? labelOf(p) : '#' + id}" to trash`, id);
       res.json({ ok: true });
@@ -378,7 +381,11 @@ module.exports = function registerStoreRoutes(app, deps) {
           if (want > 0) {
             if (!(batches.some(x => x.n === want) && (any || want === 1))) return res.status(400).json({ error: `There is no ${ordinal(want)} batch of this item to add to.` });
             batch = want;
-          } else batch = any ? batches[batches.length - 1].n + 1 : 1;
+          } else {
+            // A batch below zero (CTP plates used before their stock in was entered) is filled first; else a new batch.
+            const neg = batches.find(x => x.qty < -0.0005);
+            batch = neg ? neg.n : any ? batches[batches.length - 1].n + 1 : 1;
+          }
         } else if (want > 0) {
           const hit = batches.find(x => x.n === want);
           if (!hit) return res.status(400).json({ error: `There is no ${ordinal(want)} batch of this item.` });
@@ -433,13 +440,10 @@ module.exports = function registerStoreRoutes(app, deps) {
       if (!ids.length) return res.status(400).json({ error: 'ID(s) required' });
       if (!can(req.user, historyOnly ? 'store.delete' : 'store.reverse')) return res.status(403).json({ error: 'Not allowed' });
       if (await txnsDenied(sql, req, res, ids)) return;
-      // A plate Use / Stock In made at the CTP Station (owner, 2026-11-24): reversing it here reverses that whole station
-      // entry - all its Store parts (batches) - and takes it off the station's Register, so the two never disagree.
-      let plateEntries = [];
-      if (!historyOnly) {
-        plateEntries = await sql`SELECT id, store_tx_ids FROM plate_stock_tx WHERE store_tx_ids && ${ids}::int[]`;
-        for (const pe of plateEntries) for (const x of pe.store_tx_ids || []) if (!ids.includes(Number(x))) ids.push(Number(x));
-      }
+      // A plate Use / Stock In made at the CTP Station: it is changed there (its Delete puts the Store stock back too),
+      // so the station's Register and the Store never disagree.
+      const [pe] = await sql`SELECT id, reason, job_id, job_no FROM plate_stock_tx WHERE store_tx_ids && ${ids}::int[] LIMIT 1`;
+      if (pe) return res.status(409).json({ error: `This entry was made at the CTP Station${pe.job_id ? ' (Job E-' + pe.job_id + ')' : pe.job_no ? ' (Job ' + pe.job_no + ')' : ''}. ${pe.reason === 'plate-made' ? 'A plate made at CTP is not deleted.' : 'Delete it in the CTP Station Register - the Store stock comes back with it.'}` });
       const txns = await sql`SELECT id, type, part_id, qty, date::text AS date, ref, issued_to FROM store_tx WHERE id = ANY(${ids})`;
       if (!txns.length) return res.json({ ok: true, deleted: 0 });
       const partIds = [...new Set(txns.map(t => t.part_id))];
@@ -451,12 +455,15 @@ module.exports = function registerStoreRoutes(app, deps) {
         for (const pid of partIds) {
           const p = partsMap.get(pid);
           if (!p) continue;
-          const projected = p.qty + (delta.get(pid) || 0);
-          if (projected < 0) return res.status(400).json({ error: `Cannot delete: would make "${p.name}" go below zero (current ${p.qty}, net reversal ${delta.get(pid)}). Adjust stock first or use 'Delete from History' to purge without reversing qty.` });
+          const d = delta.get(pid) || 0;
+          const projected = p.qty + d;
+          // Only what the reversal makes worse is refused (a CTP plate may have left the item below zero already).
+          if (projected < 0 && d < 0) return res.status(400).json({ error: `Cannot delete: would make "${p.name}" go below zero (current ${p.qty}, net reversal ${d}). Adjust stock first or use 'Delete from History' to purge without reversing qty.` });
           if (p.module === 'consumables') {
             const mine = txns.filter(t => t.part_id === pid).map(t => t.id);
+            const before = new Map((await batchBalances(sql, pid)).batches.map(x => [x.n, x.qty]));
             const { batches } = await batchBalances(sql, pid, { skipTxns: mine, qtyOverride: projected });
-            const low = batches.find(x => x.qty < -0.0005);
+            const low = batches.find(x => x.qty < -0.0005 && x.qty < (before.has(x.n) ? before.get(x.n) : 0) - 0.0005);
             if (low) return res.status(400).json({ error: `Cannot reverse this: it would leave the ${ordinal(low.n)} batch of "${p.name}" below zero, because stock was already issued from it. Reverse those issues first.` });
           }
         }
@@ -464,10 +471,6 @@ module.exports = function registerStoreRoutes(app, deps) {
           WITH del AS (DELETE FROM store_tx WHERE id = ANY(${ids}) RETURNING part_id, type, qty),
                agg AS (SELECT part_id, SUM(CASE WHEN type = 'in' THEN -qty ELSE qty END) AS d FROM del GROUP BY part_id)
           UPDATE store_parts p SET qty = ROUND((p.qty + agg.d)::numeric, 3)::double precision FROM agg WHERE p.id = agg.part_id`;
-        if (plateEntries.length) {
-          await sql`DELETE FROM plate_stock_tx WHERE id = ANY(${plateEntries.map(pe => Number(pe.id))})`;
-          await log(sql, req, 'plate_stock.delete', `Plate entr${plateEntries.length === 1 ? 'y' : 'ies'} of the CTP Station reversed from the Store (Store entries ${ids.join(', ')})`);
-        }
       } else {
         await sql`DELETE FROM store_tx WHERE id = ANY(${ids})`;
       }
@@ -985,22 +988,34 @@ module.exports = function registerStoreRoutes(app, deps) {
         // Read everything first - nothing here changes unless the whole ERP store was read.
         const data = {};
         for (const t of ERP_COPY) data[t.to] = await erp(`SELECT ${t.cols} FROM ${t.from}${t.noId ? '' : ' ORDER BY id'}`, []);
+        // 1) The ERP's rows go into staging tables first (same columns) - the Store itself is not touched yet, so a
+        //    failure or a time-out here changes nothing.
+        for (const t of ERP_COPY) {
+          await sql(`CREATE TABLE IF NOT EXISTS ${t.to}__stage (LIKE ${t.to})`, []);
+          await sql(`TRUNCATE ${t.to}__stage`, []);
+          const rows = data[t.to];
+          for (let k = 0; k < rows.length; k += 1500) {
+            await sql(`INSERT INTO ${t.to}__stage SELECT * FROM json_populate_recordset(NULL::${t.to}, $1::json)`, [JSON.stringify(rows.slice(k, k + 1500))]);
+          }
+          counts[t.from] = rows.length;
+        }
         // Plate sizes linked to Store items: kept only where the same item (same id AND name) comes back from the ERP;
         // the CTP Station's entries forget their old Store entries (those are replaced), so nothing points at a wrong one.
         const linked = await sql`SELECT s.id, s.store_part_id, p.name FROM plate_sizes s LEFT JOIN store_parts p ON p.id = s.store_part_id WHERE s.store_part_id IS NOT NULL`;
         const erpNames = new Map(data.store_parts.map(p => [Number(p.id), String(p.name || '')]));
-        for (const l of linked) if (erpNames.get(Number(l.store_part_id)) !== String(l.name || '')) await sql`UPDATE plate_sizes SET store_part_id = NULL WHERE id = ${l.id}`;
-        await sql`UPDATE plate_stock_tx SET store_tx_ids = NULL WHERE store_tx_ids IS NOT NULL`;
-        // Replace this store's contents (the children first), then put the ERP's in, the parents first.
-        for (const t of ['store_ledger_ignores', 'store_tx', 'store_orders', 'store_parts', 'store_categories', 'store_machines', 'store_recipients', 'store_dropdown_hidden']) await sql(`DELETE FROM ${t}`, []);
+        const unlink = linked.filter(l => erpNames.get(Number(l.store_part_id)) !== String(l.name || '')).map(l => Number(l.id));
+        // 2) The swap in ONE transaction: the old Store contents out, the ERP's in, the numbering after them - all or
+        //    nothing.
+        const steps = [];
+        if (unlink.length) steps.push(sql`UPDATE plate_sizes SET store_part_id = NULL WHERE id = ANY(${unlink})`);
+        steps.push(sql`UPDATE plate_stock_tx SET store_tx_ids = NULL WHERE store_tx_ids IS NOT NULL`);
+        for (const t of ['store_ledger_ignores', 'store_tx', 'store_orders', 'store_parts', 'store_categories', 'store_machines', 'store_recipients', 'store_dropdown_hidden']) steps.push(sql(`DELETE FROM ${t}`, []));
         for (const t of ERP_COPY) {
-          const rows = data[t.to];
-          for (let k = 0; k < rows.length; k += 1500) {
-            await sql(`INSERT INTO ${t.to} SELECT * FROM json_populate_recordset(NULL::${t.to}, $1::json)`, [JSON.stringify(rows.slice(k, k + 1500))]);
-          }
-          if (!t.noId) await sql(`SELECT setval(pg_get_serial_sequence('${t.to}', 'id'), GREATEST((SELECT COALESCE(MAX(id), 0) FROM ${t.to}), 1), (SELECT COUNT(*) > 0 FROM ${t.to}))`, []);
-          counts[t.from] = rows.length;
+          steps.push(sql(`INSERT INTO ${t.to} SELECT * FROM ${t.to}__stage`, []));
+          if (!t.noId) steps.push(sql(`SELECT setval(pg_get_serial_sequence('${t.to}', 'id'), GREATEST((SELECT COALESCE(MAX(id), 0) FROM ${t.to}), 1), (SELECT COUNT(*) > 0 FROM ${t.to}))`, []));
         }
+        await sql.transaction(steps);
+        for (const t of ERP_COPY) await sql(`TRUNCATE ${t.to}__stage`, []);
       }
       const check = await compareWithErp(sql, erp);
       await log(sql, req, checkOnly ? 'store.erp_check' : 'store.erp_copy',
@@ -1023,7 +1038,12 @@ module.exports = function registerStoreRoutes(app, deps) {
     const ids = [];
     if (o.change > 0) {
       let batch = null;
-      if (p.module === 'consumables') { const { batches, any } = await batchBalances(sql, p.id); batch = any ? batches[batches.length - 1].n + 1 : 1; }
+      if (p.module === 'consumables') {
+        // A batch below zero (plates used before this stock in) is filled first; else a new batch.
+        const { batches, any } = await batchBalances(sql, p.id);
+        const neg = batches.find(x => x.qty < -0.0005);
+        batch = neg ? neg.n : any ? batches[batches.length - 1].n + 1 : 1;
+      }
       const [t] = await sql`
         WITH upd AS (UPDATE store_parts SET qty = ROUND((qty + ${qty})::numeric, 3)::double precision WHERE id = ${p.id} RETURNING id)
         INSERT INTO store_tx (type, part_id, qty, date, ref, notes, issued_to, purpose, challan_no, batch, created_by, created_at)
@@ -1045,14 +1065,13 @@ module.exports = function registerStoreRoutes(app, deps) {
           if (last) last.qty = roundQty(last.qty + left); else pieces.push({ batch: 1, qty: left });
         }
       } else pieces.push({ batch: null, qty });
-      for (const pc of pieces) {
-        const [t] = await sql`
+      // Every batch piece in ONE transaction: all saved, or none.
+      const results = await sql.transaction(pieces.map(pc => sql`
           WITH upd AS (UPDATE store_parts SET qty = ROUND((qty - ${pc.qty})::numeric, 3)::double precision WHERE id = ${p.id} RETURNING id)
           INSERT INTO store_tx (type, part_id, qty, date, ref, notes, issued_to, purpose, challan_no, batch, created_by, created_at)
           SELECT 'out', upd.id, ${pc.qty}, ${date}::date, '', ${o.notes || ''}, ${o.issuedTo || ''}, ${o.purpose || ''}, '', ${pc.batch}::integer, ${o.by || ''}, now() FROM upd
-          RETURNING id`;
-        ids.push(Number(t.id));
-      }
+          RETURNING id`));
+      for (const r of results) for (const t of r) ids.push(Number(t.id));
     }
     return ids;
   }
