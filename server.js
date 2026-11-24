@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-plate-pickups';   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-plate-buttons';   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -499,7 +499,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_edit_paper', 'inv_btn_rename_paper', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'products_btn_new', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_edit_paper', 'inv_btn_rename_paper', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'products_btn_new', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'plate_btn_add', 'plate_btn_stock_in', 'plate_btn_use', 'plate_btn_pickup', 'plate_btn_delete', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -728,7 +728,13 @@ const ROLE_PERMISSION_DEFAULTS = {
   dashboard_tab_access: { label: 'Dashboard tab — the CEO overview: jobs, deliveries, sales, wastage, production & MIL and stock tiles with date filters (view only)', levels: { ceo: 'view' } },
   products_btn_specials: { label: 'Special Colors — set a product\'s Special Colors on its tile (kept with the product and printed from there - never applied to jobs)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'view' } },
   products_btn_name:    { label: 'Product name — rename a product on its tile (new and duplicated jobs take the new name; the Job Name box offers product names)', levels: { admin: 'yes', production_manager: 'yes', finance: 'yes', ceo: 'hidden' } },
-  inv_btn_plate_store:  { label: 'Plate Store — blank plates per size (View: see the stock, its history and the Plate Register; Edit: Stock In / Stock Out and the sizes)', levels: { admin: 'yes', store_manager: 'yes', production_manager: 'view', ceo: 'view' } },
+  inv_btn_plate_store:  { label: 'Plate Store tab — see the plates in stock, their History, the Register and In Process (the buttons have their own rows below)', levels: { admin: 'yes', store_manager: 'yes', production_manager: 'view', ceo: 'view' } },
+  // Plate Store buttons, each its own row (owner, 2026-11-24). They start with what each role had on the Plate Store row.
+  plate_btn_add:      { label: 'Plate Store — + Add Plate, and Edit on a plate (size, machine, brand, supplier)', levels: { admin: 'yes', store_manager: 'yes' } },
+  plate_btn_stock_in: { label: 'Plate Store — + Stock In (Delivery with its challan / Adjustment)', levels: { admin: 'yes', store_manager: 'yes' } },
+  plate_btn_use:      { label: 'Plate Store — Use (New job / Old job / Damaged / Adjustment)', levels: { admin: 'yes', store_manager: 'yes' } },
+  plate_btn_pickup:   { label: 'Plate Store — In Process: Picked up (CTP took the plates back)', levels: { admin: 'yes', store_manager: 'yes' } },
+  plate_btn_delete:   { label: 'Plate Store — Delete a wrong Stock In or Use entry (History and Register); the stock goes back', levels: { admin: 'yes' } },
   products_btn_new:     { label: 'New / edit product — + New Product (a product without a job card), its details on a tile (company, item code, No. of Colors, UPS) and Delete for a product with no jobs', levels: { admin: 'yes', finance: 'yes' } },
 
   // Access Register — Carton Shippers tab (owner, 2026-10-14). Hidden for
@@ -1924,7 +1930,8 @@ async function initDb() {
       )
     `;
     // Rows split off another (owner, 2026-10-26) start with what each role had on it.
-    for (const [to, from] of [['job_btn_stage_moves', 'job_btn_stage_forward'], ['inv_btn_print_sticker', 'inv_btn_batches']]) {
+    for (const [to, from] of [['job_btn_stage_moves', 'job_btn_stage_forward'], ['inv_btn_print_sticker', 'inv_btn_batches'],
+                              ['plate_btn_add', 'inv_btn_plate_store'], ['plate_btn_stock_in', 'inv_btn_plate_store'], ['plate_btn_use', 'inv_btn_plate_store'], ['plate_btn_pickup', 'inv_btn_plate_store']]) {
       await sql`
         INSERT INTO role_permissions (permission_key, role, level, updated_by)
         SELECT ${to}, role, level, 'copied from ' || ${from} FROM role_permissions WHERE permission_key = ${from}
@@ -8559,7 +8566,7 @@ app.get('/api/plates/sizes', requireAuth, async (req, res) => {
 // The Plate Store's handlers - the app's routes below, and the same at the CTP Station with the CTP PIN (owner,
 // 2026-11-24: "same as the Line Clearance at the QA station").
 const plateH = {};
-app.post('/api/plates/sizes', requirePermission('inv_btn_plate_store'), plateH.sizeAdd = async (req, res) => {
+app.post('/api/plates/sizes', requirePermission('plate_btn_add'), plateH.sizeAdd = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8581,7 +8588,7 @@ app.post('/api/plates/sizes', requirePermission('inv_btn_plate_store'), plateH.s
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.put('/api/plates/sizes/:id', requirePermission('inv_btn_plate_store'), plateH.sizeEdit = async (req, res) => {
+app.put('/api/plates/sizes/:id', requirePermission('plate_btn_add'), plateH.sizeEdit = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8600,7 +8607,9 @@ app.put('/api/plates/sizes/:id', requirePermission('inv_btn_plate_store'), plate
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Stock In (plates received) / Stock Out (a damaged blank, wasted at CTP, a test plate, adjustment).
-app.post('/api/plates/stock', requirePermission('inv_btn_plate_store'), plateH.stock = async (req, res) => {
+// Stock In and Use are rows of their own (owner, 2026-11-24); the Station checks the CTP's PIN instead.
+const plateStockGate = (req, res, next) => requirePermission(req.body && req.body.direction === 'out' ? 'plate_btn_use' : 'plate_btn_stock_in')(req, res, next);
+app.post('/api/plates/stock', plateStockGate, plateH.stock = async (req, res) => {
   try {
     await dbReady;
     const sql = getDb();
@@ -8664,6 +8673,29 @@ app.get('/api/plates/stock-tx', requirePermission('inv_btn_plate_store', 'view')
          AND (${from}::timestamptz IS NULL OR t.created_at >= ${from}::timestamptz)
          AND (${to}::timestamptz IS NULL OR t.created_at < ${to}::timestamptz)
        ORDER BY t.created_at DESC, t.id DESC LIMIT 3000`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+// Delete a wrong Stock In / Use entry (owner, 2026-11-24: "add delete option for any issue so can be fixed"): the
+// entry goes and the plates in stock move back, in ONE statement; the Activity Log keeps what it was. A plate made at
+// the CTP Station is not deleted here - it belongs to that plate.
+app.delete('/api/plates/stock-tx/:id', requirePermission('plate_btn_delete'), async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const [t] = await sql`SELECT t.*, s.name AS size_name FROM plate_stock_tx t LEFT JOIN plate_sizes s ON s.id = t.size_id WHERE t.id = ${id}`;
+    if (!t) return res.status(404).json({ error: 'That entry is not there any more.' });
+    if (t.reason === 'plate-made') return res.status(400).json({ error: 'This one was a plate made at the CTP Station - it cannot be deleted here.' });
+    const [row] = await sql`
+      WITH d AS (DELETE FROM plate_stock_tx WHERE id = ${id} AND reason <> 'plate-made' RETURNING size_id, change)
+      UPDATE plate_sizes s SET balance = s.balance - d.change FROM d WHERE s.id = d.size_id RETURNING s.*`;
+    const reasons = t.change > 0 ? PLATE_IN_REASONS : PLATE_OUT_REASONS;
+    await logAudit(sql, req, { action: 'plate_stock.delete', entityType: 'plate_size', entityId: t.size_id,
+      summary: `Plate entry deleted: ${t.change > 0 ? 'Stock In +' : 'Use -'}${Math.abs(t.change)} ${t.size_name || ''} (${reasons[t.reason] || t.reason})`
+        + `${t.job_id ? ' · Job E-' + t.job_id : t.job_no ? ' · Job ' + t.job_no : ''}${t.job_name ? ' ' + t.job_name : ''}${t.plate_names ? ' · plates: ' + t.plate_names : ''}`
+        + `${t.damaged_by ? ' · ' + t.damaged_by : ''}${t.challan_no ? ' · challan ' + t.challan_no : ''}${t.notes ? ' · ' + t.notes : ''}`
+        + ` · was dated ${new Date(t.created_at).toLocaleDateString('en-GB', { timeZone: 'Asia/Karachi' })} by ${t.actor_name || t.user_email || '—'}${row ? ' · balance now ' + row.balance : ''}` });
+    res.json({ ok: true, size: row || null });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // The Plate Register: every plate made / reused / scrapped.
@@ -8757,7 +8789,7 @@ plateH.pickups = async (req, res) => {
 };
 app.get('/api/station/plates/pickups', requireStationUser, (req, res) => plateH.pickups(req, res));
 app.get('/api/plates/pickups', requireAuth, (req, res) => plateH.pickups(req, res));
-app.post('/api/plates/pickup', requirePermission('inv_btn_plate_store'), (req, res) => plateH.pickup(req, res));
+app.post('/api/plates/pickup', requirePermission('plate_btn_pickup'), (req, res) => plateH.pickup(req, res));
 app.post('/api/station/plates/pickup', requireStationUser, stationCtpGate, plateH.pickup = async (req, res) => {
   try {
     await dbReady;

@@ -35866,7 +35866,7 @@ async function stationLoadPickups() {
 }
 function stationPlatesProcessHtml() { return stationPlatesHead('', null) + platesProcessBodyHtml(); }
 // Re-draw In Process wherever it is open: the CTP station, or the app's Plate Store tab.
-function plateCanPickup() { return (typeof mode !== 'undefined' && mode === 'station' && !!stationOperator) || isSuperAdmin() || hasPerm('inv_btn_plate_store', 'yes'); }
+function plateCanPickup() { return (typeof mode !== 'undefined' && mode === 'station' && !!stationOperator) || isSuperAdmin() || hasPerm('plate_btn_pickup', 'yes'); }
 function platesProcessRerender() { if (typeof mode !== 'undefined' && mode === 'station') stationRender(); else renderPlatesProcessApp(); }
 function platesProcessBodyHtml() {
   const { ready, inProc } = stationPlatesProcessLists();
@@ -35937,7 +35937,8 @@ function stationCtpProductsHtml() {
 }
 // At the CTP Station the Plate Store's calls go through the PIN-checked station routes (owner, 2026-11-24).
 function plateAtStation() { return typeof mode !== 'undefined' && mode === 'station' && stationView === 'plate-store' && !!stationOperator; }
-function plateCanEdit() { return plateAtStation() || isSuperAdmin() || hasPerm('inv_btn_plate_store', 'yes'); }
+function plateCan(key) { return plateAtStation() || isSuperAdmin() || hasPerm(key, 'yes'); }
+function plateCanDelete() { return !(typeof mode !== 'undefined' && mode === 'station') && (isSuperAdmin() || hasPerm('plate_btn_delete', 'yes')); }
 function plateApi(method, path, body) {
   if (!plateAtStation() || (method === 'GET' && path === '/api/plates/sizes')) return api(method, path, body);
   const who = { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '' };
@@ -35951,7 +35952,7 @@ function plateApi(method, path, body) {
 async function renderPlateStore() {
   const el = document.getElementById('plate-store-body'); if (!el) return;
   try { plateSizesCache = await plateApi('GET', '/api/plates/sizes'); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
-  const can = plateCanEdit();
+  const canAdd = plateCan('plate_btn_add'), canIn = plateCan('plate_btn_stock_in'), canUse = plateCan('plate_btn_use');
   const th = 'style="text-align:left;padding:8px;"';
   const rows = plateSizesCache.map(z => {
     const low = z.balance < 0 || (z.low_at > 0 && z.balance <= z.low_at);
@@ -35962,15 +35963,15 @@ async function renderPlateStore() {
       <td style="padding:8px;">${(z.machines || []).map(esc).join(', ') || '&mdash;'}</td>
       <td style="padding:8px;text-align:right;font-weight:800;font-size:14px;color:${low ? '#b91c1c' : '#166534'};">${z.balance.toLocaleString()}${z.balance < 0 ? '<div style="font-size:10.5px;font-weight:600;">stock in missing</div>' : ''}</td>
       <td style="padding:8px;text-align:right;white-space:nowrap;">
-        ${can ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="plateStockInForm(${z.id})">+ Stock In</button>
-        <button class="btn btn-sm" style="background:#DC2626;border-color:#DC2626;color:#fff;font-weight:700;" onclick="plateUseForm(${z.id})">Use</button>` : ''}
+        ${canIn ? `<button class="btn btn-sm" style="background:#166534;border-color:#166534;color:#fff;font-weight:700;" onclick="plateStockInForm(${z.id})">+ Stock In</button>` : ''}
+        ${canUse ? `<button class="btn btn-sm" style="background:#DC2626;border-color:#DC2626;color:#fff;font-weight:700;" onclick="plateUseForm(${z.id})">Use</button>` : ''}
         <button class="btn btn-sm" onclick="plateStockHistory(${z.id})">History</button>
-        ${can ? `<button class="btn btn-sm" onclick="plateAddForm(${z.id})">Edit</button>` : ''}
+        ${canAdd ? `<button class="btn btn-sm" onclick="plateAddForm(${z.id})">Edit</button>` : ''}
       </td></tr>`;
   }).join('');
   el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
       <div style="font-size:12.5px;color:var(--text2);">Blank plates. A plate CTP makes at the Station also takes one out by itself.</div>
-      ${can ? '<button class="btn btn-primary" onclick="plateAddForm(0)">+ Add Plate</button>' : ''}
+      ${canAdd ? '<button class="btn btn-primary" onclick="plateAddForm(0)">+ Add Plate</button>' : ''}
     </div>
     <table class="ss-table" style="width:100%;border-collapse:collapse;font-size:13px;">
       <thead><tr style="background:var(--bg2);"><th ${th}>Size</th><th ${th}>Brand</th><th ${th}>Supplier</th><th ${th}>Machine</th><th style="text-align:right;padding:8px;">In stock</th><th></th></tr></thead>
@@ -36114,9 +36115,11 @@ async function plateStockHistory(id) {
   let rows = [];
   try { rows = await plateApi('GET', `/api/plates/stock-tx?size_id=${id}`); } catch (e) { el.textContent = 'Error: ' + e.message; return; }
   const th = 'style="text-align:left;padding:6px 8px;"';
+  const del = plateCanDelete();
+  plateTxCache = rows;
   el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;"><b>${esc(z.name)}${z.brand ? ' · ' + esc(z.brand) : ''} &middot; history</b><button class="btn btn-sm" onclick="renderPlateStore()">&lsaquo; Back</button></div>
     <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
-      <thead><tr><th ${th}>Date</th><th style="text-align:right;padding:6px 8px;">Change</th><th ${th}>Reason</th><th ${th}>Job</th><th ${th}>Damaged by / reason</th><th ${th}>Challan</th><th ${th}>Notes</th><th ${th}>By</th></tr></thead>
+      <thead><tr><th ${th}>Date</th><th style="text-align:right;padding:6px 8px;">Change</th><th ${th}>Reason</th><th ${th}>Job</th><th ${th}>Damaged by / reason</th><th ${th}>Challan</th><th ${th}>Notes</th><th ${th}>By</th>${del ? '<th></th>' : ''}</tr></thead>
       <tbody>${rows.map(t => `<tr><td style="padding:5px 8px;white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}${t.recorded_at ? `<div style="font-size:10px;color:#92400e;font-weight:700;">LATE · entered ${esc(fmtDMY(t.recorded_at))}</div>` : ''}</td>
         <td style="padding:5px 8px;text-align:right;font-weight:800;color:${t.change > 0 ? '#166534' : '#b91c1c'};">${t.change > 0 ? '+' : ''}${t.change}</td>
         <td style="padding:5px 8px;">${esc(PLATE_TX_TXT[t.reason] || t.reason)}</td>
@@ -36124,7 +36127,7 @@ async function plateStockHistory(id) {
         <td style="padding:5px 8px;">${esc(t.damaged_by || '') || '&mdash;'}</td>
         <td style="padding:5px 8px;">${esc(t.challan_no || '') || '&mdash;'}</td>
         <td style="padding:5px 8px;">${esc(t.notes || '')}</td>
-        <td style="padding:5px 8px;">${esc(t.actor_name || String(t.user_email || '').split('@')[0] || '')}</td></tr>`).join('') || '<tr><td colspan="8" style="padding:12px;text-align:center;color:var(--text3);">Nothing yet.</td></tr>'}</tbody>
+        <td style="padding:5px 8px;">${esc(t.actor_name || String(t.user_email || '').split('@')[0] || '')}</td>${del ? `<td style="padding:5px 8px;">${plateTxDelBtn(t, 'history')}</td>` : ''}</tr>`).join('') || '<tr><td colspan="9" style="padding:12px;text-align:center;color:var(--text3);">Nothing yet.</td></tr>'}</tbody>
     </table></div>`;
 }
 // A product's plates from its No. of Colors (owner, 2026-11-24): every product in the app was printed, so it has its
@@ -36218,6 +36221,30 @@ function plateUsePlatesQty() {
   const q = document.getElementById('pl-qty');
   if (q && n) q.value = String(n);
 }
+// Delete a wrong Stock In / Use entry (owner, 2026-11-24): the plates in stock move back. Its own Access Register row;
+// a plate made at the CTP Station is not deleted here.
+let plateTxCache = [];
+function plateTxDelBtn(t, from) {
+  if (t.reason === 'plate-made') return '';
+  return `<button class="btn btn-sm" style="color:#b91c1c;border-color:#fca5a5;font-weight:700;padding:2px 8px;" title="Delete this entry - the stock goes back" onclick="plateTxDelete(${t.id}, '${from}')">&#128465; Delete</button>`;
+}
+async function plateTxDelete(id, from) {
+  const t = (from === 'register' ? plateRegRows : plateTxCache).find(x => x.id === id); if (!t) return;
+  const isIn = t.change > 0, n = Math.abs(t.change);
+  const job = t.job_id ? 'E-' + t.job_id : (t.job_no || '');
+  const what = `${isIn ? 'Stock In +' : 'Use -'}${n} ${t.size_name || ''} · ${PLATE_TX_TXT[t.reason] || t.reason}${job ? ' · Job ' + job : ''}${t.job_name ? ' ' + t.job_name : ''} · ${fmtDMY(t.created_at)}`;
+  const ok = await confirmDialog({ title: 'Delete this plate entry?', danger: true, confirmText: 'Delete',
+    message: `${what}\n\n${isIn ? n + ' plates come off' : n + ' plates go back into'} the stock. It cannot be undone - the Activity Log keeps what it was.` });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    await api('DELETE', `/api/plates/stock-tx/${id}`);
+    notify('Entry deleted');
+    if (from === 'register') await loadPlateRegister();
+    else { try { plateSizesCache = await plateApi('GET', '/api/plates/sizes'); } catch (e) {} await plateStockHistory(t.size_id); }
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
+}
 // Register (owner, 2026-11-24): every plate line's Stock In and Usage in a period, each with the columns it needs.
 async function loadPlateRegister() {
   const el = document.getElementById('plate-store-body'); if (!el) return;
@@ -36259,13 +36286,15 @@ function renderPlateRegister() {
   const by = t => esc(t.actor_name || String(t.user_email || '').split('@')[0] || '');
   const date = t => `<span style="white-space:nowrap;">${esc(fmtDMYT12(t.created_at))}</span>${t.recorded_at ? `<div style="font-size:10px;color:#92400e;font-weight:700;">LATE · entered ${esc(fmtDMY(t.recorded_at))}</div>` : ''}`;
   const fh = (k, l) => th(invColHeadHtml('pr', k, l));   // a column with its green filter
+  const del = plateCanDelete();
+  const delTd = t => del ? td(plateTxDelBtn(t, 'register')) : '';
   const head = isIn
-    ? th('Date') + fh('plate', 'Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + fh('reason', 'Reason') + th('Challan No.') + th('Notes') + th('By')
-    : th('Date') + fh('plate', 'Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + fh('reason', 'Reason') + fh('jobno', 'Job No.') + fh('jobname', 'Job Name') + fh('plates', 'Plates') + fh('damaged', 'Damaged by / reason') + th('Notes') + th('By');
+    ? th('Date') + fh('plate', 'Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + fh('reason', 'Reason') + th('Challan No.') + th('Notes') + th('By') + (del ? th('') : '')
+    : th('Date') + fh('plate', 'Plate') + '<th style="text-align:right;padding:7px 8px;">Qty</th>' + fh('reason', 'Reason') + fh('jobno', 'Job No.') + fh('jobname', 'Job Name') + fh('plates', 'Plates') + fh('damaged', 'Damaged by / reason') + th('Notes') + th('By') + (del ? th('') : '');
   const anyPick = Object.values(picks).some(v => v && v.length);
   const body = rows.map(t => '<tr style="border-bottom:1px solid var(--border);">' + (isIn
-    ? td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td('+' + t.change, 'text-align:right;font-weight:800;color:#166534;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(t.challan_no || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t))
-    : td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td(String(Math.abs(t.change)), 'text-align:right;font-weight:800;color:#b91c1c;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(jobNo(t)) || dash, 'font-weight:700;') + td(esc(t.job_name || '') || dash) + td(esc(t.plate_names || '') || dash, 'font-weight:700;color:#1e3a8a;') + td(esc(t.damaged_by || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t))) + '</tr>').join('');
+    ? td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td('+' + t.change, 'text-align:right;font-weight:800;color:#166534;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(t.challan_no || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t)) + delTd(t)
+    : td(date(t)) + td(esc(plateOf(t)), 'font-weight:700;') + td(String(Math.abs(t.change)), 'text-align:right;font-weight:800;color:#b91c1c;') + td(esc(PLATE_TX_TXT[t.reason] || t.reason)) + td(esc(jobNo(t)) || dash, 'font-weight:700;') + td(esc(t.job_name || '') || dash) + td(esc(t.plate_names || '') || dash, 'font-weight:700;color:#1e3a8a;') + td(esc(t.damaged_by || '') || dash) + td(esc(t.notes || '') || dash) + td(by(t)) + delTd(t)) + '</tr>').join('');
   const sub = (id, label, n) => `<button class="btn btn-sm" style="${plateRegSub === id ? (id === 'in' ? 'background:#166534;border-color:#166534;color:#fff;' : 'background:#DC2626;border-color:#DC2626;color:#fff;') : ''}font-weight:700;" onclick="plateRegSub = '${id}'; renderPlateRegister()">${label} (${n})</button>`;
   el.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
       <div style="display:flex;gap:6px;">${sub('in', '+ Stock In', inCount)}${sub('use', 'Usage', useCount)}</div>
@@ -36277,7 +36306,7 @@ function renderPlateRegister() {
     </div>
     <div class="report-scroll-wrap" style="min-height:0;"><table class="ss-table" style="width:100%;border-collapse:collapse;font-size:12.5px;">
       <thead><tr style="background:var(--bg2);">${head}</tr></thead>
-      <tbody>${body || `<tr><td colspan="9" style="padding:14px;text-align:center;color:var(--text3);">No ${isIn ? 'stock in' : 'usage'} in this period.</td></tr>`}</tbody>
+      <tbody>${body || `<tr><td colspan="11" style="padding:14px;text-align:center;color:var(--text3);">No ${isIn ? 'stock in' : 'usage'} in this period.</td></tr>`}</tbody>
     </table></div>`;
 }
 // A product's plates (its tile): the plates in use per size, and its register.
@@ -46235,6 +46264,7 @@ const ACC_REG_TABS = [
   ['products', 'Products'],
   ['inventory', 'Inventory'],
   ['carton-shippers', 'Carton Shippers'],
+  ['plates', 'Plate Store'],
   ['reports', 'Reports'],
   ['station', 'Station'],
   ['users', 'Users'],
@@ -46299,7 +46329,6 @@ const ACC_INVENTORY_TAB_ROWS = [
   { key: 'inv_btn_rename_paper',    type: 'action' },
   { key: 'inv_btn_dismiss_pending', type: 'action' },
   { key: 'inv_btn_batches',         type: 'button' },
-  { key: 'inv_btn_plate_store',     type: 'button' },
   { key: 'inv_btn_print_sticker',   type: 'action' },
   { key: 'inv_btn_brands',          type: 'button' },
 ];
@@ -46382,6 +46411,15 @@ const ACC_CARTON_TAB_ROWS = [
   { key: 'carton_btn_issue',    type: 'action' },
   { key: 'carton_btn_reverse',  type: 'action-30day' },
 ];
+// Plate Store tab (owner, 2026-11-24): the tab, then each of its buttons.
+const ACC_PLATES_TAB_ROWS = [
+  { key: 'inv_btn_plate_store', type: 'button' },
+  { key: 'plate_btn_add',       type: 'action' },
+  { key: 'plate_btn_stock_in',  type: 'action' },
+  { key: 'plate_btn_use',       type: 'action' },
+  { key: 'plate_btn_pickup',    type: 'action' },
+  { key: 'plate_btn_delete',    type: 'action' },
+];
 const ACC_DASHBOARD_TAB_ROWS = [
   { key: 'dashboard_tab_access', type: 'tab' },
   { key: 'dash_btn_ignore_warning', type: 'action' },
@@ -46393,7 +46431,7 @@ const ACC_CLIENT_VIEW_TAB_ROWS = [
 // matching ROLE_PERMISSION_DEFAULTS block server-side) when a new tab
 // gets built — everything else (rendering, click-to-cycle, tab switcher)
 // already works generically off this map.
-const ACC_TAB_ROWS = { dashboard: ACC_DASHBOARD_TAB_ROWS, jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, 'carton-shippers': ACC_CARTON_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
+const ACC_TAB_ROWS = { dashboard: ACC_DASHBOARD_TAB_ROWS, jobs: ACC_JOBS_TAB_ROWS, products: ACC_PRODUCTS_TAB_ROWS, station: ACC_STATION_TAB_ROWS, inventory: ACC_INVENTORY_TAB_ROWS, 'carton-shippers': ACC_CARTON_TAB_ROWS, plates: ACC_PLATES_TAB_ROWS, reports: ACC_REPORTS_TAB_ROWS, users: ACC_USERS_TAB_ROWS, 'client-view': ACC_CLIENT_VIEW_TAB_ROWS };
 // key -> row type, flattened across every built tab. Used by
 // cycleRolePermission to pick the 2-state or 3-state cycle for a click.
 const ACC_ROW_TYPE = Object.fromEntries(Object.values(ACC_TAB_ROWS).flat().map(r => [r.key, r.type]));
