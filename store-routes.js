@@ -618,12 +618,23 @@ module.exports = function registerStoreRoutes(app, deps) {
       res.json({ ok: true });
     } catch (e) { fail(res, e); }
   });
+  // The Issued To list: this app's Floor Operators - each person on an active machine / station, with the machine
+  // under the name (owner, 2026-11-24: not the ERP's employees; any other name can still be typed and added).
   app.get('/api/store/employees', storeRead, async (req, res) => {
     try {
-      const erp = erpSql();
-      if (!erp) return res.json([]);
-      const rows = await erp`SELECT employee_id AS code, first_name, last_name, department FROM employees WHERE status = 'active' ORDER BY first_name, last_name`;
-      res.json(rows.map(r => ({ code: r.code, name: `${r.first_name || ''} ${r.last_name || ''}`.trim(), department: r.department || '' })));
+      const sql = await db();
+      const rows = await sql`SELECT name, machine, persons FROM operators WHERE active = true ORDER BY name`;
+      const seen = new Map();
+      for (const r of rows) {
+        const people = (Array.isArray(r.persons) ? r.persons : []).map(x => String((x && x.name) || '').trim()).filter(Boolean);
+        const where = String(r.machine || r.name || '').trim();
+        for (const n of people) {
+          const k = n.toLowerCase();
+          if (!seen.has(k)) seen.set(k, { code: '', name: n, department: where });
+          else if (where && !seen.get(k).department.split(', ').includes(where)) seen.get(k).department += ', ' + where;
+        }
+      }
+      res.json([...seen.values()].sort((a, b) => a.name.localeCompare(b.name)));
     } catch (e) { fail(res, e); }
   });
 
