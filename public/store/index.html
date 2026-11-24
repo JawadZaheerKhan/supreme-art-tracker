@@ -1473,7 +1473,12 @@ async function loadAll(){
     state.trash=state.gone.filter(p=>!p.archivedAt);
     // Only transactions for parts in this module
     const partIds=new Set(parts.map(p=>p.id).concat(state.gone.map(p=>p.id)));
-    state.transactions=transactions.filter(t=>partIds.has(t.partId));
+    const allTx=transactions.filter(t=>partIds.has(t.partId));
+    // A reversed entry and its reversal row: the item's history only (owner, 2026-11-24).
+    const revd=new Set(allTx.filter(t=>t.reversesId).map(t=>Number(t.reversesId)));
+    state.pairTx=allTx.filter(t=>t.reversesId||revd.has(t.id));
+    state.pairIds=new Set(state.pairTx.map(t=>t.id));
+    state.transactions=allTx.filter(t=>!t.reversesId&&!revd.has(t.id));
   }catch(e){
     console.error('Failed to load data:',e);
     // One failed request rejects the whole Promise.all, which used to leave the
@@ -2555,9 +2560,9 @@ function rowCells(sec,item,i){
     return[...head,...mid,item.unit,fmtQty(item.qty),item.minQty,s.label];
   }
   const bal=(window._balCache=window._balCache||computeBalances());
-  if(sec==='stockin')  return[i+1,fmtDate(item.date)+(fmtTxnTime(item)?' '+fmtTxnTime(item):''),item.challanNo||'—',getPartPlain(item.partId),...inkSBTx(item),getPartCat(item.partId),'+'+fmtQty(item.qty)+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),...(isInks()?[]:[userText(item.ref)||'—']),isInks()?txnBatchCode(item):(userText(item.notes)||'—'),...(isInks()?[inkNotesText(item)]:[]),item.createdBy||'—'];
-  if(sec==='stockout') return[i+1,fmtDate(item.date)+(fmtTxnTime(item)?' '+fmtTxnTime(item):''),item.challanNo||'—',getPartPlain(item.partId),...inkSBTx(item),getPartCat(item.partId),'-'+fmtQty(item.qty)+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),userText(item.issuedTo)||'—',isInks()?txnBatchCode(item):(userText(item.purpose)||'—'),...(isInks()?[inkNotesText(item)]:[]),item.createdBy||'—'];
-  if(sec==='issuance') return[i+1,fmtDate(item.date),item.challanNo||'—',getPartPlain(item.partId),...inkSBTx(item),item.type==='in'?'Stock In':'Issue',(item.type==='in'?'+':'-')+fmtQty(item.qty)+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),userText(item.type==='in'?item.ref:item.issuedTo)||'—',isInks()?txnBatchCode(item):(userText(item.type==='in'?item.notes:item.purpose)||'—'),...(isInks()?[inkNotesText(item)]:[])];
+  if(sec==='stockin')  return[i+1,fmtDate(item.date)+(fmtTxnTime(item)?' '+fmtTxnTime(item):''),item.challanNo||'—',getPartPlain(item.partId),...inkSBTx(item),getPartCat(item.partId),sgnQty(item).replace('\u2212','-')+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),...(isInks()?[]:[userText(item.ref)||'—']),isInks()?txnBatchCode(item):(userText(item.notes)||'—'),...(isInks()?[inkNotesText(item)]:[]),item.createdBy||'—'];
+  if(sec==='stockout') return[i+1,fmtDate(item.date)+(fmtTxnTime(item)?' '+fmtTxnTime(item):''),item.challanNo||'—',getPartPlain(item.partId),...inkSBTx(item),getPartCat(item.partId),sgnQty(item).replace('\u2212','-')+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),userText(item.issuedTo)||'—',isInks()?txnBatchCode(item):(userText(item.purpose)||'—'),...(isInks()?[inkNotesText(item)]:[]),item.createdBy||'—'];
+  if(sec==='issuance') return[i+1,fmtDate(item.date),item.challanNo||'—',getPartPlain(item.partId),...inkSBTx(item),item.type==='in'?'Stock In':'Issue',sgnQty(item).replace('\u2212','-')+' '+getPartUnit(item.partId),(bal[item.id]??'—')+' '+getPartUnit(item.partId),userText(item.type==='in'?item.ref:item.issuedTo)||'—',isInks()?txnBatchCode(item):(userText(item.type==='in'?item.notes:item.purpose)||'—'),...(isInks()?[inkNotesText(item)]:[])];
   return[];
 }
 
@@ -3377,14 +3382,15 @@ async function bulkDeleteTxns(kind,historyOnly,idsOverride){
   } else {
     confirmed=await confirmDialog({
       title:'Reverse '+ids.length+' '+label+' record'+plural+'?',
-      message:'Qty changes will be undone and the records removed. This cannot be undone.',
+      message:'Qty changes will be undone. The records leave Stock In / Out and stay in the item\'s history, marked Reversed. This cannot be undone.',
       variant:'warn',
       confirmText:'Reverse'
     });
   }
   if(!confirmed)return;
   try{
-    await apiFetch('/api/store/transactions','DELETE',{ids,historyOnly:!!historyOnly});
+    const rr=await apiFetch('/api/store/transactions','DELETE',{ids,historyOnly:!!historyOnly});
+    if(rr&&rr.reload){await loadAll();return;}   // the reversed entries stay in the items' history (Job Tracker)
     const delSet=new Set(ids);
     if(!historyOnly){
       state.transactions.forEach(t=>{
@@ -3404,7 +3410,7 @@ async function deleteTxn(id){
   if(!t)return;
   if(!await confirmDialog({
     title:'Reverse this '+(t.type==='in'?'stock in':'stock out')+' record?',
-    message:'The qty change will be undone and the record removed.\n\nUse "Delete from History" instead if you only want to clean up old records without touching stock.',
+    message:'The qty change will be undone. The record leaves Stock In / Out and stays in the item\'s history, marked Reversed.\n\nUse "Delete from History" instead if you only want to clean up old records without touching stock.',
     variant:'warn',
     confirmText:'Reverse'
   }))return;
@@ -3469,7 +3475,7 @@ function renderDashboard(){
   if(lsl)lsl.innerHTML=lp.length?`<table><thead><tr><th>Part</th><th>Category</th><th>Current Qty</th><th>Min Qty</th><th>Status</th></tr></thead><tbody>${lp.map(p=>{const s=stockStatus(p);return`<tr><td style="font-weight:600">${p.sku?`<span class="part-sku">[${p.sku}]</span>`:''}${p.name}${inkTagHtml(p)}</td><td>${p.category}</td><td>${fmtQty(p.qty)} ${p.unit}</td><td>${p.minQty}</td><td><span class="badge ${s.cls}">${s.label}</span></td></tr>`}).join('')}</tbody></table>`:'<div class="empty"><i class="ti ti-circle-check" style="color:#2d6a10;font-size:28px"></i>All stock levels are healthy</div>';
   const rt=document.getElementById('recent-txns');
   const recent=[...state.transactions].sort(txNewer).slice(0,6);
-  if(rt)rt.innerHTML=recent.length?`<table><thead><tr><th>Date</th><th>Part</th><th>Type</th><th>Qty</th><th>Details</th></tr></thead><tbody>${recent.map(t=>`<tr><td>${fmtDate(t.date)}</td><td style="font-weight:600">${getPartLabelFull(t.partId)}</td><td><span class="badge badge-${t.type}">${t.type==='in'?'Stock In':'Issue'}</span></td><td class="${t.type==='in'?'qty-positive':'qty-negative'}">${t.type==='in'?'+':'−'}${fmtQty(t.qty)} ${getPartUnit(t.partId)}</td><td style="color:#888">${t.type==='in'?(t.ref||'—'):(t.issuedTo||'—')}</td></tr>`).join('')}</tbody></table>`:'<div class="empty"><i class="ti ti-file-off"></i>No transactions yet</div>';
+  if(rt)rt.innerHTML=recent.length?`<table><thead><tr><th>Date</th><th>Part</th><th>Type</th><th>Qty</th><th>Details</th></tr></thead><tbody>${recent.map(t=>`<tr><td>${fmtDate(t.date)}</td><td style="font-weight:600">${getPartLabelFull(t.partId)}</td><td><span class="badge badge-${t.type}">${t.type==='in'?'Stock In':'Issue'}</span></td><td class="${sgnCls(t)}">${sgnQty(t)} ${getPartUnit(t.partId)}</td><td style="color:#888">${t.type==='in'?(t.ref||'—'):(t.issuedTo||'—')}</td></tr>`).join('')}</tbody></table>`:'<div class="empty"><i class="ti ti-file-off"></i>No transactions yet</div>';
 }
 
 // True while the Inks & Consumables module is open. Consumables swap the
@@ -3651,22 +3657,21 @@ async function ledgerUnignore(pid){
 function openPartHistory(pid){
   const p=state.parts.find(x=>x.id===pid);
   if(!p)return;
-  const txs=state.transactions.filter(t=>t.partId===pid)
-    .sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:b.id-a.id);
-  const bal=computeBalances();
-  const totIn=txs.filter(t=>t.type==='in').reduce((s,t)=>s+Number(t.qty),0);
-  const totOut=txs.filter(t=>t.type==='out').reduce((s,t)=>s+Number(t.qty),0);
+  const txs=histTx().filter(t=>t.partId===pid).sort(txNewer);
+  const bal=computeBalances(histTx());
+  const totIn=txs.filter(t=>t.type==='in'&&!isPairTx(t)).reduce((s,t)=>s+Number(t.qty),0);
+  const totOut=txs.filter(t=>t.type==='out'&&!isPairTx(t)).reduce((s,t)=>s+Number(t.qty),0);
   const sum=Math.round((totIn-totOut)*1000)/1000;
   const have=Math.round((Number(p.qty)||0)*1000)/1000;
   const diff=Math.round((have-sum)*1000)/1000;
   const u=p.unit||'';
   const cell='padding:5px 6px';
-  const rows=txs.length?txs.map(t=>`<tr class="txn-row-link" onclick="closeModal('partHistory');openTxnInReport(${t.id},{page:'inventory',partId:${p.id}})" title="Open this entry in the ${t.type==='in'?'Stock In':'Stock Out'} report">
+  const rows=txs.length?txs.map(t=>(isPairTx(t)?`<tr style="${pairRowStyle(t)}">`:`<tr class="txn-row-link" onclick="closeModal('partHistory');openTxnInReport(${t.id},{page:'inventory',partId:${p.id}})" title="Open this entry in the ${t.type==='in'?'Stock In':'Stock Out'} report">`)+`
       <td style="${cell};white-space:nowrap">${whenHtml(t)}</td>
       <td style="${cell};color:#666;white-space:nowrap">${bal[t.id]==null?'—':fmtQty(Math.round((bal[t.id]-(t.type==='in'?Number(t.qty):-Number(t.qty)))*1000)/1000)+' '+u}</td>
-      <td class="${t.type==='in'?'qty-positive':'qty-negative'}" style="${cell};white-space:nowrap">${t.type==='in'?'+':'−'}${fmtQty(t.qty)} ${u}</td>
+      <td class="${sgnCls(t)}" style="${cell};white-space:nowrap">${sgnQty(t)} ${u}</td>
       <td style="${cell};font-weight:600;white-space:nowrap">${fmtQty(bal[t.id])??'—'} ${u}</td>
-      <td style="${cell};white-space:nowrap"><span class="badge badge-${t.type}">${txnReason(t)}</span></td>
+      <td style="${cell};white-space:nowrap">${t.reversesId?pairBadge(t):`<span class="badge badge-${t.type}">${txnReason(t)}</span>${pairBadge(t)}`}</td>
       ${isInks()?`<td style="${cell};font-weight:700;white-space:nowrap">${_escHtml(txnBatchCode(t))}</td>`:''}
       <td style="${cell};font-family:monospace;color:#555">${t.challanNo||'—'}</td>
       <td style="${cell}">${userText(t.type==='in'?t.ref:t.issuedTo)||'—'}</td>
@@ -4537,29 +4542,28 @@ function openGroupHistory(k,brandId){
   _ghKey=k;
   const sel=brandId?members.filter(p=>String(p.id)===String(brandId)):members;
   const ids=new Set(sel.map(p=>p.id));
-  const txs=state.transactions.filter(t=>ids.has(t.partId))
-    .sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:b.id-a.id);
-  const bal=computeBalances();
+  const txs=histTx().filter(t=>ids.has(t.partId)).sort(txNewer);
+  const bal=computeBalances(histTx());
   const e=_escHtml;
   const units=[...new Set(sel.map(p=>p.unit||''))];
   const u=units.length===1?units[0]:'';
   const cell='padding:5px 6px';
   const part=id=>members.find(p=>p.id===id);
-  const totIn=Math.round(txs.filter(t=>t.type==='in').reduce((x,t)=>x+Number(t.qty),0)*1000)/1000;
-  const totOut=Math.round(txs.filter(t=>t.type==='out').reduce((x,t)=>x+Number(t.qty),0)*1000)/1000;
+  const totIn=Math.round(txs.filter(t=>t.type==='in'&&!isPairTx(t)).reduce((x,t)=>x+Number(t.qty),0)*1000)/1000;
+  const totOut=Math.round(txs.filter(t=>t.type==='out'&&!isPairTx(t)).reduce((x,t)=>x+Number(t.qty),0)*1000)/1000;
   const have=Math.round(sel.reduce((x,p)=>x+(Number(p.qty)||0),0)*1000)/1000;
   const stat=(label,val,color)=>'<div style="padding:6px 12px;border:1px solid #e8e1d3;border-radius:8px;background:#fafafa"><div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#888;font-weight:600">'+label+'</div><div style="font-size:16px;font-weight:700;'+(color?'color:'+color:'')+'">'+val+'</div></div>';
   const rows=txs.length?txs.map(t=>{
     const p=part(t.partId);
     const un=(p&&units.length>1)?' '+(p.unit||''):(u?' '+u:'');
     const before=bal[t.id]==null?'—':fmtQty(Math.round((bal[t.id]-(t.type==='in'?Number(t.qty):-Number(t.qty)))*1000)/1000)+un;
-    return '<tr class="txn-row-link" onclick="closeModal(\'partHistory\');openTxnInReport('+t.id+',{page:\'inventory\',groupKey:_ghKey,brandId:'+(brandId?"\'"+brandId+"\'":'null')+'})" title="Open this entry in the '+(t.type==='in'?'Stock In':'Stock Out')+' report">'
+    return (isPairTx(t)?'<tr style="'+pairRowStyle(t)+'">':'<tr class="txn-row-link" onclick="closeModal(\'partHistory\');openTxnInReport('+t.id+',{page:\'inventory\',groupKey:_ghKey,brandId:'+(brandId?"\'"+brandId+"\'":'null')+'})" title="Open this entry in the '+(t.type==='in'?'Stock In':'Stock Out')+' report">')
       +'<td style="'+cell+';white-space:nowrap">'+whenHtml(t)+'</td>'
       +'<td style="'+cell+'"><b>'+e(p?(p.supplier||'No supplier'):'—')+'</b>'+(p&&p.brand?'<div style="color:#555">'+e(p.brand)+'</div>':'')+'</td>'
       +'<td style="'+cell+';color:#666;white-space:nowrap">'+before+'</td>'
-      +'<td class="'+(t.type==='in'?'qty-positive':'qty-negative')+'" style="'+cell+';white-space:nowrap">'+(t.type==='in'?'+':'\u2212')+fmtQty(t.qty)+un+'</td>'
+      +'<td class="'+sgnCls(t)+'" style="'+cell+';white-space:nowrap">'+sgnQty(t)+un+'</td>'
       +'<td style="'+cell+';font-weight:600;white-space:nowrap">'+(bal[t.id]==null?'—':fmtQty(bal[t.id])+un)+'</td>'
-      +'<td style="'+cell+';white-space:nowrap"><span class="badge badge-'+t.type+'">'+txnReason(t)+'</span></td>'
+      +'<td style="'+cell+';white-space:nowrap">'+(t.reversesId?pairBadge(t):'<span class="badge badge-'+t.type+'">'+txnReason(t)+'</span>'+pairBadge(t))+'</td>'
       +'<td style="'+cell+';font-weight:700;white-space:nowrap">'+_escHtml(txnBatchCode(t))+'</td>'
       +'<td style="'+cell+';font-family:monospace;color:#555">'+(t.challanNo||'—')+'</td>'
       +'<td style="'+cell+'">'+e(userText(t.type==='in'?t.ref:t.issuedTo)||'—')+'</td>'
@@ -4761,9 +4765,20 @@ function fmtQty(n){
   return isFinite(v)?String(v):n;
 }
 
-function computeBalances(){
+function sgnUp(t){const q=Number(t.qty)||0;return t.type==='in'?q>=0:q<0;}
+function sgnQty(t){return (sgnUp(t)?'+':'\u2212')+fmtQty(Math.abs(Number(t.qty)||0));}
+function sgnCls(t){return sgnUp(t)?'qty-positive':'qty-negative';}
+// The item's history: its entries with the reversed ones and their reversal rows (as in the boards Inventory).
+function histTx(){return state.transactions.concat(state.pairTx||[]);}
+function isPairTx(t){return !!(state.pairIds&&state.pairIds.has(t.id));}
+function pairBadge(t){
+  if(t.reversesId)return '<span class="badge" style="background:#d1fae5;color:#065f46">&#8634; Reversal</span><div style="font-size:10px;color:#666;margin-top:2px">of the entry of '+_escHtml(fmtDate((histTx().find(x=>x.id===Number(t.reversesId))||{}).date||''))+'</div>';
+  return isPairTx(t)?' <span style="display:inline-block;background:#e5e7eb;color:#374151;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px">REVERSED</span>':'';
+}
+function pairRowStyle(t){return t.reversesId?'background:#f0fdf4;':isPairTx(t)?'opacity:.6;':'';}
+function computeBalances(src){
   const byPart={};
-  state.transactions.forEach(t=>{(byPart[t.partId]=byPart[t.partId]||[]).push(t)});
+  (src||state.transactions).forEach(t=>{(byPart[t.partId]=byPart[t.partId]||[]).push(t)});
   const out={};
   const delta=t=>t.type==='in'?t.qty:-t.qty;
   Object.keys(byPart).forEach(pid=>{
@@ -4857,7 +4872,7 @@ function renderStockIn(){
     <td style="font-family:monospace;color:#555">${t.challanNo||'—'}</td>
     <td style="font-weight:600">${getPartLabel(t.partId)}</td>${inkSBCellsTx(t)}
     <td>${getPartCat(t.partId)}</td>
-    <td class="qty-positive">+${fmtQty(t.qty)} ${getPartUnit(t.partId)}</td>
+    <td class="${sgnCls(t)}">${sgnQty(t)} ${getPartUnit(t.partId)}</td>
     <td style="font-weight:600">${fmtQty(bal[t.id])??'—'} ${getPartUnit(t.partId)}</td>
     <td class="machinery-only">${userText(t.ref)||'—'}</td>
     <td class="machinery-only" style="color:#888">${userText(t.notes)||'—'}</td>${batchCell(t)}<td class="consumables-only" style="color:#666;font-size:12px;max-width:280px">${inkNotesHtml(t)}</td>
@@ -4889,7 +4904,7 @@ function renderStockOut(){
     <td style="font-family:monospace;color:#555">${t.challanNo||'—'}</td>
     <td style="font-weight:600">${getPartLabel(t.partId)}</td>${inkSBCellsTx(t)}
     <td>${getPartCat(t.partId)}</td>
-    <td class="qty-negative">−${fmtQty(t.qty)} ${getPartUnit(t.partId)}</td>
+    <td class="${sgnCls(t)}">${sgnQty(t)} ${getPartUnit(t.partId)}</td>
     <td style="font-weight:600">${fmtQty(bal[t.id])??'—'} ${getPartUnit(t.partId)}</td>
     <td>${userText(t.issuedTo)||'—'}</td>
     <td class="machinery-only" style="color:#888">${userText(t.purpose)||'—'}</td>${batchCell(t)}<td class="consumables-only" style="color:#666;font-size:12px;max-width:280px">${inkNotesHtml(t)}</td>
@@ -4926,7 +4941,7 @@ function renderIssuance(){
     <td style="font-family:monospace;color:#555">${t.challanNo||'—'}</td>
     <td style="font-weight:600">${getPartLabel(t.partId)}</td>${inkSBCellsTx(t)}
     <td><span class="badge badge-${t.type}">${t.type==='in'?'Stock In':'Issue'}</span></td>
-    <td class="${t.type==='in'?'qty-positive':'qty-negative'}">${t.type==='in'?'+':'−'}${fmtQty(t.qty)} ${getPartUnit(t.partId)}</td>
+    <td class="${sgnCls(t)}">${sgnQty(t)} ${getPartUnit(t.partId)}</td>
     <td style="font-weight:600">${fmtQty(bal[t.id])??'—'} ${getPartUnit(t.partId)}</td>
     <td>${userText(t.type==='in'?t.ref:t.issuedTo)||'—'}</td>
     <td class="machinery-only" style="color:#888">${userText(t.type==='in'?t.notes:t.purpose)||'—'}</td>${batchCell(t)}<td class="consumables-only" style="color:#666;font-size:12px;max-width:280px">${inkNotesHtml(t)}</td>

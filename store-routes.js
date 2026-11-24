@@ -62,7 +62,7 @@ module.exports = function registerStoreRoutes(app, deps) {
   // Fast path (owner, 2026-11-24: "the store is so slow"): the ~20 statements below run once per STORE_SCHEMA, not on
   // every fresh server copy - a new copy reads one marker row and goes. Change STORE_SCHEMA whenever a statement below
   // is added or changed.
-  const STORE_SCHEMA = 'store-2026-11-24-size';
+  const STORE_SCHEMA = 'store-2026-11-24-reversal';
   let _ready = null;
   async function ensureStore() {
     if (_ready) return _ready;
@@ -123,6 +123,9 @@ module.exports = function registerStoreRoutes(app, deps) {
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_parts_carton_type_uq ON store_parts (carton_type_id) WHERE carton_type_id IS NOT NULL`;
       await sql`ALTER TABLE store_tx ADD COLUMN IF NOT EXISTS carton_tx_id INTEGER`;
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_tx_carton_tx_uq ON store_tx (carton_tx_id) WHERE carton_tx_id IS NOT NULL`;
+      // A Reverse keeps the entry and adds a reversal row pointing at it (owner, 2026-11-24): an entry is reversed once.
+      await sql`ALTER TABLE store_tx ADD COLUMN IF NOT EXISTS reverses_id INTEGER`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_tx_reverses_uq ON store_tx (reverses_id) WHERE reverses_id IS NOT NULL`;
       // Done for this version - later server copies skip all of the above.
       await sql`INSERT INTO schema_meta (key, value) VALUES ('store_schema', ${STORE_SCHEMA}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
     })().catch(e => { _ready = null; throw e; });
@@ -182,7 +185,7 @@ module.exports = function registerStoreRoutes(app, deps) {
     if (!po) return null;
     const orders = await sql`
       SELECT o.id, o.part_id AS "partId", o.item_name AS "itemName", o.module, o.qty,
-             COALESCE((SELECT SUM(t.qty) FROM store_tx t WHERE t.order_id = o.id AND t.type = 'in'), 0) AS received
+             COALESCE((SELECT SUM(t.qty) FROM store_tx t WHERE t.order_id = o.id AND t.type = 'in' AND NOT EXISTS (SELECT 1 FROM store_tx r WHERE r.reverses_id = t.id)), 0) AS received
         FROM store_orders o
        WHERE o.cancelled_at IS NULL AND regexp_replace(o.po_no, '[^0-9]', '', 'g') = ${po}
        ORDER BY o.id`;
@@ -205,7 +208,7 @@ module.exports = function registerStoreRoutes(app, deps) {
                      min_qty AS "minQty", description AS "desc", image_url AS "imageUrl", carton_type_id AS "cartonTypeId", size`;
   const TX_COLS = `t.id, t.type, t.part_id AS "partId", t.qty, t.date::text AS date, t.ref, t.notes, t.issued_to AS "issuedTo",
                    t.purpose, t.challan_no AS "challanNo", t.batch, t.po_no AS "poNo", t.invoice_no AS "invoiceNo",
-                   t.batch_label AS "batchLabel", t.order_id AS "orderId", t.created_by AS "createdBy", t.created_at AS "createdAt"`;
+                   t.batch_label AS "batchLabel", t.order_id AS "orderId", t.created_by AS "createdBy", t.created_at AS "createdAt", t.reverses_id AS "reversesId"`;
 
   // ── Who is signed in (the store page asks this first) ──
   app.get('/api/store/auth', async (req, res) => {
@@ -490,8 +493,13 @@ module.exports = function registerStoreRoutes(app, deps) {
         if (r.code !== 200) return res.status(r.code).json(r.body || { error: 'Reverse failed' });
         return res.json({ ok: true, deleted: 0, reload: true });
       }
-      const txns = await sql`SELECT id, type, part_id, qty, date::text AS date, ref, issued_to FROM store_tx WHERE id = ANY(${ids})`;
+      const txns = await sql`SELECT id, type, part_id, qty, date::text AS date, ref, issued_to, reverses_id FROM store_tx WHERE id = ANY(${ids})`;
       if (!txns.length) return res.json({ ok: true, deleted: 0 });
+      // A reversal row is not reversed or deleted on its own; a reversed entry is not reversed again (its Delete from
+      // History takes its reversal row with it).
+      if (txns.some(t => t.reverses_id)) return res.status(409).json({ error: 'That is a reversal row - it stays with the entry it reversed.' });
+      const done = await sql`SELECT reverses_id FROM store_tx WHERE reverses_id = ANY(${ids})`;
+      if (done.length && !historyOnly) return res.status(409).json({ error: 'This entry was already reversed.' });
       const partIds = [...new Set(txns.map(t => t.part_id))];
       const parts = await sql`SELECT id, name, sku, unit, qty, module FROM store_parts WHERE id = ANY(${partIds})`;
       const partsMap = new Map(parts.map(p => [p.id, p]));
@@ -513,12 +521,9 @@ module.exports = function registerStoreRoutes(app, deps) {
             if (low) return res.status(400).json({ error: `Cannot reverse this: it would leave the ${ordinal(low.n)} batch of "${p.name}" below zero, because stock was already issued from it. Reverse those issues first.` });
           }
         }
-        await sql`
-          WITH del AS (DELETE FROM store_tx WHERE id = ANY(${ids}) RETURNING part_id, type, qty),
-               agg AS (SELECT part_id, SUM(CASE WHEN type = 'in' THEN -qty ELSE qty END) AS d FROM del GROUP BY part_id)
-          UPDATE store_parts p SET qty = ROUND((p.qty + agg.d)::numeric, 3)::double precision FROM agg WHERE p.id = agg.part_id`;
+        await reverseRows(sql, ids, who(req));
       } else {
-        await sql`DELETE FROM store_tx WHERE id = ANY(${ids})`;
+        await sql`DELETE FROM store_tx WHERE id = ANY(${ids}) OR reverses_id = ANY(${ids})`;
       }
       for (const t of txns) {
         const p = partsMap.get(t.part_id);
@@ -528,7 +533,7 @@ module.exports = function registerStoreRoutes(app, deps) {
         await log(sql, req, historyOnly ? `store.${(p && p.module) || 'unknown'}.txn.purge` : `store.${(p && p.module) || 'unknown'}.txn.delete`,
           `${historyOnly ? 'Purged from history' : 'Reversed'} ${verb}: ${t.type === 'in' ? '+' : '-'}${t.qty} ${(p && p.unit) || ''} of "${label}" on ${t.date} (${t.type === 'in' ? 'ref' : 'to'}: ${w})`, t.id);
       }
-      res.json({ ok: true, deleted: txns.length });
+      res.json({ ok: true, deleted: txns.length, reload: true });
     } catch (e) { fail(res, e); }
   });
   // A stock in's P.O. / Invoice No. and the batch no. on its sticker.
@@ -744,8 +749,8 @@ module.exports = function registerStoreRoutes(app, deps) {
         SELECT o.id, o.part_id AS "partId", o.item_name AS "itemName", o.unit, o.qty, o.supplier, o.po_no AS "poNo",
                o.po_id AS "poId", o.po_sr AS "poSr", o.order_date::text AS "orderDate", o.expected_date::text AS "expectedDate", o.notes,
                o.cancelled_at AS "cancelledAt", o.created_by AS "createdBy", o.created_at AS "createdAt",
-               COALESCE((SELECT SUM(t.qty) FROM store_tx t WHERE t.order_id = o.id AND t.type = 'in'), 0) AS "receivedQty",
-               (SELECT MAX(t.date)::text FROM store_tx t WHERE t.order_id = o.id AND t.type = 'in') AS "lastReceived"
+               COALESCE((SELECT SUM(t.qty) FROM store_tx t WHERE t.order_id = o.id AND t.type = 'in' AND NOT EXISTS (SELECT 1 FROM store_tx r WHERE r.reverses_id = t.id)), 0) AS "receivedQty",
+               (SELECT MAX(t.date)::text FROM store_tx t WHERE t.order_id = o.id AND t.type = 'in' AND NOT EXISTS (SELECT 1 FROM store_tx r WHERE r.reverses_id = t.id)) AS "lastReceived"
           FROM store_orders o LEFT JOIN store_parts p ON p.id = o.part_id
          WHERE COALESCE(p.module, o.module) = ${mod}
          ORDER BY o.id DESC`;
@@ -797,7 +802,7 @@ module.exports = function registerStoreRoutes(app, deps) {
       const id = parseInt(b.id, 10);
       const [o] = await sql`
         SELECT o.part_id AS "partId", o.module, COALESCE(p.name, o.item_name) AS name, COALESCE(p.unit, o.unit) AS unit,
-               COALESCE((SELECT SUM(t.qty) FROM store_tx t WHERE t.order_id = o.id AND t.type = 'in'), 0) AS received
+               COALESCE((SELECT SUM(t.qty) FROM store_tx t WHERE t.order_id = o.id AND t.type = 'in' AND NOT EXISTS (SELECT 1 FROM store_tx r WHERE r.reverses_id = t.id)), 0) AS received
           FROM store_orders o LEFT JOIN store_parts p ON p.id = o.part_id WHERE o.id = ${id}`;
       if (!o) return res.status(404).json({ error: 'That order was not found.' });
       if (modDenied(req, res, o.module)) return;
@@ -1201,11 +1206,29 @@ module.exports = function registerStoreRoutes(app, deps) {
     }
     return ids;
   }
-  // Undo them (a station entry deleted): the entries go and the quantity moves back, in one statement.
-  async function plateUnmove(sql, ids) {
+  // Reverse entries (owner, 2026-11-24, as in the boards Inventory): each keeps its row and gets a reversal row (the
+  // other way, same quantity and batch, dated today, reverses_id = it); the quantity moves back - in one statement.
+  async function reverseRows(sql, ids, by) {
+    const list = (ids || []).map(Number).filter(n => n > 0);
+    if (!list.length) return;
+    await sql`
+      WITH ins AS (
+        INSERT INTO store_tx (type, part_id, qty, date, ref, notes, issued_to, purpose, challan_no, batch, created_by, created_at, reverses_id)
+        SELECT CASE WHEN x.type = 'in' THEN 'out' ELSE 'in' END, x.part_id, x.qty, ${todayPk()}::date, x.ref, x.notes, x.issued_to, x.purpose,
+               x.challan_no, x.batch, ${by || ''}, now(), x.id
+          FROM store_tx x
+         WHERE x.id = ANY(${list}) AND x.reverses_id IS NULL AND NOT EXISTS (SELECT 1 FROM store_tx r WHERE r.reverses_id = x.id)
+        RETURNING part_id, type, qty),
+           agg AS (SELECT part_id, SUM(CASE WHEN type = 'in' THEN qty ELSE -qty END) AS d FROM ins GROUP BY part_id)
+      UPDATE store_parts p SET qty = ROUND((p.qty + agg.d)::numeric, 3)::double precision FROM agg WHERE p.id = agg.part_id`;
+  }
+  // Undo them: a station entry reversed ({ keep: true, by }) keeps its Store entries with reversal rows; a station entry
+  // that was never saved (keep not set) takes them away - the entries go and the quantity moves back, in one statement.
+  async function plateUnmove(sql, ids, opts = {}) {
     const list = (ids || []).map(Number).filter(n => n > 0);
     if (!list.length) return;
     await ensureStore();
+    if (opts.keep) return reverseRows(sql, list, opts.by);
     await sql`
       WITH del AS (DELETE FROM store_tx WHERE id = ANY(${list}) RETURNING part_id, type, qty),
            agg AS (SELECT part_id, SUM(CASE WHEN type = 'in' THEN -qty ELSE qty END) AS d FROM del GROUP BY part_id)

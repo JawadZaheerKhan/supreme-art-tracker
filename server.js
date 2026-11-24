@@ -8822,6 +8822,7 @@ app.get('/api/plates/stock-tx', requirePermission('inv_btn_plate_store', 'view')
         FROM store_tx t JOIN plate_sizes s ON s.store_part_id = t.part_id AND s.deleted_at IS NULL
        WHERE (${sid}::int IS NULL OR s.id = ${sid})
          AND NOT EXISTS (SELECT 1 FROM plate_stock_tx x WHERE t.id = ANY(x.store_tx_ids))
+         AND t.reverses_id IS NULL AND NOT EXISTS (SELECT 1 FROM store_tx r WHERE r.reverses_id = t.id)
          AND (${from}::timestamptz IS NULL OR COALESCE(t.created_at, t.date::timestamptz) >= ${from}::timestamptz)
          AND (${to}::timestamptz IS NULL OR COALESCE(t.created_at, t.date::timestamptz) < ${to}::timestamptz)
        ORDER BY 4 DESC LIMIT 3000`;
@@ -8848,8 +8849,9 @@ plateH.reverse = async (req, res) => {
     const [t] = await sql`SELECT t.*, s.name AS size_name FROM plate_stock_tx t LEFT JOIN plate_sizes s ON s.id = t.size_id WHERE t.id = ${id}`;
     if (!t) return res.status(404).json({ error: 'That entry is not there any more.' });
     if (t.reason === 'plate-made') return res.status(400).json({ error: 'This one was a plate made at the CTP Station - it is not reversed.' });
-    // Its Store entries go too, and the Store's quantity moves back (owner, 2026-11-24: plates live in the Store).
-    if (Array.isArray(t.store_tx_ids) && t.store_tx_ids.length) await storeApi.plateUnmove(sql, t.store_tx_ids);
+    // Its Store entries get reversal rows and the Store's quantity moves back (owner, 2026-11-24: plates live in the
+    // Store; a reversed entry stays in the item's history, out of Stock In / Out).
+    if (Array.isArray(t.store_tx_ids) && t.store_tx_ids.length) await storeApi.plateUnmove(sql, t.store_tx_ids, { keep: true, by: plateByName(req) });
     const [row] = await sql`
       WITH d AS (DELETE FROM plate_stock_tx WHERE id = ${id} AND reason <> 'plate-made' RETURNING size_id, change)
       UPDATE plate_sizes s SET balance = s.balance - d.change FROM d WHERE s.id = d.size_id RETURNING s.*`;
@@ -9789,14 +9791,20 @@ async function cartonStoreSync(sql, typeIds) {
   const forText = `CASE t.reason WHEN 'e-job' THEN 'E-Job E-' || t.job_id || COALESCE(' ' || j.name, '')
                                  WHEN 'manual-job' THEN 'Manual Job ' || COALESCE(t.manual_job, '')
                                  WHEN 'other' THEN 'Other - ' || COALESCE(t.other_reason, '') ELSE '' END`;
+  // Its side: an Issue (kind out) is a Stock Out - a give-back is a Stock Out of minus that many; a Stock In (kind in)
+  // is a Stock In; a reversal goes the other way of the entry it undid, with the same quantity (owner, 2026-11-24).
+  const sideOf = `CASE WHEN t.reverses_tx_id IS NULL AND t.kind = 'out' THEN 'out' WHEN t.reverses_tx_id IS NULL AND t.kind = 'in' THEN 'in'
+                      WHEN t.change > 0 THEN 'in' ELSE 'out' END`;
+  const qtyOf = `(CASE WHEN t.reverses_tx_id IS NULL AND t.kind = 'out' THEN -t.change WHEN t.reverses_tx_id IS NULL AND t.kind = 'in' THEN t.change
+                      ELSE ABS(t.change) END)::double precision`;
   await sql(`
     UPDATE store_tx x SET ref = COALESCE(t.supplier, ''), notes = COALESCE(t.notes, ''), purpose = ${forText},
-           issued_to = COALESCE(t.issued_to, ''), challan_no = COALESCE(t.challan_no, '')
+           issued_to = COALESCE(t.issued_to, ''), challan_no = COALESCE(t.challan_no, ''), type = ${sideOf}, qty = ${qtyOf}
       FROM carton_transactions t LEFT JOIN jobs j ON j.id = t.job_id
      WHERE x.carton_tx_id = t.id AND ($1::int[] IS NULL OR t.type_id = ANY($1))`, [ids]);
   await sql(`
     INSERT INTO store_tx (type, part_id, qty, date, ref, notes, issued_to, purpose, challan_no, created_by, created_at, carton_tx_id)
-    SELECT CASE WHEN t.change > 0 THEN 'in' ELSE 'out' END, p.id, ABS(t.change)::double precision,
+    SELECT ${sideOf}, p.id, ${qtyOf},
            (t.created_at AT TIME ZONE 'Asia/Karachi')::date, COALESCE(t.supplier, ''), COALESCE(t.notes, ''),
            COALESCE(t.issued_to, ''), ${forText}, COALESCE(t.challan_no, ''),
            COALESCE(t.actor_name, split_part(COALESCE(t.user_email, ''), '@', 1)), COALESCE(t.recorded_at, t.created_at), t.id
@@ -9805,6 +9813,16 @@ async function cartonStoreSync(sql, typeIds) {
       LEFT JOIN jobs j ON j.id = t.job_id
      WHERE t.change <> 0 AND ($1::int[] IS NULL OR t.type_id = ANY($1))
        AND NOT EXISTS (SELECT 1 FROM store_tx x WHERE x.carton_tx_id = t.id)`, [ids]);
+  // A carton reversal is the reversal row of the Store entry it undid (both stay in the item's history only).
+  await sql(`
+    UPDATE store_tx x SET reverses_id = NULL
+      FROM carton_transactions t
+     WHERE x.carton_tx_id = t.id AND x.reverses_id IS NOT NULL AND ($1::int[] IS NULL OR t.type_id = ANY($1))
+       AND (t.reverses_tx_id IS NULL OR NOT EXISTS (SELECT 1 FROM store_tx o WHERE o.carton_tx_id = t.reverses_tx_id AND o.id = x.reverses_id))`, [ids]);
+  await sql(`
+    UPDATE store_tx x SET reverses_id = o.id
+      FROM carton_transactions t JOIN store_tx o ON o.carton_tx_id = t.reverses_tx_id
+     WHERE x.carton_tx_id = t.id AND x.reverses_id IS DISTINCT FROM o.id AND ($1::int[] IS NULL OR t.type_id = ANY($1))`, [ids]);
 }
 // A Carton Shipper added in the Store (owner, 2026-11-24): it is made as a carton type (so the Station and the carton
 // Issue know it), with its opening stock as a Stock In; the Store item follows.
