@@ -3998,7 +3998,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="mode-btn products-tab-only" data-mode="products" id="mode-products-btn" onclick="setMode('products')">Product Rate</button>
     <button class="mode-btn" data-mode="inventory" id="mode-inventory-btn" onclick="setMode('inventory')">Inventory</button>
     <button class="mode-btn" data-mode="carton-shippers" id="mode-carton-shippers-btn" onclick="setMode('carton-shippers')" style="display:none;">&#128230; Carton Shippers</button>
-    <button class="mode-btn" data-mode="plates" id="mode-plates-btn" onclick="setMode('plates')" style="display:none;">&#129513; Plate Store</button>
     <button class="mode-btn" data-mode="store" id="mode-store-btn" onclick="setMode('store')" style="display:none;">&#127980; Store</button>
     <button class="mode-btn" data-mode="reports" id="mode-reports-btn" onclick="openReportsTab()">Reports</button>
     <button class="mode-btn" data-mode="stickers" id="mode-stickers-btn" onclick="setMode('stickers')">Stickers</button>
@@ -4141,7 +4140,6 @@ td.jc-details-cell > input[type="text"] { padding-right: 20px; }
     <button class="btn ceo-hide" onclick="openBulkStockOut()" style="background:#DC2626;color:#fff;border-color:#DC2626;">&#128228; Stock Out (Bulk)</button>
     <button class="btn" data-acc="inv_btn_print_sticker" onclick="openInvSticker(0)" title="Print a pallet sticker with every detail typed by hand - no Stock In needed">&#128424; Print Sticker</button>
     <button class="btn" id="inv-brands-btn" data-acc="inv_btn_brands" data-acc-need="view" onclick="openInvBrands()" title="Every brand and supplier - fix a spelling, or change an item's brand / supplier">&#127991; Brands &amp; Suppliers</button>
-    <button class="btn" id="inv-plates-btn" data-acc="inv_btn_plate_store" data-acc-need="view" onclick="setMode('plates')" title="Blank plates per size, Stock In, and the Plate Register - its own tab at the top">&#129513; Plate Store</button>
   </div>
   <div class="inventory-list" id="inventory-list"></div>
 </div>
@@ -7011,7 +7009,7 @@ function tabAllowed(m) {
     case 'factory':     return hasRole('ceo');   // the 3D factory view: Super Admin and the CEO (owner, 2026-10-24 / 2026-10-26)
     case 'dashboard':   return hasPerm('dashboard_tab_access', 'view');
     case 'carton-shippers': return hasPerm('carton_tab_access', 'view');
-    case 'plates':      return hasPerm('inv_btn_plate_store', 'view');   // Plate Store tab (owner, 2026-11-24)
+    case 'plates':      return false;   // no Plate Store tab: plates are Store items, the CTP Station keeps its screens (owner, 2026-11-24)
     case 'store':       return hasPerm('store_tab_access', 'view') && (hasPerm('store_sec_consumables', 'view') || hasPerm('store_sec_machinery', 'view'));   // Store (moved from the ERP, 2026-11-24)
     case 'mgr-operators': return mgrOpsUnlocked();
     default:            return true;
@@ -8183,7 +8181,6 @@ function renderUserChip() {
   showTab('mode-products-btn', 'products');
   showTab('mode-inventory-btn', 'inventory');
   showTab('mode-carton-shippers-btn', 'carton-shippers');
-  showTab('mode-plates-btn', 'plates');
   showTab('mode-store-btn', 'store');
   showTab('mode-reports-btn', 'reports');
   showTab('mode-stickers-btn', 'stickers');
@@ -35914,7 +35911,7 @@ async function saveRenameProduct(i) {
 // Register lists every plate made, reused or removed, with its job, product, colour, size, reason and who.
 let plateStoreTab = 'store', plateSizesCache = [], plateRegRows = null, plateRegFrom = '', plateRegTo = '', plateRegQ = '', plateRegSub = 'in';
 const PLATE_REASON_TXT = { first: 'First set', damaged: 'Damaged', scratched: 'Scratched', worn: 'Worn out', artwork: 'Artwork changed', lost: 'Lost', size: 'New machine size', other: 'Other' };
-const PLATE_TX_TXT = { opening: 'Opening balance', delivery: 'Delivery', 'stock-in': 'Stock In', 'plate-made': 'Plate made (CTP)', 'new-job': 'New job', 'old-job': 'Old job', damaged: 'Damaged', adjustment: 'Adjustment', 'damaged-blank': 'Damaged blank', wasted: 'Wasted at CTP', test: 'Test plate' };
+const PLATE_TX_TXT = { 'store-in': 'Stock In (Store)', 'store-out': 'Stock Out (Store)', opening: 'Opening balance', delivery: 'Delivery', 'stock-in': 'Stock In', 'plate-made': 'Plate made (CTP)', 'new-job': 'New job', 'old-job': 'Old job', damaged: 'Damaged', adjustment: 'Adjustment', 'damaged-blank': 'Damaged blank', wasted: 'Wasted at CTP', test: 'Test plate' };
 async function openPlateStore(tab) {
   plateStoreTab = tab || plateStoreTab || 'store';
   if (!plateRegFrom) { const t = localDateISO(); plateRegFrom = t.slice(0, 8) + '01'; plateRegTo = t; }
@@ -36053,7 +36050,7 @@ function stationCtpProductsHtml() {
 // At the CTP Station the Plate Store's calls go through the PIN-checked station routes (owner, 2026-11-24).
 function plateAtStation() { return typeof mode !== 'undefined' && mode === 'station' && stationView === 'plate-store' && !!stationOperator; }
 function plateCan(key) { return plateAtStation() || isSuperAdmin() || hasPerm(key, 'yes'); }
-function plateCanDelete() { return !(typeof mode !== 'undefined' && mode === 'station') && (isSuperAdmin() || hasPerm('plate_btn_delete', 'yes')); }
+function plateCanDelete() { return isSuperAdmin() || hasPerm('plate_btn_delete', 'yes'); }
 function plateApi(method, path, body) {
   if (!plateAtStation() || (method === 'GET' && path === '/api/plates/sizes')) return api(method, path, body);
   const who = { pin: stationOperator.pin, person_name: (stationPerson && stationPerson.name) || '' };
@@ -36072,7 +36069,7 @@ async function renderPlateStore() {
   const rows = plateSizesCache.map(z => {
     const low = z.balance < 0 || (z.low_at > 0 && z.balance <= z.low_at);
     return `<tr style="border-bottom:1px solid var(--border);">
-      <td style="padding:8px;font-weight:800;">${esc(z.name)}</td>
+      <td style="padding:8px;font-weight:800;">${esc(z.name)}${z.linked ? `<div style="font-size:10.5px;font-weight:600;color:#1e3a8a;">Store: ${esc((z.store_sku ? '[' + z.store_sku + '] ' : '') + (z.store_name || ''))}</div>` : '<div style="font-size:10.5px;font-weight:600;color:#b45309;">not linked to the Store</div>'}</td>
       <td style="padding:8px;">${esc(z.brand || '') || '&mdash;'}</td>
       <td style="padding:8px;">${esc(z.supplier || '') || '&mdash;'}</td>
       <td style="padding:8px;">${(z.machines || []).map(esc).join(', ') || '&mdash;'}</td>
@@ -36103,14 +36100,29 @@ function plateAddForm(id) {
     <div class="form-row">${f('pl-size', 'Size *', v.name, 'type="text" placeholder="e.g. 745 x 605"')}${f('pl-machine', 'Machine', (v.machines || []).join(', '), 'type="text" placeholder="e.g. SM74-1, SM74-2"')}</div>
     <div class="form-row">${f('pl-brand', 'Brand', v.brand, 'type="text" placeholder="e.g. Kodak"')}${f('pl-supplier', 'Supplier', v.supplier, 'type="text"')}</div>
     ${z ? '' : f('pl-opening', 'Opening Balance (plates)', '', 'type="number" min="0" step="1" placeholder="0"')}
-    <div style="font-size:11.5px;color:var(--text2);">Machine: the machines that print with this plate - a plate CTP makes for a job on that machine comes out of this one.</div>
+    <div class="form-group"><label class="form-label">Store item <span style="font-weight:400;color:var(--text2);">(its stock is the Store's)</span></label><select id="pl-store" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;"><option value="">Loading…</option></select></div>
+    <div style="font-size:11.5px;color:var(--text2);">Machine: the machines that print with this plate - a plate CTP makes for a job on that machine comes out of this one. Store item: the CTCP plate in the Store - Use and Stock In here move its stock there.</div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="plateAddSave(${id || 0})">${z ? 'Save' : 'Add Plate'}</button></div>
   </div>`);
   setTimeout(() => { const e = document.getElementById('pl-size'); if (e) e.focus(); }, 50);
+  plateStoreOptions(z ? z.store_part_id : null);
+}
+// The Store's plate items for the Store item box (owner, 2026-11-24: plates live in the Store).
+async function plateStoreOptions(cur) {
+  const sel = document.getElementById('pl-store'); if (!sel) return;
+  let list = [];
+  try { list = await plateApi('GET', '/api/plates/store-parts'); } catch (e) { sel.innerHTML = '<option value="">Could not load the Store items</option>'; return; }
+  const used = new Map((plateSizesCache || []).filter(x => x.store_part_id).map(x => [Number(x.store_part_id), x.name]));
+  sel.innerHTML = '<option value="">- not linked (its own stock here) -</option>' + list.map(pt => {
+    const other = used.get(Number(pt.id));
+    return `<option value="${pt.id}" ${Number(cur) === Number(pt.id) ? 'selected' : ''}>${esc((pt.sku ? '[' + pt.sku + '] ' : '') + pt.name + (pt.brand ? ' · ' + pt.brand : ''))} - ${Number(pt.qty).toLocaleString()} ${esc(pt.unit || '')}${other && Number(cur) !== Number(pt.id) ? ' (linked to ' + esc(other) + ')' : ''}</option>`;
+  }).join('');
 }
 async function plateAddSave(id) {
   const g = x => String((document.getElementById(x) || {}).value || '').trim();
   const body = { name: g('pl-size'), machines: g('pl-machine'), brand: g('pl-brand'), supplier: g('pl-supplier') };
+  const st = document.getElementById('pl-store');
+  if (st && !/Loading|Could not/.test((st.options[0] || {}).text || '')) body.store_part_id = st.value ? parseInt(st.value, 10) : null;
   if (!body.name) { await alertDialog({ title: 'Size is required', kind: 'warn' }); return; }
   if (!id) body.opening = parseInt(g('pl-opening'), 10) || 0;
   showSaving(true);
@@ -36341,6 +36353,7 @@ function plateUsePlatesQty() {
 let plateTxCache = [];
 function plateTxDelBtn(t, from) {
   if (t.reason === 'plate-made') return '';
+  if (t.from_store) return '<span style="font-size:11px;color:var(--text3);" title="Entered in the Store - change it there">in the Store</span>';
   return `<button class="btn btn-sm" style="color:#b91c1c;border-color:#fca5a5;font-weight:700;padding:2px 8px;" title="Delete this entry - the stock goes back" onclick="plateTxDelete(${t.id}, '${from}')">&#128465; Delete</button>`;
 }
 async function plateTxDelete(id, from) {
@@ -46591,7 +46604,6 @@ const ACC_REG_TABS = [
   ['products', 'Products'],
   ['inventory', 'Inventory'],
   ['carton-shippers', 'Carton Shippers'],
-  ['plates', 'Plate Store'],
   ['store', 'Store'],
   ['reports', 'Reports'],
   ['station', 'Station'],

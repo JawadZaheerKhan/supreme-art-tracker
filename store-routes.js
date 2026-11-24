@@ -433,6 +433,13 @@ module.exports = function registerStoreRoutes(app, deps) {
       if (!ids.length) return res.status(400).json({ error: 'ID(s) required' });
       if (!can(req.user, historyOnly ? 'store.delete' : 'store.reverse')) return res.status(403).json({ error: 'Not allowed' });
       if (await txnsDenied(sql, req, res, ids)) return;
+      // A plate Use / Stock In made at the CTP Station (owner, 2026-11-24): reversing it here reverses that whole station
+      // entry - all its Store parts (batches) - and takes it off the station's Register, so the two never disagree.
+      let plateEntries = [];
+      if (!historyOnly) {
+        plateEntries = await sql`SELECT id, store_tx_ids FROM plate_stock_tx WHERE store_tx_ids && ${ids}::int[]`;
+        for (const pe of plateEntries) for (const x of pe.store_tx_ids || []) if (!ids.includes(Number(x))) ids.push(Number(x));
+      }
       const txns = await sql`SELECT id, type, part_id, qty, date::text AS date, ref, issued_to FROM store_tx WHERE id = ANY(${ids})`;
       if (!txns.length) return res.json({ ok: true, deleted: 0 });
       const partIds = [...new Set(txns.map(t => t.part_id))];
@@ -457,6 +464,10 @@ module.exports = function registerStoreRoutes(app, deps) {
           WITH del AS (DELETE FROM store_tx WHERE id = ANY(${ids}) RETURNING part_id, type, qty),
                agg AS (SELECT part_id, SUM(CASE WHEN type = 'in' THEN -qty ELSE qty END) AS d FROM del GROUP BY part_id)
           UPDATE store_parts p SET qty = ROUND((p.qty + agg.d)::numeric, 3)::double precision FROM agg WHERE p.id = agg.part_id`;
+        if (plateEntries.length) {
+          await sql`DELETE FROM plate_stock_tx WHERE id = ANY(${plateEntries.map(pe => Number(pe.id))})`;
+          await log(sql, req, 'plate_stock.delete', `Plate entr${plateEntries.length === 1 ? 'y' : 'ies'} of the CTP Station reversed from the Store (Store entries ${ids.join(', ')})`);
+        }
       } else {
         await sql`DELETE FROM store_tx WHERE id = ANY(${ids})`;
       }
@@ -974,6 +985,12 @@ module.exports = function registerStoreRoutes(app, deps) {
         // Read everything first - nothing here changes unless the whole ERP store was read.
         const data = {};
         for (const t of ERP_COPY) data[t.to] = await erp(`SELECT ${t.cols} FROM ${t.from}${t.noId ? '' : ' ORDER BY id'}`, []);
+        // Plate sizes linked to Store items: kept only where the same item (same id AND name) comes back from the ERP;
+        // the CTP Station's entries forget their old Store entries (those are replaced), so nothing points at a wrong one.
+        const linked = await sql`SELECT s.id, s.store_part_id, p.name FROM plate_sizes s LEFT JOIN store_parts p ON p.id = s.store_part_id WHERE s.store_part_id IS NOT NULL`;
+        const erpNames = new Map(data.store_parts.map(p => [Number(p.id), String(p.name || '')]));
+        for (const l of linked) if (erpNames.get(Number(l.store_part_id)) !== String(l.name || '')) await sql`UPDATE plate_sizes SET store_part_id = NULL WHERE id = ${l.id}`;
+        await sql`UPDATE plate_stock_tx SET store_tx_ids = NULL WHERE store_tx_ids IS NOT NULL`;
         // Replace this store's contents (the children first), then put the ERP's in, the parents first.
         for (const t of ['store_ledger_ignores', 'store_tx', 'store_orders', 'store_parts', 'store_categories', 'store_machines', 'store_recipients', 'store_dropdown_hidden']) await sql(`DELETE FROM ${t}`, []);
         for (const t of ERP_COPY) {
@@ -992,5 +1009,63 @@ module.exports = function registerStoreRoutes(app, deps) {
     } catch (e) { fail(res, e); } finally { _copying = false; }
   });
 
-  return { ensureStore, modulesFor, erpSql };
+  // ── Plates from the CTP Station (owner, 2026-11-24): plates are Store items (CTCP Plates); the station's Use / Stock
+  // In moves the stock of the Store item its plate size is linked to. Out: oldest batch first (a shortfall comes off
+  // the last batch used - the station may run below zero, as before, until the stock in is entered); In: a new batch.
+  // Returns the Store entry ids, so the station entry can be reversed with them.
+  async function plateMove(sql, o) {
+    await ensureStore();
+    const [p] = await sql`SELECT id, qty, module FROM store_parts WHERE id = ${o.partId} AND deleted_at IS NULL`;
+    if (!p) throw new Error('The Store item of this plate is not there any more - link the plate to its Store item again (Edit).');
+    const qty = roundQty(Math.abs(Number(o.change) || 0));
+    if (!(qty > 0)) return [];
+    const date = o.date || todayPk();
+    const ids = [];
+    if (o.change > 0) {
+      let batch = null;
+      if (p.module === 'consumables') { const { batches, any } = await batchBalances(sql, p.id); batch = any ? batches[batches.length - 1].n + 1 : 1; }
+      const [t] = await sql`
+        WITH upd AS (UPDATE store_parts SET qty = ROUND((qty + ${qty})::numeric, 3)::double precision WHERE id = ${p.id} RETURNING id)
+        INSERT INTO store_tx (type, part_id, qty, date, ref, notes, issued_to, purpose, challan_no, batch, created_by, created_at)
+        SELECT 'in', upd.id, ${qty}, ${date}::date, ${o.ref || ''}, ${o.notes || ''}, '', '', ${o.challanNo || ''}, ${batch}::integer, ${o.by || ''}, now() FROM upd
+        RETURNING id`;
+      ids.push(Number(t.id));
+    } else {
+      const pieces = [];
+      if (p.module === 'consumables') {
+        const { batches } = await batchBalances(sql, p.id);
+        let left = qty;
+        for (const b of batches) {
+          if (left <= 0) break;
+          const take = roundQty(Math.min(left, Math.max(0, b.qty)));
+          if (take > 0) { pieces.push({ batch: b.n, qty: take }); left = roundQty(left - take); }
+        }
+        if (left > 0) {
+          const last = pieces[pieces.length - 1];
+          if (last) last.qty = roundQty(last.qty + left); else pieces.push({ batch: 1, qty: left });
+        }
+      } else pieces.push({ batch: null, qty });
+      for (const pc of pieces) {
+        const [t] = await sql`
+          WITH upd AS (UPDATE store_parts SET qty = ROUND((qty - ${pc.qty})::numeric, 3)::double precision WHERE id = ${p.id} RETURNING id)
+          INSERT INTO store_tx (type, part_id, qty, date, ref, notes, issued_to, purpose, challan_no, batch, created_by, created_at)
+          SELECT 'out', upd.id, ${pc.qty}, ${date}::date, '', ${o.notes || ''}, ${o.issuedTo || ''}, ${o.purpose || ''}, '', ${pc.batch}::integer, ${o.by || ''}, now() FROM upd
+          RETURNING id`;
+        ids.push(Number(t.id));
+      }
+    }
+    return ids;
+  }
+  // Undo them (a station entry deleted): the entries go and the quantity moves back, in one statement.
+  async function plateUnmove(sql, ids) {
+    const list = (ids || []).map(Number).filter(n => n > 0);
+    if (!list.length) return;
+    await ensureStore();
+    await sql`
+      WITH del AS (DELETE FROM store_tx WHERE id = ANY(${list}) RETURNING part_id, type, qty),
+           agg AS (SELECT part_id, SUM(CASE WHEN type = 'in' THEN -qty ELSE qty END) AS d FROM del GROUP BY part_id)
+      UPDATE store_parts p SET qty = ROUND((p.qty + agg.d)::numeric, 3)::double precision FROM agg WHERE p.id = agg.part_id`;
+  }
+
+  return { ensureStore, modulesFor, erpSql, plateMove, plateUnmove };
 };

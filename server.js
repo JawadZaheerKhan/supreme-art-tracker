@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-store';   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-24-plates-in-store';   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -2097,6 +2097,10 @@ async function initDb() {
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS job_no TEXT`;
     // Which plates of the job a Use was for (owner, 2026-11-24): "Cyan, Spot 1".
     await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS plate_names TEXT`;
+    // Plates live in the Store (owner, 2026-11-24): a plate size linked to its Store item (CTCP Plates) takes its stock
+    // from there; each station entry keeps the Store entries it made.
+    await sql`ALTER TABLE plate_sizes ADD COLUMN IF NOT EXISTS store_part_id INTEGER`;
+    await sql`ALTER TABLE plate_stock_tx ADD COLUMN IF NOT EXISTS store_tx_ids INTEGER[]`;
     // A product's plate names (owner, 2026-11-24): { "C": "Cyan", "Y": "Pantone 123", "Spot 1": "Gold" } - the colour
     // each plate prints, when it is not the usual one.
     await sql`ALTER TABLE finance.products ADD COLUMN IF NOT EXISTS plate_colors JSONB`;
@@ -8542,8 +8546,18 @@ async function verifyCtpPin(sql, rawPin) {
 // One blank plate out of the store (balance may go below zero - the stock in was not entered yet; it shows red).
 async function plateStockOut(sql, req, sizeId, { jobId, plateId, reason, notes }) {
   if (!sizeId) return;
-  await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, plate_id, notes, user_email, actor_name)
-            VALUES (${sizeId}, -1, ${reason}, ${jobId || null}, ${plateId || null}, ${notes || null}, ${(req.user && req.user.email) || null}, ${(req.user && req.user.station_actor) || null})`;
+  // A plate size linked to its Store item: the plate comes out of the Store (owner, 2026-11-24).
+  const [lk] = await sql`SELECT store_part_id FROM plate_sizes WHERE id = ${sizeId}`;
+  let storeIds = null;
+  if (lk && lk.store_part_id) {
+    // Never stops the CTP's work: if the Store item is gone, the plate is still recorded here.
+    try {
+      storeIds = await storeApi.plateMove(sql, { partId: lk.store_part_id, change: -1, issuedTo: plateWho(req), by: plateWho(req), notes: notes || '',
+        purpose: `CTP - plate made${jobId ? ' · Job E-' + jobId : ''}` });
+    } catch (e) { console.error('plate made: Store item not moved -', e.message); }
+  }
+  await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, plate_id, notes, user_email, actor_name, store_tx_ids)
+            VALUES (${sizeId}, -1, ${reason}, ${jobId || null}, ${plateId || null}, ${notes || null}, ${(req.user && req.user.email) || null}, ${(req.user && req.user.station_actor) || null}, ${storeIds})`;
   await sql`UPDATE plate_sizes SET balance = balance - 1 WHERE id = ${sizeId}`;
 }
 async function makePlate(sql, req, { productKey, productName, colorName, sizeId, jobId, reason, by }) {
@@ -8570,16 +8584,44 @@ async function plateProductOfJob(sql, job) {
 const plateWho = req => (req.user && req.user.station_actor) || (req.user && req.user.email) || 'unknown';
 
 // Sizes (the Plate Store) - read by everyone signed in (the Station needs them).
+// A plate size linked to its Store item shows the Store's quantity (owner, 2026-11-24: plates live in the Store).
+async function plateSizesList(sql) {
+  await storeApi.ensureStore();
+  const rows = await sql`
+    SELECT s.*, p.qty AS store_qty, p.sku AS store_sku, p.name AS store_name, p.brand AS store_brand
+      FROM plate_sizes s LEFT JOIN store_parts p ON p.id = s.store_part_id AND p.deleted_at IS NULL
+     WHERE s.deleted_at IS NULL ORDER BY s.name`;
+  return rows.map(r => r.store_part_id && r.store_name != null ? { ...r, balance: Math.round(Number(r.store_qty) * 1000) / 1000, linked: true } : { ...r, linked: false });
+}
 app.get('/api/plates/sizes', requireAuth, async (req, res) => {
   try {
     await dbReady;
-    const sql = getDb();
-    res.json(await sql`SELECT * FROM plate_sizes WHERE deleted_at IS NULL ORDER BY name`);
+    res.json(await plateSizesList(getDb()));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
+async function plateStorePartOk(sql, raw) {
+  if (raw === undefined) return { keep: true };
+  const id = parseInt(raw, 10);
+  if (!id) return { id: null };
+  await storeApi.ensureStore();
+  const [p] = await sql`SELECT id FROM store_parts WHERE id = ${id} AND deleted_at IS NULL AND module = 'consumables'`;
+  return p ? { id } : { error: 'That Store item was not found.' };
+}
 // The Plate Store's handlers - the app's routes below, and the same at the CTP Station with the CTP PIN (owner,
 // 2026-11-24: "same as the Line Clearance at the QA station").
 const plateH = {};
+// The Store's plate items, to link a plate size to (Inks & Consumables, a category with "plate" in its name).
+plateH.storeParts = async (req, res) => {
+  try {
+    await dbReady;
+    await storeApi.ensureStore();
+    const sql = getDb();
+    res.json(await sql`SELECT id, sku, name, brand, supplier, category, qty, unit FROM store_parts
+                        WHERE deleted_at IS NULL AND module = 'consumables' AND category ILIKE '%plate%' ORDER BY name, brand`);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+};
+app.get('/api/plates/store-parts', requireAuth, (req, res) => plateH.storeParts(req, res));
+app.get('/api/station/plates/store-parts', requireStationUser, (req, res) => plateH.storeParts(req, res));
 app.post('/api/plates/sizes', requirePermission('plate_btn_add'), plateH.sizeAdd = async (req, res) => {
   try {
     await dbReady;
@@ -8591,8 +8633,12 @@ app.post('/api/plates/sizes', requirePermission('plate_btn_add'), plateH.sizeAdd
     const low = Math.max(0, parseInt(req.body.low_at, 10) || 0);
     const brand = String(req.body.brand || '').trim().slice(0, 80) || null;
     const supplier = String(req.body.supplier || '').trim().slice(0, 80) || null;
-    const opening = Math.max(0, parseInt(req.body.opening, 10) || 0);
-    const [row] = await sql`INSERT INTO plate_sizes (name, machines, low_at, brand, supplier) VALUES (${name}, ${machines}, ${low}, ${brand}, ${supplier}) RETURNING *`;
+    const link = await plateStorePartOk(sql, req.body.store_part_id);
+    if (link.error) return res.status(400).json({ error: link.error });
+    const storePartId = link.keep ? null : link.id;
+    // Linked to its Store item: the stock is the Store's - no opening balance here.
+    const opening = storePartId ? 0 : Math.max(0, parseInt(req.body.opening, 10) || 0);
+    const [row] = await sql`INSERT INTO plate_sizes (name, machines, low_at, brand, supplier, store_part_id) VALUES (${name}, ${machines}, ${low}, ${brand}, ${supplier}, ${storePartId}) RETURNING *`;
     if (opening > 0) {
       await sql`INSERT INTO plate_stock_tx (size_id, change, reason, notes, user_email, actor_name) VALUES (${row.id}, ${opening}, 'opening', 'Opening balance', ${req.user.email}, ${req.user.station_actor || null})`;
       await sql`UPDATE plate_sizes SET balance = balance + ${opening} WHERE id = ${row.id}`;
@@ -8615,8 +8661,11 @@ app.put('/api/plates/sizes/:id', requirePermission('plate_btn_add'), plateH.size
     const low = req.body.low_at === undefined ? before.low_at : Math.max(0, parseInt(req.body.low_at, 10) || 0);
     const brand = req.body.brand === undefined ? before.brand : (String(req.body.brand || '').trim().slice(0, 80) || null);
     const supplier = req.body.supplier === undefined ? before.supplier : (String(req.body.supplier || '').trim().slice(0, 80) || null);
-    const [row] = await sql`UPDATE plate_sizes SET name = ${name}, machines = ${machines}, low_at = ${low}, brand = ${brand}, supplier = ${supplier} WHERE id = ${id} RETURNING *`;
-    await logAudit(sql, req, { action: 'plate_size.update', entityType: 'plate_size', entityId: id, summary: `Plate size edited: ${before.name} -> ${name} (machines: ${machines.join(', ') || '—'}, low at ${low})` });
+    const link = await plateStorePartOk(sql, req.body.store_part_id);
+    if (link.error) return res.status(400).json({ error: link.error });
+    const storePartId = link.keep ? before.store_part_id : link.id;
+    const [row] = await sql`UPDATE plate_sizes SET name = ${name}, machines = ${machines}, low_at = ${low}, brand = ${brand}, supplier = ${supplier}, store_part_id = ${storePartId} WHERE id = ${id} RETURNING *`;
+    await logAudit(sql, req, { action: 'plate_size.update', entityType: 'plate_size', entityId: id, summary: `Plate size edited: ${before.name} -> ${name} (machines: ${machines.join(', ') || '—'}, low at ${low})${(storePartId || null) !== (before.store_part_id || null) ? (storePartId ? ` · linked to Store item #${storePartId}` : ' · unlinked from the Store') : ''}` });
     res.json(row);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -8661,9 +8710,21 @@ app.post('/api/plates/stock', plateStockGate, plateH.stock = async (req, res) =>
     const plateNames = dir === 'out' && Array.isArray(req.body.plate_names)
       ? (req.body.plate_names.map(x => String(x || '').trim().slice(0, 40)).filter(Boolean).slice(0, 16).join(', ') || null) : null;
     const at = entry.at ? new Date(entry.at).toISOString() : null;
-    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_no, job_name, damaged_by, plate_names, notes, challan_no, user_email, actor_name, created_at, recorded_at)
+    // Linked to its Store item: the plates go in / out of the Store too (owner, 2026-11-24) - the job, plates and who
+    // damaged it stay here, the Store entry says the same in short.
+    let storeIds = null;
+    if (s.store_part_id) {
+      const jobTxt = jobId ? `Job E-${jobId}` : jobNo ? `Job ${jobNo}` : '';
+      const summary = [`CTP - ${reasons[reason]}`, jobTxt, jobName && !jobId ? jobName : '', plateNames ? 'plates: ' + plateNames : '', damagedBy || ''].filter(Boolean).join(' · ');
+      try {
+        storeIds = await storeApi.plateMove(sql, { partId: s.store_part_id, change, date: entry.date || null, by: plateWho(req),
+          issuedTo: dir === 'out' ? plateWho(req) : '', purpose: dir === 'out' ? summary : '', ref: dir === 'in' ? (s.supplier || 'CTP Station') : '',
+          challanNo: challan || '', notes: [dir === 'in' ? summary : '', notes || ''].filter(Boolean).join(' · ') });
+      } catch (e) { return res.status(400).json({ error: e.message }); }
+    }
+    await sql`INSERT INTO plate_stock_tx (size_id, change, reason, job_id, job_no, job_name, damaged_by, plate_names, notes, challan_no, user_email, actor_name, created_at, recorded_at, store_tx_ids)
               VALUES (${sizeId}, ${change}, ${reason}, ${jobId}, ${jobNo}, ${jobName}, ${damagedBy}, ${plateNames}, ${notes}, ${challan}, ${req.user.email}, ${req.user.station_actor || null},
-                      COALESCE(${at}::timestamptz, NOW()), CASE WHEN ${at}::timestamptz IS NULL THEN NULL ELSE NOW() END)`;
+                      COALESCE(${at}::timestamptz, NOW()), CASE WHEN ${at}::timestamptz IS NULL THEN NULL ELSE NOW() END, ${storeIds})`;
     const [row] = await sql`UPDATE plate_sizes SET balance = balance + ${change} WHERE id = ${sizeId} RETURNING *`;
     await logAudit(sql, req, { action: 'plate_stock.' + dir, entityType: 'plate_size', entityId: sizeId,
       summary: `Plates ${dir === 'in' ? 'Stock In' : 'Use'}: ${dir === 'in' ? '+' : '-'}${qty} ${s.name} (${reasons[reason]})${jobId ? ' · Job E-' + jobId : jobNo ? ' · Job ' + jobNo : ''}${jobName && !jobId ? ' ' + jobName : ''}${plateNames ? ' · plates: ' + plateNames : ''}${damagedBy ? ' · ' + damagedBy : ''}${challan ? ' · challan ' + challan : ''}${entry.date ? ' · dated ' + entry.date + ' (late entry)' : ''} · balance ${row.balance}` });
@@ -8680,13 +8741,33 @@ app.get('/api/plates/stock-tx', requirePermission('inv_btn_plate_store', 'view')
     const day = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d || '')); return m ? new Date(businessWallClockToMs(+m[1], +m[2], +m[3], 0, 0)).toISOString() : null; };
     const from = day(req.query.from), toStart = day(req.query.to);
     const to = toStart ? new Date(new Date(toStart).getTime() + 86400000).toISOString() : null;
-    res.json(await sql`
+    const sid = Number.isFinite(sizeId) ? sizeId : null;
+    const rows = await sql`
       SELECT t.*, COALESCE(t.job_name, j.name) AS job_name, s.name AS size_name, s.brand AS size_brand
         FROM plate_stock_tx t LEFT JOIN jobs j ON j.id = t.job_id LEFT JOIN plate_sizes s ON s.id = t.size_id
-       WHERE (${Number.isFinite(sizeId) ? sizeId : null}::int IS NULL OR t.size_id = ${Number.isFinite(sizeId) ? sizeId : null})
+       WHERE (${sid}::int IS NULL OR t.size_id = ${sid})
          AND (${from}::timestamptz IS NULL OR t.created_at >= ${from}::timestamptz)
          AND (${to}::timestamptz IS NULL OR t.created_at < ${to}::timestamptz)
-       ORDER BY t.created_at DESC, t.id DESC LIMIT 3000`);
+       ORDER BY t.created_at DESC, t.id DESC LIMIT 3000`;
+    // Plates live in the Store (owner, 2026-11-24): what was entered in the Store itself for a linked plate (a delivery,
+    // a stock out there) shows here too - marked as the Store's; it is changed in the Store.
+    await storeApi.ensureStore();
+    const fromStore = await sql`
+      SELECT t.id, t.type, t.qty, COALESCE(t.created_at, t.date::timestamptz) AS created_at, t.challan_no, t.ref, t.notes, t.issued_to, t.purpose, t.created_by,
+             s.id AS size_id, s.name AS size_name, s.brand AS size_brand
+        FROM store_tx t JOIN plate_sizes s ON s.store_part_id = t.part_id AND s.deleted_at IS NULL
+       WHERE (${sid}::int IS NULL OR s.id = ${sid})
+         AND NOT EXISTS (SELECT 1 FROM plate_stock_tx x WHERE t.id = ANY(x.store_tx_ids))
+         AND (${from}::timestamptz IS NULL OR COALESCE(t.created_at, t.date::timestamptz) >= ${from}::timestamptz)
+         AND (${to}::timestamptz IS NULL OR COALESCE(t.created_at, t.date::timestamptz) < ${to}::timestamptz)
+       ORDER BY 4 DESC LIMIT 3000`;
+    const mapped = fromStore.map(t => ({
+      id: -Number(t.id), from_store: true, store_tx_id: Number(t.id), size_id: t.size_id, size_name: t.size_name, size_brand: t.size_brand,
+      change: t.type === 'in' ? Number(t.qty) : -Number(t.qty), reason: t.type === 'in' ? 'store-in' : 'store-out',
+      challan_no: t.challan_no || null, notes: [t.type === 'in' ? t.ref : t.purpose, t.notes].filter(Boolean).join(' · ') || null,
+      actor_name: t.created_by || t.issued_to || 'Store', created_at: t.created_at, job_id: null, job_no: null, job_name: null, damaged_by: null, plate_names: null,
+    }));
+    res.json(rows.concat(mapped).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3000));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 // Delete a wrong Stock In / Use entry (owner, 2026-11-24: "add delete option for any issue so can be fixed"): the
@@ -8700,6 +8781,8 @@ app.delete('/api/plates/stock-tx/:id', requirePermission('plate_btn_delete'), as
     const [t] = await sql`SELECT t.*, s.name AS size_name FROM plate_stock_tx t LEFT JOIN plate_sizes s ON s.id = t.size_id WHERE t.id = ${id}`;
     if (!t) return res.status(404).json({ error: 'That entry is not there any more.' });
     if (t.reason === 'plate-made') return res.status(400).json({ error: 'This one was a plate made at the CTP Station - it cannot be deleted here.' });
+    // Its Store entries go too, and the Store's quantity moves back (owner, 2026-11-24: plates live in the Store).
+    if (Array.isArray(t.store_tx_ids) && t.store_tx_ids.length) await storeApi.plateUnmove(sql, t.store_tx_ids);
     const [row] = await sql`
       WITH d AS (DELETE FROM plate_stock_tx WHERE id = ${id} AND reason <> 'plate-made' RETURNING size_id, change)
       UPDATE plate_sizes s SET balance = s.balance - d.change FROM d WHERE s.id = d.size_id RETURNING s.*`;
@@ -16870,7 +16953,7 @@ app.get('/api/admin/transfer-stats', async (req, res) => {
 });
 
 // The Store - moved from the ERP (owner, 2026-11-24): its own routes and tables, see store-routes.js.
-require('./store-routes')(app, { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon });
+const storeApi = require('./store-routes')(app, { getDb, dbReady, logAudit, userHasBtn, userHasRole, requireAuth, neon });
 
 app.get('*', (req, res) => {
   // Deep links (/jobs, /station, …) fall through to here and get the app
