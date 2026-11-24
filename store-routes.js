@@ -59,12 +59,20 @@ module.exports = function registerStoreRoutes(app, deps) {
   };
 
   // ── Tables (created on first use, each step a no-op the second time) ──
+  // Fast path (owner, 2026-11-24: "the store is so slow"): the ~20 statements below run once per STORE_SCHEMA, not on
+  // every fresh server copy - a new copy reads one marker row and goes. Change STORE_SCHEMA whenever a statement below
+  // is added or changed.
+  const STORE_SCHEMA = 'store-2026-11-24-size';
   let _ready = null;
   async function ensureStore() {
     if (_ready) return _ready;
     _ready = (async () => {
       await dbReady;
       const sql = getDb();
+      try {
+        const [m] = await sql`SELECT value FROM schema_meta WHERE key = 'store_schema'`;
+        if (m && m.value === STORE_SCHEMA) return;
+      } catch (e) { /* no marker yet - set the tables up below */ }
       await sql`CREATE TABLE IF NOT EXISTS store_categories (id SERIAL PRIMARY KEY, name TEXT NOT NULL, module TEXT NOT NULL DEFAULT 'machinery')`;
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_categories_module_name_key ON store_categories (module, name)`;
       await sql`CREATE TABLE IF NOT EXISTS store_machines (id SERIAL PRIMARY KEY, name TEXT NOT NULL, module TEXT NOT NULL DEFAULT 'machinery')`;
@@ -115,6 +123,8 @@ module.exports = function registerStoreRoutes(app, deps) {
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_parts_carton_type_uq ON store_parts (carton_type_id) WHERE carton_type_id IS NOT NULL`;
       await sql`ALTER TABLE store_tx ADD COLUMN IF NOT EXISTS carton_tx_id INTEGER`;
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_tx_carton_tx_uq ON store_tx (carton_tx_id) WHERE carton_tx_id IS NOT NULL`;
+      // Done for this version - later server copies skip all of the above.
+      await sql`INSERT INTO schema_meta (key, value) VALUES ('store_schema', ${STORE_SCHEMA}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
     })().catch(e => { _ready = null; throw e; });
     return _ready;
   }

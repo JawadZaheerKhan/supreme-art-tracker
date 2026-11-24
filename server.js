@@ -8765,11 +8765,12 @@ app.post('/api/plates/stock', plateStockGate, plateH.stock = async (req, res) =>
       // In the Store (owner, 2026-11-24): the reason (New job / Old job / Damaged / Adjustment) -> Notes; what it is
       // for - the job, the plates, who damaged it - -> Issued To. Who did it is the Store's "Done by".
       const jobTxt = [jobId ? `E-${jobId}` : jobNo ? `Job ${jobNo}` : '', jobName || ''].filter(Boolean).join(' ');
-      const forWhat = [jobTxt, plateNames ? 'plates: ' + plateNames : '', damagedBy ? 'damaged by: ' + damagedBy : ''].filter(Boolean).join(' · ');
+      // (Who damaged it goes with the reason, in Notes - owner, 2026-11-24.)
+      const forWhat = [jobTxt, plateNames ? 'plates: ' + plateNames : ''].filter(Boolean).join(' · ');
       try {
         storeIds = await storeApi.plateMove(sql, { partId: s.store_part_id, change, date: entry.date || null, by: plateByName(req),
           issuedTo: dir === 'out' ? forWhat : '', purpose: '', ref: dir === 'in' ? (s.supplier || '') : '',
-          challanNo: challan || '', notes: [reasons[reason], notes || ''].filter(Boolean).join(' · ') });
+          challanNo: challan || '', notes: [reasons[reason], damagedBy ? 'damaged by: ' + damagedBy : '', notes || ''].filter(Boolean).join(' · ') });
       } catch (e) { return res.status(400).json({ error: e.message }); }
     }
     try {

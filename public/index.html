@@ -46434,12 +46434,29 @@ function enterStore(section) {
       <button type="button" class="btn btn-sm" data-acc="super_admin" onclick="storeErpCopy(true)" title="Compare every item here with the ERP: quantity, entries, in, out, each batch - nothing changes">&#10003; Check against ERP</button>
       <button type="button" class="btn btn-sm" data-acc="super_admin" onclick="storeErpCopy(false)" title="Copy the whole ERP store here (replaces what is here), then check it">&#8681; Copy from ERP</button>
       <button type="button" class="btn btn-sm" data-acc="super_admin" onclick="storeCartonCheck()" title="Bring every Carton Shipper into the Store (if anything is missing) and check each type's quantity and entries">&#10003; Cartons</button></span>` : '';
-  const tabs = (allowed.length > 1 || erpBtns) ? `<div class="store-subtabs">${allowed.length > 1 ? allowed.map(s => `<button type="button" class="btn btn-sm${s.id === storeSection ? ' is-on' : ''}" onclick="enterStore('${s.id}')">${esc(s.label)}</button>`).join('') : ''}${erpBtns}</div>` : '';
-  const frame = document.getElementById('store-frame');
-  if (frame && frame.dataset.section === storeSection) { storeFrameFit(); return; }   // already open - keep its place
-  root.innerHTML = `${tabs}<iframe id="store-frame" data-section="${storeSection}" src="${src}" title="Store" style="width:100%;border:0;display:block;background:#f5f5f3;"></iframe>`;
+  const tabs = (allowed.length > 1 || erpBtns) ? `<div class="store-subtabs">${allowed.length > 1 ? allowed.map(s => `<button type="button" class="btn btn-sm${s.id === storeSection ? ' is-on' : ''}" data-sec="${s.id}" onclick="enterStore('${s.id}')">${esc(s.label)}</button>`).join('') : ''}${erpBtns}</div>` : '';
+  // Each section's page stays open once loaded (owner, 2026-11-24: "the store is so slow"): coming back to the Store
+  // tab, or switching Inks & Consumables <-> Parts Store, just shows it again - no reload.
+  if (!root.querySelector('.store-frames')) root.innerHTML = `${tabs}<div class="store-frames"></div>`;
+  root.querySelectorAll('.store-subtabs .btn[data-sec]').forEach(b => b.classList.toggle('is-on', b.dataset.sec === storeSection));
+  const box = root.querySelector('.store-frames');
+  let frame = document.getElementById('store-frame-' + storeSection);
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'store-frame-' + storeSection;
+    frame.className = 'store-frame';
+    frame.dataset.section = storeSection;
+    frame.title = 'Store';
+    frame.src = src;
+    frame.style.cssText = 'width:100%;border:0;display:block;background:#f5f5f3;';
+    box.appendChild(frame);
+  }
+  box.querySelectorAll('iframe.store-frame').forEach(f => { f.style.display = f === frame ? 'block' : 'none'; });
   storeFrameFit();
 }
+// The open section's page / the page a message came from.
+function storeActiveFrame() { return document.getElementById('store-frame-' + storeSection); }
+function storeFrameOf(win) { return [...document.querySelectorAll('iframe.store-frame')].find(f => f.contentWindow === win) || null; }
 // Copy the whole ERP store here (same ids; what is here is replaced), or only compare - then every item is checked
 // against the ERP: quantity, entries, in, out and each batch.
 async function storeErpCopy(checkOnly) {
@@ -46477,7 +46494,7 @@ async function storeErpCopy(checkOnly) {
       <table class="ss-table" style="width:100%;font-size:12.5px;border-collapse:collapse;"><thead><tr><th style="text-align:left;padding:5px 8px;">Table</th><th style="text-align:right;padding:5px 8px;">ERP rows</th><th style="text-align:right;padding:5px 8px;">Here</th><th style="text-align:left;padding:5px 8px;"></th></tr></thead><tbody>
       ${r.tables.map(t => `<tr><td style="padding:4px 8px;">${esc({ categories: 'Categories', machines: 'Machines', store_recipients: 'Issued To names', parts: 'Items', store_orders: 'Orders', transactions: 'Stock In / Out entries', store_ledger_ignores: 'Ignored warnings', store_dropdown_hidden: 'Hidden dropdown names' }[t.table] || t.table)}</td><td style="padding:4px 8px;text-align:right;">${t.erp.toLocaleString()}</td><td style="padding:4px 8px;text-align:right;">${t.here.toLocaleString()}</td><td style="padding:4px 8px;font-weight:800;color:${t.match ? '#166534' : '#b91c1c'};">${t.match ? '&#10003; identical' : '&#10007; differs'}</td></tr>`).join('')}</tbody></table>` : ''}
     <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">OK</button></div></div>`);
-  if (!checkOnly) { const f = document.getElementById('store-frame'); if (f) f.contentWindow.location.reload(); }
+  if (!checkOnly) document.querySelectorAll('iframe.store-frame').forEach(f => { try { f.contentWindow.location.reload(); } catch (e) {} });
 }
 // Carton Shippers and CTCP Plates keep their own windows (owner, 2026-11-24): the Store page hands their buttons here -
 // a carton's + Stock / − Stock / Edit / Delete open the carton Stock In / Issue (E-Job, Manual Job, Other) / type / delete,
@@ -46499,12 +46516,12 @@ async function storeCartonCheck() {
   storeFrameReload();
 }
 function storeFrameReload() {
-  const f = document.getElementById('store-frame');
-  if (f && typeof mode !== 'undefined' && mode === 'store') { try { f.contentWindow.postMessage({ type: 'store-reload' }, location.origin); } catch (e) {} }
+  // Every open section (a carton / plate change shows in both), reloading its data in place.
+  document.querySelectorAll('iframe.store-frame').forEach(f => { try { f.contentWindow.postMessage({ type: 'store-reload' }, location.origin); } catch (e) {} });
 }
 window.addEventListener('message', async event => {
-  const f = document.getElementById('store-frame');
-  if (!f || event.source !== f.contentWindow || event.origin !== location.origin) return;
+  const f = storeFrameOf(event.source);
+  if (!f || event.origin !== location.origin) return;
   const m = event.data;
   if (!m || m.type !== 'store-special') return;
   if (m.kind === 'carton') {
@@ -46526,7 +46543,7 @@ window.addEventListener('message', async event => {
 });
 // The store page fills the rest of the window (it has its own sidebar and scrolling).
 function storeFrameFit() {
-  const f = document.getElementById('store-frame'); if (!f) return;
+  const f = storeActiveFrame(); if (!f) return;
   const top = f.getBoundingClientRect().top;
   f.style.height = Math.max(420, window.innerHeight - Math.max(0, top)) + 'px';
 }
@@ -46659,15 +46676,15 @@ async function storeAddStyledSheet(wb, spec) {
   return ws;
 }
 window.addEventListener('message', async event => {
-  const f = document.getElementById('store-frame');
-  if (!f || event.source !== f.contentWindow || event.origin !== location.origin) return;
+  const f = storeFrameOf(event.source);
+  if (!f || event.origin !== location.origin) return;
   const m = event.data;
   if (!m || m.type !== 'store-excel-export') return;
   try {
     const ExcelJS = await storeLoadExcelJs();
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Supreme Art Job Tracker'; wb.created = new Date();
-    const mod = storeSection || 'consumables';
+    const mod = f.dataset.section || storeSection || 'consumables';
     const code = m.section === 'issuance' ? (mod === 'consumables' ? 'STR/QR/008/B' : 'STR/QR/008/A') : undefined;
     await storeAddStyledSheet(wb, {
       sheetName: String(m.title || 'Store').slice(0, 31), title: m.title, headers: m.headers || [], rows: m.rows || [],
