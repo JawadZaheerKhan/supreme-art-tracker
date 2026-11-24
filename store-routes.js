@@ -66,7 +66,7 @@ module.exports = function registerStoreRoutes(app, deps) {
   let _ready = null;
   async function ensureStore() {
     if (_ready) return _ready;
-    _ready = (async () => {
+    const setup = async () => {
       await dbReady;
       const sql = getDb();
       try {
@@ -128,7 +128,13 @@ module.exports = function registerStoreRoutes(app, deps) {
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS store_tx_reverses_uq ON store_tx (reverses_id) WHERE reverses_id IS NOT NULL`;
       // Done for this version - later server copies skip all of the above.
       await sql`INSERT INTO schema_meta (key, value) VALUES ('store_schema', ${STORE_SCHEMA}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-    })().catch(e => { _ready = null; throw e; });
+    };
+    // Two server copies setting the tables up at the same moment (the first open after a new version): one gets
+    // "duplicate key ... pg_class_relname_nsp_index" - it waits a moment and runs again, by then a no-op (2026-11-24).
+    const racing = e => /pg_class_relname_nsp_index|pg_type_typname_nsp_index|already exists|duplicate key/i.test(String((e && e.message) || ''));
+    _ready = setup()
+      .catch(async e => { if (!racing(e)) throw e; await new Promise(r => setTimeout(r, 1500)); return setup(); })
+      .catch(e => { _ready = null; throw e; });
     return _ready;
   }
   const db = async () => { await ensureStore(); return getDb(); };
@@ -1066,6 +1072,8 @@ module.exports = function registerStoreRoutes(app, deps) {
     const erp = erpSql();
     if (!erp) return res.status(400).json({ error: 'The ERP link is not set (ERP_DATABASE_URL).' });
     const checkOnly = !!(req.body && req.body.check_only);
+    // The store lives here now (owner, 2026-11-24): a copy would replace everything entered since - switched off.
+    if (!checkOnly) return res.status(410).json({ error: 'The store has moved here - copying from the ERP is switched off (it would replace everything entered since).' });
     if (_copying) return res.status(409).json({ error: 'A copy is already running - wait for it to finish.' });
     _copying = true;
     try {
