@@ -106,6 +106,17 @@ input:focus,select:focus{outline:none;border-color:#8C2326;box-shadow:0 0 0 3px 
 .search-bar select.st-sort{width:auto;min-width:150px;background-color:rgba(245,158,11,.3);border:1px solid #B45309;color:#1f1300;font-weight:600;box-shadow:0 2px 6px rgba(245,158,11,.25);cursor:pointer}
 .search-bar select.st-sort:focus{outline:2px solid #7C2D12;outline-offset:1px}
 .st-sort option{color:#1a1a1a;background:#fff;font-weight:400}
+/* Job Tracker (2026-11-24): a smaller Sort box, and the Category list of Stock In / Stock Out. */
+.search-bar select.st-sort{min-width:0!important;width:128px;font-size:12px;padding:6px 6px;height:auto}
+.cat-pick{position:relative;display:inline-block}
+.cat-pick-btn{font-size:12px;font-weight:600;padding:7px 10px;border:1px solid #B45309;border-radius:8px;background:#fff7ed;color:#1f1300;cursor:pointer;white-space:nowrap;max-width:190px;overflow:hidden;text-overflow:ellipsis}
+.cat-pick-list{position:absolute;top:calc(100% + 4px);left:0;z-index:50;min-width:230px;max-height:320px;overflow:auto;background:#fff;border:1px solid #e5e0d6;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:4px}
+.cat-pick-row{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:12.5px}
+.cat-pick-row:hover{background:#faf5ec}
+.cat-pick-row.on{background:#fde7d3;font-weight:700}
+.cat-pick-row .n{margin-left:auto;color:#888;font-size:11.5px}
+.cat-pick-del{border:none;background:none;color:#dc2626;cursor:pointer;font-size:15px;padding:0 2px;line-height:1}
+.cat-pick-del:hover{color:#991b1b}
 .search-bar .bulk-info{padding:3px 10px;border-radius:999px;background:#fbefef;border:1px solid #e8c9ca;color:#8C2326;font-weight:600;white-space:nowrap;flex-shrink:0}
 .search-bar .bulk-info:empty{display:none}
 /* A list's table is as wide as its text: no stretched gaps, wrapping before it scrolls sideways. */
@@ -658,6 +669,7 @@ td>.reorder-flag{margin-left:0;flex-direction:column;align-items:flex-start;gap:
             <option value="qty-desc">Sort: Qty high to low</option>
             <option value="qty-asc">Sort: Qty low to high</option>
           </select>
+          <div class="cat-pick" id="in-cat-pick"></div>
         </div>
         <div class="st-group">
           <span class="lbl">From</span>
@@ -698,6 +710,7 @@ td>.reorder-flag{margin-left:0;flex-direction:column;align-items:flex-start;gap:
             <option value="qty-desc">Sort: Qty high to low</option>
             <option value="qty-asc">Sort: Qty low to high</option>
           </select>
+          <div class="cat-pick" id="out-cat-pick"></div>
         </div>
         <div class="st-group">
           <span class="lbl">From</span>
@@ -4762,7 +4775,45 @@ function inDateRange(date,from,to){
   return true;
 }
 
+// Category list of Stock In / Stock Out (Job Tracker, 2026-11-24): pick one to see only its entries; a category with no
+// items gets a red bin to remove it (Settings row).
+const _catF={in:'',out:''};
+function catItemCount(name){return (state.parts||[]).filter(p=>p.category===name).length;}
+function renderCatPick(k){
+  const box=document.getElementById(k+'-cat-pick');if(!box)return;
+  const open=!!box.querySelector('.cat-pick-list');
+  box.innerHTML='<button type="button" class="cat-pick-btn" title="Show one category" onclick="toggleCatPick(\''+k+'\',event)">'+_escHtml(_catF[k]||'All categories')+' ▾</button>';
+  if(open)toggleCatPick(k);
+}
+function toggleCatPick(k,ev){
+  if(ev)ev.stopPropagation();
+  const box=document.getElementById(k+'-cat-pick');if(!box)return;
+  const had=box.querySelector('.cat-pick-list');
+  if(had&&ev){had.remove();return;}
+  if(had)had.remove();
+  const cats=[...(state.categories||[])].sort((a,b)=>a.localeCompare(b));
+  const canDel=canStoreSettings();
+  const row=(name,label,n)=>'<div class="cat-pick-row'+((_catF[k]||'')===name?' on':'')+'" onclick="pickCat(\''+k+'\',this.dataset.c)" data-c="'+_escHtml(name)+'"><span>'+_escHtml(label)+'</span>'
+    +(n==null?'':'<span class="n">'+n+' item'+(n===1?'':'s')+'</span>')
+    +(n===0&&canDel?'<button type="button" class="cat-pick-del" title="Remove this category (it has no items)" onclick="event.stopPropagation();delCatPick(\''+k+'\',this.parentNode.dataset.c)">🗑</button>':'')+'</div>';
+  const list=document.createElement('div');
+  list.className='cat-pick-list';
+  list.innerHTML=row('','All categories',null)+cats.map(c=>row(c,c,catItemCount(c))).join('');
+  box.appendChild(list);
+}
+function pickCat(k,name){
+  _catF[k]=name||'';
+  const box=document.getElementById(k+'-cat-pick');const l=box&&box.querySelector('.cat-pick-list');if(l)l.remove();
+  if(k==='in')renderStockIn();else renderStockOut();
+}
+async function delCatPick(k,name){
+  await deleteCat(name);
+  if(_catF[k]===name)_catF[k]='';
+  renderCatPick(k);toggleCatPick(k);
+}
+document.addEventListener('click',e=>{if(!e.target.closest||!e.target.closest('.cat-pick'))document.querySelectorAll('.cat-pick-list').forEach(l=>l.remove());});
 function clearLogFilters(prefix){
+  if(prefix==='in'||prefix==='out')_catF[prefix]='';
   const s=document.getElementById(prefix+'-search');if(s)s.value='';
   const f=document.getElementById(prefix+'-date-from');if(f)f.value='';
   const t=document.getElementById(prefix+'-date-to');if(t)t.value='';
@@ -4777,14 +4828,14 @@ function renderStockIn(){
   const dTo=(document.getElementById('in-date-to')||{value:''}).value;
   const txns=[...state.transactions].filter(t=>t.type==='in').sort((a,b)=>b.id-a.id).filter(t=>{
     const ms=searchHit(search,getPartName(t.partId),getPartCat(t.partId),t.ref,t.notes,t.challanNo,t.poNo,t.invoiceNo);
-    return ms&&inDateRange(t.date,dFrom,dTo);
+    return ms&&inDateRange(t.date,dFrom,dTo)&&(!_catF.in||getPartCat(t.partId)===_catF.in);
   });
   sortTxns(txns,(document.getElementById('in-sort')||{value:''}).value);
   stChips('in-chips',[[stCount(txns.length,state.transactions.filter(t=>t.type==='in').length),'Entries']]);
   const bal=computeBalances();
   const tb=document.getElementById('stockin-table');
   if(!tb)return;
-  if(!txns.length){tb.innerHTML='<tr><td colspan="14"><div class="empty"><i class="ti ti-search"></i>No matching stock in records</div></td></tr>';updateBulkInfo('in');return;}
+  if(!txns.length){tb.innerHTML='<tr><td colspan="14"><div class="empty"><i class="ti ti-search"></i>No matching stock in records</div></td></tr>';updateBulkInfo('in');renderCatPick('in');return;}
   tb.innerHTML=txns.map((t,i)=>`<tr class="${isGone(t.partId)?'gone-row':''}">
     <td class="no-print"><input type="checkbox" class="txn-chk-in" data-id="${t.id}" onchange="updateBulkInfo('in')"></td>
     <td style="color:#bbb;font-size:12px">${i+1}</td>
@@ -4800,6 +4851,7 @@ function renderStockIn(){
     <td class="no-print" style="white-space:nowrap">${isInks()&&t.type==='in'?`<button class="btn btn-sm" title="Print the sticker for this stock in" onclick="openSticker(${t.id})"><i class="ti ti-printer"></i> Sticker</button> `:''}<span class="write-only rev-btn"><button class="btn btn-sm" style="color:#854F0B" title="Reverse this entry — puts the quantity back" onclick="deleteTxn(${t.id})"><i class="ti ti-arrow-back-up"></i> Reverse</button></span>${canDelete()?` <button class="btn btn-sm btn-restricted" title="Delete this record from history - the quantity on hand is NOT changed" onclick="bulkDeleteTxns('in',true,[${t.id}])"><i class="ti ti-trash"></i> Delete</button>`:''}</td>
   </tr>`).join('');
   updateBulkInfo('in');
+  renderCatPick('in');
 }
 
 function renderStockOut(){
@@ -4808,14 +4860,14 @@ function renderStockOut(){
   const dTo=(document.getElementById('out-date-to')||{value:''}).value;
   const txns=[...state.transactions].filter(t=>t.type==='out').sort((a,b)=>b.id-a.id).filter(t=>{
     const ms=searchHit(search,getPartName(t.partId),getPartCat(t.partId),t.issuedTo,t.purpose,t.challanNo);
-    return ms&&inDateRange(t.date,dFrom,dTo);
+    return ms&&inDateRange(t.date,dFrom,dTo)&&(!_catF.out||getPartCat(t.partId)===_catF.out);
   });
   sortTxns(txns,(document.getElementById('out-sort')||{value:''}).value);
   stChips('out-chips',[[stCount(txns.length,state.transactions.filter(t=>t.type==='out').length),'Entries']]);
   const bal=computeBalances();
   const tb=document.getElementById('stockout-table');
   if(!tb)return;
-  if(!txns.length){tb.innerHTML='<tr><td colspan="14"><div class="empty"><i class="ti ti-search"></i>No matching stock out records</div></td></tr>';updateBulkInfo('out');return;}
+  if(!txns.length){tb.innerHTML='<tr><td colspan="14"><div class="empty"><i class="ti ti-search"></i>No matching stock out records</div></td></tr>';updateBulkInfo('out');renderCatPick('out');return;}
   tb.innerHTML=txns.map((t,i)=>`<tr class="${isGone(t.partId)?'gone-row':''}">
     <td class="no-print"><input type="checkbox" class="txn-chk-out" data-id="${t.id}" onchange="updateBulkInfo('out')"></td>
     <td style="color:#bbb;font-size:12px">${i+1}</td>
@@ -4831,6 +4883,7 @@ function renderStockOut(){
     <td class="no-print" style="white-space:nowrap">${isInks()&&t.type==='in'?`<button class="btn btn-sm" title="Print the sticker for this stock in" onclick="openSticker(${t.id})"><i class="ti ti-printer"></i> Sticker</button> `:''}<span class="write-only rev-btn"><button class="btn btn-sm" style="color:#854F0B" title="Reverse this entry — puts the quantity back" onclick="deleteTxn(${t.id})"><i class="ti ti-arrow-back-up"></i> Reverse</button></span>${canDelete()?` <button class="btn btn-sm btn-restricted" title="Delete this record from history - the quantity on hand is NOT changed" onclick="bulkDeleteTxns('out',true,[${t.id}])"><i class="ti ti-trash"></i> Delete</button>`:''}</td>
   </tr>`).join('');
   updateBulkInfo('out');
+  renderCatPick('out');
 }
 
 function renderIssuance(){
