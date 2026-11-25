@@ -1790,6 +1790,10 @@
   .job-card.pm-checked, .job-tile.pm-checked { background: #ffe1e1 !important; border-color: #ff1a1a !important; box-shadow: inset 5px 0 0 #ff1a1a, 0 0 0 1px #ff1a1a; }
   .pm-chk-toggle { display: inline-flex; align-items: center; gap: 4px; margin-top: 3px; padding: 1px 8px; border: 1.5px solid #ff1a1a; border-radius: 999px; background: #fff; color: #e10600; font-size: 11.5px; font-weight: 800; cursor: pointer; white-space: nowrap; font-family: inherit; }
   .pm-chk-toggle.is-on { background: #ff1a1a; color: #fff; }
+  /* A figure on a Jobs top card that filters the list (owner, 2026-11-25). */
+  .stat-pick { display: inline-flex; align-items: center; padding: 0 7px; margin: 0 -7px; border: 1.5px dashed transparent; border-radius: 999px; background: none; color: var(--pick-c); font: inherit; font-weight: inherit; cursor: pointer; white-space: nowrap; }
+  .stat-pick:hover { border-color: var(--pick-c); }
+  .stat-pick.is-on { background: var(--pick-c); border-color: var(--pick-c); border-style: solid; color: #fff; margin: 0; }
   .mil-split { display: inline-flex; align-items: stretch; border: 1.5px solid #6d28d9; border-radius: 7px; overflow: hidden; }
   #mil-filter-toggle, #create-group-btn {
     font-weight: 600; font-size: 12.5px; padding: 5px 10px; font-family: var(--font); cursor: pointer;
@@ -5155,6 +5159,24 @@ let filterBatch = '';  // Batch No. box: the job card's Batch No. or any deliver
 let filterShadeCard = '';
 let filterLowIssue = false;   // Low Issuance button (owner, 2026-11-18)
 let filterPmChecked = false;   // Ready tile's Checked toggle (owner, 2026-11-18): only PM-checked jobs
+// The figures on the top cards are filters too (owner, 2026-11-25), like Checked: Pending Stock, In Progress, Ready
+// (normal / MIL), Partial Delivered (normal / MIL). Click again to show everything.
+let filterStatCard = '';
+function statCardPass(j, k) {
+  if (k === 'pending') return j.issuance_status === 'pending';
+  if (k === 'active') return jobInView(j, 'active');
+  if (k === 'ready') return inReadyTile(j) && !isMilJobRow(j) && !isPmChecked(j);
+  if (k === 'ready-mil') return inReadyTile(j) && isMilJobRow(j) && !isPmChecked(j);
+  if (k === 'partial') return isPartialDelivery(j) && !isMilJobRow(j);
+  if (k === 'partial-mil') return isPartialDelivery(j) && isMilJobRow(j);
+  return true;
+}
+function toggleStatCard(k) {
+  filterStatCard = filterStatCard === k ? '' : k;
+  if (filterStatCard) filterPmChecked = false;
+  renderStats();
+  if (filterStatCard && view !== 'all') setView('all'); else renderJobs();
+}
 let filterMil = false;   // MIL split button's left half (owner, 2026-11-17): only MIL jobs
 let filterGroup = '';
 let filterDateRange = '';
@@ -5480,6 +5502,7 @@ async function togglePmCheck(id, on) {
 }
 function togglePmCheckedFilter() {
   filterPmChecked = !filterPmChecked;
+  if (filterPmChecked) filterStatCard = '';   // one card filter at a time
   renderStats();
   if (filterPmChecked && view !== 'all') setView('all'); else renderJobs();
 }
@@ -10395,6 +10418,7 @@ function jobPassesFilters(j) {
   if (filterShadeCard === 'hide' &&  j.is_shade_card) return false;
   if (filterMil && !(j.stock_group_name || j.group_job_id)) return false;
   if (filterPmChecked && !isPmChecked(j)) return false;
+  if (filterStatCard && !statCardPass(j, filterStatCard)) return false;
   if (filterLowIssue && !lowIssueActive(j)) return false;
   if (filterOverIssue && !hasOverIssuePending(j)) return false;
   if (filterMachine && j.machine !== filterMachine) return false;
@@ -10686,10 +10710,16 @@ function renderStats() {
   // Daily Cartons (Printing started today) reuses the same number the
   // inventory dashboard computes — share dailyStats so we don't fetch twice.
   const cartonsCell = dailyStats.loaded ? dailyStats.cartons.toLocaleString() : '—';
+  // Partly delivered (owner, 2026-11-25): normal and MIL apart, with the cartons still to ship.
+  const partialLeft = j => Math.max(0, (deliveryTargetCartons(j) || 0) - totalDeliveredCartons(j));
+  const pd = jobs.filter(j => isPartialDelivery(j) && !isMilJobRow(j)), pdMil = jobs.filter(j => isPartialDelivery(j) && isMilJobRow(j));
+  // A figure on a card is a filter (owner, 2026-11-25) - like ✓ Checked; click again for everything.
+  const pick = (k, html, title, color) => `<button type="button" class="stat-pick${filterStatCard === k ? ' is-on' : ''}" style="--pick-c:${color || '#7a1f1f'};" onclick="toggleStatCard('${k}')" title="${filterStatCard === k ? 'Showing only these - click to show everything' : esc(title) + ' - click to show only them'}">${html}</button>`;
   document.getElementById('stats-row').innerHTML = [
-    stat('Pending Stock',          s.pending, s.pending>0?'stock-warn':''),
-    stat('In Progress',            s.active),
-    stat('Ready to Deliver',        `${s.storage} · ${s.storageQty.toLocaleString()}${s.milStorage ? `<div style="font-size:12px;font-weight:700;color:#7c3aed;margin-top:2px;white-space:nowrap;">MIL ${s.milStorage} · ${s.milStorageQty.toLocaleString()}</div>` : ''}<div><button type="button" class="pm-chk-toggle${filterPmChecked ? ' is-on' : ''}" onclick="togglePmCheckedFilter()" title="${filterPmChecked ? 'Showing only the jobs the PM checked - click to show all' : 'Jobs the PM checked (Ready / Partial Ready) - click to show only them'}">&#10003; Checked ${s.checked} · ${s.checkedQty.toLocaleString()}</button></div>`),
+    // Pending Stock with In Progress under it (owner, 2026-11-25).
+    stat('Pending Stock', `${pick('pending', s.pending, 'Jobs waiting for their stock', s.pending > 0 ? '#b45309' : '#7a1f1f')}<div style="font-size:12px;font-weight:700;margin-top:3px;white-space:nowrap;color:var(--text2);">In Progress ${pick('active', s.active, 'Jobs in production', '#1d4ed8')}</div>`, s.pending>0?'stock-warn':''),
+    stat('Partial Delivered', `${pick('partial', `${pd.length} · ${pd.reduce((a, j) => a + partialLeft(j), 0).toLocaleString()}`, 'Partly delivered jobs (cartons still to ship)', '#c2410c')}${pdMil.length ? `<div style="font-size:12px;font-weight:700;margin-top:3px;white-space:nowrap;">${pick('partial-mil', `MIL ${pdMil.length} · ${pdMil.reduce((a, j) => a + partialLeft(j), 0).toLocaleString()}`, 'Partly delivered MIL jobs', '#7c3aed')}</div>` : ''}`),
+    stat('Ready to Deliver',        `${pick('ready', `${s.storage} · ${s.storageQty.toLocaleString()}`, 'Jobs ready to deliver (not MIL, not checked)')}${s.milStorage ? `<div style="font-size:12px;font-weight:700;margin-top:2px;white-space:nowrap;">${pick('ready-mil', `MIL ${s.milStorage} · ${s.milStorageQty.toLocaleString()}`, 'MIL jobs ready to deliver (not checked)', '#7c3aed')}</div>` : ''}<div><button type="button" class="pm-chk-toggle${filterPmChecked ? ' is-on' : ''}" onclick="togglePmCheckedFilter()" title="${filterPmChecked ? 'Showing only the jobs the PM checked - click to show all' : 'Jobs the PM checked (Ready / Partial Ready) - click to show only them'}">&#10003; Checked ${s.checked} · ${s.checkedQty.toLocaleString()}</button></div>`),
     stat('Daily Printed UC Qty',  cartonsCell),
   ].join('');
 }
@@ -10951,7 +10981,7 @@ function renderJobsCompact() {
   // number: searching E-667 drew the group tile under, say, E-640, so the
   // job asked for never appeared and read as missing. A search overrides
   // the collapsing and shows the matched jobs as themselves.
-  const searching = jobsSearchActive() || filterPmChecked;
+  const searching = jobsSearchActive() || filterPmChecked || !!filterStatCard;
   jobsListDraw(el, elsewhere, filtered, j => {
     if (j.stock_group_name) {
       if (seenGroupsC.has(j.stock_group_name)) return '';
@@ -11262,7 +11292,7 @@ function renderJobsCards() {
     return;
   }
   const seenGroups = new Set();
-  const searching = jobsSearchActive() || filterPmChecked;   // see renderJobsCompact
+  const searching = jobsSearchActive() || filterPmChecked || !!filterStatCard;   // see renderJobsCompact
   el.innerHTML = elsewhere + filtered.map(j => {
     if (j.stock_group_name) {
       if (seenGroups.has(j.stock_group_name)) return '';
@@ -12551,7 +12581,7 @@ function goToJobTile(id) {
   closeModal();
   jobsMilFocus = null; jobsJobFocus = null;
   filterShadeCard = ''; filterMil = false;
-  try { filterLowIssue = false; filterOverIssue = false; filterPmChecked = false; } catch (e) { /* older page */ }
+  try { filterLowIssue = false; filterOverIssue = false; filterPmChecked = false; filterStatCard = ''; } catch (e) { /* older page */ }
   filterText = String(id);
   const box = document.getElementById('search-input');
   if (box) box.value = String(id);
