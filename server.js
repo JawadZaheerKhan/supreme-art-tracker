@@ -11300,6 +11300,14 @@ app.post('/api/jobs/:id/station-deliver', requireStationUser, requirePermission(
     const persons = Array.isArray(op.persons) ? op.persons : [];
     const want = String(req.body.person_name || '').trim();
     const person = (want && persons.find(p => p && String(p.name || '').trim() === want)) ? want : op.name;
+    // The Dispatch Incharge records only what the PM filled and saved (owner, 2026-11-25) - whatever the request
+    // carries, the delivery is the PM's saved details; nothing saved yet = nothing to record.
+    const id = parseInt(req.params.id, 10);
+    const [jr] = await sql`SELECT delivery_draft FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+    if (!jr) return res.status(404).json({ error: 'Job not found' });
+    const d = (jr.delivery_draft && typeof jr.delivery_draft === 'object') ? jr.delivery_draft : {};
+    if (!String(d.cartons ?? '').trim()) return res.status(400).json({ error: 'The PM has not filled this delivery yet - ask the PM to fill it in and press Save.' });
+    req.body = { cartons: d.cartons, date: d.date || '', notes: d.invoice_no || '', po_no: d.po_no || '', batch_no: d.batch_no || '', cartons_packets: d.cartons_packets ?? '' };
     return recordDeliveryHandler(req, res, { canPrice: false, by: `${person} (${op.name})` });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });

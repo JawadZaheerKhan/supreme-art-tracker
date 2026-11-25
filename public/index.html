@@ -1785,6 +1785,7 @@
   .pm-check input:disabled { cursor: default; }
   .pm-check.is-on { background: #ff1a1a; border-color: #ff1a1a; color: #fff; }
   .pm-check.is-on input { accent-color: #b30000; }
+  .deliv-ro input { background: #f3f4f6 !important; color: #374151; cursor: not-allowed; pointer-events: none; }
   .di-check { display: inline-flex; align-items: center; padding: 2px 9px; border: 1.5px solid #16a34a; border-radius: 999px; font-size: 11px; font-weight: 800; color: #fff; background: #16a34a; white-space: nowrap; line-height: 1.4; margin-right: 4px; cursor: default; }
   .job-card.pm-checked, .job-tile.pm-checked { background: #ffe1e1 !important; border-color: #ff1a1a !important; box-shadow: inset 5px 0 0 #ff1a1a, 0 0 0 1px #ff1a1a; }
   .pm-chk-toggle { display: inline-flex; align-items: center; gap: 4px; margin-top: 3px; padding: 1px 8px; border: 1.5px solid #ff1a1a; border-radius: 999px; background: #fff; color: #e10600; font-size: 11.5px; font-weight: 800; cursor: pointer; white-space: nowrap; font-family: inherit; }
@@ -35130,35 +35131,41 @@ function deliveriesSection(j, opts) {
   // Cartons/Packets belongs to the delivery, not to invoicing: it is what went
   // out, and whoever records the shipment is the one who knows it.
   const cartonsPackets = cartonsPacketsFor(j);
+  // The Dispatch Incharge only records what the PM filled and saved (owner, 2026-11-25): every box read-only - for a
+  // change he tells the PM. Nothing saved by the PM yet: no form, only the note.
+  const roAttr = stationMode ? ' readonly tabindex="-1"' : '';
+  const pmFilled = !stationMode || String((_draft && _draft.cartons) ?? '').trim() !== '';
   // The PM's Save (owner, 2026-11-25): the details typed are saved - nothing recorded - and the job gets PM ✓.
   const pmSaveBtn = (!managerMode && !stationMode && typeof canPmCheck === 'function' && canPmCheck())
     ? `<button type="button" class="btn" style="padding:8px 14px;white-space:nowrap;font-weight:700;border-color:#7a1f1f;color:#7a1f1f;" onclick="savePmDeliveryDetails(${j.id})" title="Save these delivery details and tick PM ✓ - nothing is recorded">Save</button>`
     : '';
-  const addForm = canAddDelivery
-    ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;align-items:end;">
+  const addForm = (canAddDelivery && !pmFilled)
+    ? `<div style="margin-top:10px;padding:10px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:13px;font-weight:600;">The PM has not filled this delivery yet - ask the PM to fill it in and press Save; then it can be recorded here.</div>`
+    : canAddDelivery
+    ? `<div class="deliv-add${stationMode ? ' deliv-ro' : ''}" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;align-items:end;">
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${countLabel} *</label>
-          <input type="number" id="deliv-cartons" min="1" step="any" value="${esc(String(draftVal('cartons', cartonsPrefill)))}"${draftSave('cartons')} placeholder="e.g. 50" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          <input type="number" id="deliv-cartons"${roAttr} min="1" step="any" value="${esc(String(draftVal('cartons', cartonsPrefill)))}"${draftSave('cartons')} placeholder="e.g. 50" title="Pre-filled from Ready Cartons Qty minus what's already shipped — edit if you're shipping a different amount." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         ${isShadeCard ? '' : `<div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Carton Shipper</label>
-          <input type="number" id="deliv-cartons-packets" min="0" step="any" value="${esc(String(draftVal('cartons_packets', shipperPrefill(j))))}"${draftSave('cartons_packets')} title="This shipment's own Carton Shipper (cartons). Starts at what is left: Carton Shipper + Loose Carton Shipper recorded at the Station, minus what earlier shipments took." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
+          <input type="number" id="deliv-cartons-packets"${roAttr} min="0" step="any" value="${esc(String(draftVal('cartons_packets', shipperPrefill(j))))}"${draftSave('cartons_packets')} title="This shipment's own Carton Shipper (cartons). Starts at what is left: Carton Shipper + Loose Carton Shipper recorded at the Station, minus what earlier shipments took." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-weight:600;">
         </div>`}
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Date *</label>
-          <input type="date" id="deliv-date" value="${esc(String(draftVal('date', localDateISO())))}"${draftSave('date')} style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          <input type="date" id="deliv-date"${roAttr} value="${esc(String(draftVal('date', localDateISO())))}"${draftSave('date')} style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         ${isShadeCard ? '' : `<div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">PO No.</label>
-          <input type="text" id="deliv-po" value="${esc(String(draftVal('po_no', j.ref || '')))}"${draftSave('po_no')} placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          <input type="text" id="deliv-po"${roAttr} value="${esc(String(draftVal('po_no', j.ref || '')))}"${draftSave('po_no')} placeholder="e.g. PO-042" title="Pre-filled from the job card's PO No. — edit if this shipment goes on a different PO." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">Batch No.</label>
-          <input type="text" id="deliv-batch" value="${esc(String(draftVal('batch_no', j.bno || '')))}"${draftSave('batch_no')} placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
+          <input type="text" id="deliv-batch"${roAttr} value="${esc(String(draftVal('batch_no', j.bno || '')))}"${draftSave('batch_no')} placeholder="e.g. B-11" title="Pre-filled from the job card's Batch No. — edit if this shipment carries a different batch." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">
         </div>`}
         <div style="min-width:0;">
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.'}</label>
-          <input type="text" id="deliv-notes" value="${esc(String(isShadeCard ? '' : draftVal('invoice_no', '')))}"${isShadeCard ? '' : draftSave('invoice_no')} ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : 'e.g. INV-042'}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
+          <input type="text" id="deliv-notes"${roAttr} value="${esc(String(isShadeCard ? '' : draftVal('invoice_no', '')))}"${isShadeCard ? '' : draftSave('invoice_no')} ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : 'e.g. INV-042'}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
         </div>
         <div style="min-width:0;display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
           ${canRecordNow
@@ -44410,7 +44417,10 @@ function isOfficeChecked(j) {
   return n <= (+c.n || 0) && totalDeliveredCartons(j) <= (+c.del || 0);   // a delivery after the check asks again
 }
 function stationReadyTabJobs() {
+  // A job with a delivery recorded is off the list (owner, 2026-11-25: "when a job gets delivered the notification
+  // should also get removed") - also one shipped within its tolerance that still sits at Ready.
   return (jobs || []).filter(j => j && !j.deleted_at && !isBlocked(j) && !isNewJob(j) && pmCheckEligible(j) && !isOfficeChecked(j)
+      && !(Array.isArray(j.deliveries) && j.deliveries.length)
       && (isPartialReady(j) || readyNotiAt(j) >= READY_NOTI_SINCE))
     .sort((a, b) => (readyNotiAt(b) - readyNotiAt(a)) || (b.id - a.id));
 }
@@ -44575,6 +44585,7 @@ function stationQueueHtml() {
         <div class="sj-name">${esc(j.name)} ${pendingBadge}${peekBadge}${noteBadge}${stIdx === STAGES.length - 2 ? diCheckHtml(j) : ''}</div>
         <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}${j.sheets?' · '+esc(j.sheets)+' sheets':''}</div>
         ${finishBadges ? `<div class="sj-finishes" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;">${finishBadges}</div>` : ''}
+        ${stIdx === STAGES.length - 2 ? stationDiDetailsHtml(j) : ''}
       </div>
       <div class="sj-go">›</div>
       ${readyRow}
@@ -44915,6 +44926,33 @@ function stationManagerPipelineHtml(j) {
     return `${i>0?'<span class="arrow">›</span>':''}${pill}`;
   }).join('');
 }
+// The Dispatch Incharge's tile (owner, 2026-11-25): what the PM sees on the Jobs tab - DELIVERED / READY / IN PROCESS,
+// PO Qty, PO No., Ready to Deliver Qty and the shipments so far - so he knows why a job is still at Ready. No prices.
+function stationDiDetailsHtml(j) {
+  const num = v => parseFloat(String(v || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const booked = num(j.qty);
+  const shipped = totalDeliveredCartons(j) || num(j.delqty);
+  const chip = (txt, bg) => `<span class="badge" style="background:${bg};color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">${txt}</span>`;
+  let badges = '';
+  if (shipped > 0) badges = partialSegmentsHtml(j, booked || num(j.cartonqty), shipped);
+  else if ((j.stage_index || 0) >= STAGES.length - 2) { const r = readyCartonsTotal(j); badges = chip(`&#128230; READY TO DELIVER${r ? ' - ' + r.toLocaleString() : ''}`, '#16a34a'); }
+  else if (isPartialReady(j)) badges = chip(`READY - ${earlyReadyTotal(j).toLocaleString()}`, '#16a34a');
+  const p = j.particulars || {};
+  const rc = String((p.delivered_cartons_qty || {}).quantity || '').trim() || (readyCartonsTotal(j) ? String(readyCartonsTotal(j)) : '');
+  const rp = String((p.ready_packets_qty || {}).quantity || '').trim();
+  const readyTxt = rp ? `${rc} | ${rp} Carton Shipper` : rc;
+  const mil = (j.stock_group_name && typeof milTileShipmentFacts === 'function') ? milTileShipmentFacts(j) : null;
+  const facts = [
+    mil ? `<b>PO Qty:</b> ${mil.qtyLine} pcs` : (j.qty ? `<b>PO Qty:</b> ${esc(j.qty)} pcs` : ''),
+    mil ? `<b>PO No.:</b> ${mil.poLine}` : (j.ref ? `<b>PO No.:</b> ${esc(j.ref)}` : ''),
+    readyTxt ? `<b>Ready to Deliver Qty:</b> ${esc(readyTxt)}` : '',
+  ].filter(Boolean);
+  const list = Array.isArray(j.deliveries) ? j.deliveries : [];
+  const ships = list.slice(-4).map(d => `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><b>${esc(d.date || '')}</b> &middot; ${esc(String(d.cartons || ''))} unit cartons${d.po_no ? ' &middot; PO ' + esc(d.po_no) : ''}${deliveryChallanText(d) ? ' &middot; Invoice ' + esc(deliveryChallanText(d)) : ''}</div>`).join('');
+  return (badges ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">${badges}</div>` : '')
+    + (facts.length ? `<div style="margin-top:5px;font-size:13px;display:flex;flex-wrap:wrap;gap:4px 14px;color:var(--text);">${facts.map(f => `<span>${f}</span>`).join('')}</div>` : '')
+    + (ships ? `<div style="margin-top:5px;padding:5px 8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;font-size:12px;color:#14532d;">${list.length > 4 ? `<div style="color:var(--text2);">${list.length} shipments - the last 4:</div>` : ''}${ships}</div>` : '');
+}
 // Ready to Deliver station (owner, 2026-11-24): the job's stage pills; only Delivered can be tapped - it sends a job
 // that is at Ready to Deliver on, the same as the station's own Done.
 function stationReadyPipelineHtml(j) {
@@ -44961,6 +44999,7 @@ async function recordDeliveryStation(jobId) {
   const cartonsN = parseFloat(cartons);
   if (!Number.isFinite(cartonsN) || cartonsN <= 0) { await alertDialog({ title: 'Enter delivery cartons', kind: 'warn' }); return; }
   if (!date) { await alertDialog({ title: 'Pick a delivery date', kind: 'warn' }); return; }
+  // The server records the PM's saved details (these boxes are read-only and only show them).
   const body = { pin: stationOperator.pin, cartons, date, notes: val('deliv-notes'), po_no: val('deliv-po'), batch_no: val('deliv-batch'), cartons_packets: val('deliv-cartons-packets') };
   if (stationPerson && stationPerson.name) body.person_name = stationPerson.name;
   showSaving(true);
