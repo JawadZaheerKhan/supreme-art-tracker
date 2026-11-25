@@ -1785,6 +1785,7 @@
   .pm-check input:disabled { cursor: default; }
   .pm-check.is-on { background: #ff1a1a; border-color: #ff1a1a; color: #fff; }
   .pm-check.is-on input { accent-color: #b30000; }
+  .di-check { display: inline-flex; align-items: center; padding: 2px 9px; border: 1.5px solid #16a34a; border-radius: 999px; font-size: 11px; font-weight: 800; color: #fff; background: #16a34a; white-space: nowrap; line-height: 1.4; margin-right: 4px; cursor: default; }
   .job-card.pm-checked, .job-tile.pm-checked { background: #ffe1e1 !important; border-color: #ff1a1a !important; box-shadow: inset 5px 0 0 #ff1a1a, 0 0 0 1px #ff1a1a; }
   .pm-chk-toggle { display: inline-flex; align-items: center; gap: 4px; margin-top: 3px; padding: 1px 8px; border: 1.5px solid #ff1a1a; border-radius: 999px; background: #fff; color: #e10600; font-size: 11.5px; font-weight: 800; cursor: pointer; white-space: nowrap; font-family: inherit; }
   .pm-chk-toggle.is-on { background: #ff1a1a; color: #fff; }
@@ -5452,6 +5453,13 @@ function isPmChecked(j) {
   return n <= (+c.n || 0) && totalDeliveredCartons(j) <= (+c.del || 0);
 }
 function canPmCheck() { return isSuperAdmin() || hasPerm('job_btn_pm_check'); }
+// DI check (owner, 2026-11-25): the Dispatch Incharge (the Ready to Deliver station) checked the Ready qty with his
+// PIN and saved it - a green sign beside PM ✓, so the PM knows. Not a box: only the station sets it.
+function diCheckHtml(j) {
+  if (typeof isOfficeChecked !== 'function' || !isOfficeChecked(j)) return '';
+  const c = j.office_check || {};
+  return `<span class="di-check" title="Checked by the Dispatch Incharge${c.by ? ' - ' + esc(c.by) : ''}${c.at ? ' · ' + esc(fmtDMYT12(c.at)) : ''}" onclick="event.stopPropagation()">DI &#10003;</span>`;
+}
 function pmCheckBoxHtml(j) {
   if (!pmCheckEligible(j) || !seeBtn('job_btn_pm_check')) return '';
   const on = isPmChecked(j), can = canPmCheck(), c = j.pm_check || {};
@@ -11158,7 +11166,7 @@ function renderJobRowCompact(j, opts) {
             </span>
             ${overDeliveredMarkHtml(j)}
             ${badge}
-            ${isGroupTile ? '' : pmCheckBoxHtml(j)}
+            ${isGroupTile ? '' : diCheckHtml(j) + pmCheckBoxHtml(j)}
             ${linkedJobBadgeHtml(j, false)}
             ${paperWaivedBadgeHtml(j)}
             ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -11768,7 +11776,7 @@ function renderJobCard(j, opts) {
              ${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}
            </span>${overDeliveredMarkHtml(j)}`}
       ${badge}
-      ${clientPreview || isGroupTile ? '' : pmCheckBoxHtml(j)}
+      ${clientPreview || isGroupTile ? '' : diCheckHtml(j) + pmCheckBoxHtml(j)}
       ${clientPreview ? '' : linkedJobBadgeHtml(j, false)}
       ${clientPreview ? '' : paperWaivedBadgeHtml(j)}
       ${priNorm === 'Urgent' ? '<span class="badge badge-urgent">URGENT</span>' : ''}
@@ -44559,7 +44567,7 @@ function stationQueueHtml() {
         ${j.is_shade_card ? '<span class="shade-card-sign">&#127912; Shade Card</span>' : ''}
       </div>
       <div class="sj-main">
-        <div class="sj-name">${esc(j.name)} ${pendingBadge}${peekBadge}${noteBadge}</div>
+        <div class="sj-name">${esc(j.name)} ${pendingBadge}${peekBadge}${noteBadge}${stIdx === STAGES.length - 2 ? diCheckHtml(j) : ''}</div>
         <div class="sj-sub">${j.client?esc(j.client):''}${j.size?' · '+esc(j.size):''}${j.sheets?' · '+esc(j.sheets)+' sheets':''}</div>
         ${finishBadges ? `<div class="sj-finishes" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;">${finishBadges}</div>` : ''}
       </div>
