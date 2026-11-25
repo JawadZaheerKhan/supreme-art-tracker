@@ -35122,6 +35122,10 @@ function deliveriesSection(j, opts) {
   // Cartons/Packets belongs to the delivery, not to invoicing: it is what went
   // out, and whoever records the shipment is the one who knows it.
   const cartonsPackets = cartonsPacketsFor(j);
+  // The PM's Save (owner, 2026-11-25): the details typed are saved - nothing recorded - and the job gets PM ✓.
+  const pmSaveBtn = (!managerMode && !stationMode && typeof canPmCheck === 'function' && canPmCheck())
+    ? `<button type="button" class="btn" style="padding:8px 14px;white-space:nowrap;font-weight:700;border-color:#7a1f1f;color:#7a1f1f;" onclick="savePmDeliveryDetails(${j.id})" title="Save these delivery details and tick PM ✓ - nothing is recorded">Save</button>`
+    : '';
   const addForm = canAddDelivery
     ? `<div class="deliv-add" style="margin-top:10px;padding:10px 12px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;align-items:end;">
         <div style="min-width:0;">
@@ -35148,10 +35152,11 @@ function deliveriesSection(j, opts) {
           <label style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:2px;">${isShadeCard ? 'Delivery Challan (auto)' : 'Invoice No.'}</label>
           <input type="text" id="deliv-notes" value="${esc(String(isShadeCard ? '' : draftVal('invoice_no', '')))}"${isShadeCard ? '' : draftSave('invoice_no')} ${isShadeCard ? 'readonly' : ''} placeholder="${isShadeCard ? 'Assigned on save…' : 'e.g. INV-042'}" title="${isShadeCard ? 'Always auto-numbered against the shop\'s single DC register (DC-01, DC-02, …) — not editable. The same number to write into the physical DC register.' : ''}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;${isShadeCard ? 'background:#f3f4f6;color:var(--text2);cursor:not-allowed;' : ''}">
         </div>
-        <div style="min-width:0;">
+        <div style="min-width:0;display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
           ${canRecordNow
             ? `<button type="button" class="btn btn-primary" style="background:#facc15;border-color:#eab308;color:#422006;padding:8px 14px;white-space:nowrap;" onclick="${managerMode ? `recordDeliveryManager(${j.id})` : stationMode ? `recordDeliveryStation(${j.id})` : `recordDelivery(${j.id})`}">+ Record Delivery</button>`
             : `<div style="font-size:11px;color:var(--text2);line-height:1.35;">Saved as you type.<br>Recording the delivery is done by whoever holds that button.</div>`}
+          ${pmSaveBtn}
           <div id="deliv-draft-state" style="font-size:11px;font-weight:700;margin-top:4px;opacity:0;transition:opacity 0.25s;">&nbsp;</div>
         </div>
       </div>${(j.linked_job_id && canRecordNow && !stationMode) ? `<div style="margin-top:8px;">
@@ -37346,6 +37351,28 @@ const DELIVERY_DRAFT_INPUTS = [
   ['deliv-rate',            'rate'],
   ['deliv-tax',             'tax_pct'],
 ];
+// PM: Save beside Record Delivery (owner, 2026-11-25) - the delivery details typed are saved (nothing is recorded)
+// and the job gets PM ✓. The PM check comes only from the PM: this, or the tick on the job.
+async function savePmDeliveryDetails(jobId) {
+  const fields = [['deliv-cartons', 'cartons'], ['deliv-cartons-packets', 'cartons_packets'], ['deliv-date', 'date'], ['deliv-po', 'po_no'], ['deliv-batch', 'batch_no'], ['deliv-notes', 'invoice_no']];
+  showSaving(true);
+  try {
+    for (const [elId, field] of fields) {
+      const el = document.getElementById(elId);
+      if (!el || el.readOnly) continue;
+      const updated = await api('PATCH', `/api/jobs/${jobId}/delivery-draft`, { field, value: el.value });
+      const ix = jobs.findIndex(x => x.id === jobId);
+      if (ix >= 0 && updated) jobs[ix] = updated;
+    }
+    const upd = await api('POST', `/api/jobs/${jobId}/pm-check`, { checked: true });
+    const ix = jobs.findIndex(x => x.id === jobId);
+    if (ix >= 0 && upd) jobs[ix] = { ...jobs[ix], ...upd };
+    flashDeliveryDraftSaved('saved');
+    notify(`Saved · E-${jobId} PM ✓`);
+    renderStats(); renderJobs();
+  } catch (e) { notify('Not saved: ' + e.message); flashDeliveryDraftSaved('failed: ' + e.message); }
+  showSaving(false);
+}
 async function saveDeliveryDraft(jobId, field, value) {
   try {
     const updated = await api('PATCH', `/api/jobs/${jobId}/delivery-draft`, { field, value });
@@ -44359,11 +44386,18 @@ async function stationLoadNotes() {
 }
 
 // Production Office (Ready to Deliver) - the Ready tab (owner, 2026-11-24): the jobs that got Ready or Partial Ready
-// and were not checked yet. Tap one: its Ready to Deliver screen, to write or check the Ready qty and save - saving
-// it there is the PM check, so it leaves the list.
+// and the office has not checked yet. Tap one: its Ready to Deliver screen, to write or check the Ready qty and save -
+// that marks office_check (not the PM check - the PM's alone, owner 2026-11-25), so it leaves the list.
 let stationReadyView = 'jobs';
+function isOfficeChecked(j) {
+  if (!pmCheckEligible(j)) return false;
+  const c = j.office_check;
+  if (!c || !c.at) return false;
+  const n = Array.isArray(j.deliveries) ? j.deliveries.length : 0;
+  return n <= (+c.n || 0) && totalDeliveredCartons(j) <= (+c.del || 0);   // a delivery after the check asks again
+}
 function stationReadyTabJobs() {
-  return (jobs || []).filter(j => j && !j.deleted_at && !isBlocked(j) && !isNewJob(j) && pmCheckEligible(j) && !isPmChecked(j)
+  return (jobs || []).filter(j => j && !j.deleted_at && !isBlocked(j) && !isNewJob(j) && pmCheckEligible(j) && !isOfficeChecked(j)
       && (isPartialReady(j) || readyNotiAt(j) >= READY_NOTI_SINCE))
     .sort((a, b) => (readyNotiAt(b) - readyNotiAt(a)) || (b.id - a.id));
 }

@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-24-station-deliver';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-25-office-check';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1120,6 +1120,9 @@ async function initDb() {
     // PM Check (owner, 2026-11-18): { at, by, via, n, del } - n / del = the job's delivery count and cartons
     // when it was checked; a delivery after that (partial or full) clears it.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS pm_check JSONB`;
+    // The Production Office checked a Ready / Partial Ready job's Ready qty at its station (owner, 2026-11-25) - its
+    // own mark (the Ready tab there); the PM check is the PM's alone.
+    await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS office_check JSONB`;
     // Job warnings (owner, 2026-11-18): { rule: { sig, at, by } } - a warning ignored for the figures it had (sig);
     // it comes back if those figures change.
     await sql`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS warn_ignored JSONB`;
@@ -16528,15 +16531,16 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
        WHERE id = ${id}
        RETURNING *
     `;
-    // The Ready to Deliver station (production office) saving the Ready to Delivery Qty ticks PM Check.
+    // The Ready to Deliver station (production office) saving the Ready to Delivery Qty: the office checked it - its
+    // own mark (its Ready tab). It does NOT tick the PM check any more - the PM checks on his own (owner, 2026-11-25).
     if (!viaJobCard && isPmCheckStation(machine) && Object.prototype.hasOwnProperty.call(particularsPatch, 'delivered_cartons_qty')
         && updated[0] && (updated[0].stage_index || 0) < STAGES.length - 1
         && readyQtyFromParticularsRow((updated[0].particulars || {}).delivered_cartons_qty) > 0) {
       try {
-        const pc = pmCheckValue(updated[0], person.name || operator.name, 'station');
-        const r2 = await sql`UPDATE jobs SET pm_check = ${JSON.stringify(pc)} WHERE id = ${id} RETURNING *`;
+        const oc = pmCheckValue(updated[0], person.name || operator.name, 'station');
+        const r2 = await sql`UPDATE jobs SET office_check = ${JSON.stringify(oc)} WHERE id = ${id} RETURNING *`;
         if (r2[0]) updated[0] = r2[0];
-      } catch (e) { console.error('pm check', e); }
+      } catch (e) { console.error('office check', e); }
     }
     const skippedCount = Math.max(0, stage_index - dbStage - 1);
     await logAudit(sql, req, {
@@ -16650,9 +16654,9 @@ app.post('/api/jobs/:id/manager-stage', requireStationUser, requirePermission('s
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// PM Check (owner, 2026-11-18): the red tick on a Ready / Partial Ready job - the PM checked it. Ticked by hand
-// on the job, or by itself when the Ready to Deliver station (production office - its only stage is Ready to
-// Deliver; QC covers every stage and does not tick it) or the manager PIN saves the Ready to Delivery Qty.
+// PM Check (owner, 2026-11-18): the red tick on a Ready / Partial Ready job - the PM checked it. Ticked by the PM
+// only (owner, 2026-11-25): by hand on the job, or by the Save beside Record Delivery in the job card's Deliveries.
+// The Production Office saving the Ready qty at its station marks office_check instead (same shape).
 // n / del = the job's deliveries when it was checked; any delivery after that (partial or full) clears it.
 function pmCheckValue(job, by, via) {
   const list = Array.isArray(job && job.deliveries) ? job.deliveries : [];
@@ -16761,11 +16765,8 @@ app.post('/api/jobs/:id/manager-update', requireStationUser, requirePermission('
         time: businessStamp(),
       });
     }
-    // The manager saving a Ready to Delivery Qty ticks PM Check (see pmCheckValue).
-    const readyBefore = JSON.stringify((job.particulars || {}).delivered_cartons_qty || null);
-    const readyAfter = JSON.stringify(particulars.delivered_cartons_qty || null);
-    const pmTick = readyAfter !== readyBefore && readyQtyFromParticularsRow(particulars.delivered_cartons_qty) > 0 && (job.stage_index || 0) < STAGES.length - 1;
-    const pmCheck = pmTick ? JSON.stringify(pmCheckValue(job, `${v.operator.name} (Manager)`, 'station')) : (job.pm_check ? JSON.stringify(job.pm_check) : null);
+    // The PM check is the PM's alone (owner, 2026-11-25): the manager saving a Ready qty no longer ticks it.
+    const pmCheck = job.pm_check ? JSON.stringify(job.pm_check) : null;
     const updated = await sql`
       UPDATE jobs SET machine=${machine || null}, particulars=${JSON.stringify(particulars)}, log=${JSON.stringify(log)}, pm_check=${pmCheck}
       WHERE id=${id} RETURNING *
