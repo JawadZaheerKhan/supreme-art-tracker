@@ -44358,8 +44358,55 @@ async function stationLoadNotes() {
   } catch { stationNotes = []; }
 }
 
+// Production Office (Ready to Deliver) - the Ready tab (owner, 2026-11-24): the jobs that got Ready or Partial Ready
+// and were not checked yet. Tap one: its Ready to Deliver screen, to write or check the Ready qty and save - saving
+// it there is the PM check, so it leaves the list.
+let stationReadyView = 'jobs';
+function stationReadyTabJobs() {
+  return (jobs || []).filter(j => j && !j.deleted_at && !isBlocked(j) && !isNewJob(j) && pmCheckEligible(j) && !isPmChecked(j)
+      && (isPartialReady(j) || readyNotiAt(j) >= READY_NOTI_SINCE))
+    .sort((a, b) => (readyNotiAt(b) - readyNotiAt(a)) || (b.id - a.id));
+}
+function stationReadyTabsHtml(active) {
+  const n = stationReadyTabJobs().length;
+  const tabs = [['jobs', 'Jobs', '#7a1f1f'], ['ready', `Ready${n ? ` <span style="display:inline-block;min-width:18px;padding:0 6px;margin-left:4px;border-radius:999px;background:#dc2626;color:#fff;font-size:11px;line-height:18px;text-align:center;">${n}</span>` : ''}`, '#16a34a']];
+  return `<div class="ctp-tabs" data-active="${active}">
+      <span class="ctp-tab-ind" id="ctp-tab-ind" style="background:${active === 'ready' ? '#16a34a' : '#7a1f1f'};"></span>
+      ${tabs.map(([id, label, color]) => `<button type="button" class="ctp-tab${id === active ? ' is-on' : ''}" onclick="stationReadyView = '${id}'; stationRender()" style="--tab-c:${color};">${label}</button>`).join('')}
+    </div>`;
+}
+function stationReadyListHtml() {
+  const stIdx = stationOperator.stage_index;
+  const list = stationReadyTabJobs();
+  const rows = list.length ? list.map(j => {
+    const partial = isPartialReady(j);
+    const at = readyNotiAt(j);
+    const tag = partial
+      ? `<span class="sj-pending-badge" style="background:#fef3c7;color:#92400e;">Partial Ready &middot; ${earlyReadyTotal(j).toLocaleString()} at ${esc(STAGES[j.stage_index || 0] || '')}</span>`
+      : `<span class="sj-pending-badge" style="background:#dcfce7;color:#166534;">Ready${at ? ' &middot; ' + esc(fmtDMYT12(new Date(at))) : ''}</span>`;
+    return `
+    <button class="station-job" onclick="stationOpenJob(${j.id})" title="Open its Ready to Deliver screen - write or check the Ready qty and save">
+      <div class="station-job-number"><div class="sj-id">#${j.id}</div>${(j.stock_group_name || j.group_job_id) ? '<span class="mil-sign">MIL</span>' : ''}</div>
+      <div class="sj-main">
+        <div class="sj-name">${esc(j.name)} ${tag}</div>
+        <div class="sj-sub">${j.client ? esc(j.client) : ''}${j.size ? ' · ' + esc(j.size) : ''}</div>
+      </div>
+      <div class="sj-go">›</div>
+    </button>`;
+  }).join('') : `<div class="empty">Nothing to check - every Ready job is checked.</div>`;
+  return `
+    <div class="station-head">
+      <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(STAGES[stIdx] || '')}</div></div>
+      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
+    </div>
+    ${stationReadyTabsHtml('ready')}
+    <div style="padding:8px 16px 0;font-size:12.5px;color:var(--text2);">Jobs that got Ready or Partial Ready - open one, write or check its Ready qty and save.</div>
+    <div class="station-queue">${rows}</div>`;
+}
+
 function stationQueueHtml() {
   const stIdx = stationOperator.stage_index;
+  if (stIdx === STAGES.length - 2 && stationReadyView === 'ready') return stationReadyListHtml();
   const stageName = STAGES[stIdx] || ('Stage ' + stIdx);
   const myFinishes = stIdx === 2 ? allowedFinishesForOperator(stationOperator) : null;
   // Jobs currently sitting at this operator's stage, ready to work — PLUS
@@ -44494,6 +44541,7 @@ function stationQueueHtml() {
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
     ${stIdx === 0 ? stationCtpTabsHtml('jobs') : ''}
+    ${stIdx === STAGES.length - 2 ? stationReadyTabsHtml('jobs') : ''}
     ${searchBox}
     <div class="station-queue">${rows}</div>`;
 }
