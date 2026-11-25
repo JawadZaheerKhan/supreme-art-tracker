@@ -44455,14 +44455,67 @@ function stationReadyTabJobs() {
     .sort((a, b) => (readyNotiAt(b) - readyNotiAt(a)) || (b.id - a.id));
 }
 // The Dispatch Incharge's tabs (owner, 2026-11-25): Ready to Deliver · Partial Delivered · Notification · MIL Report.
+function stationIsMilJob(j) { return !!(j && (j.stock_group_name || j.group_job_id)); }
+// His tabs' jobs: Ready to Deliver (waiting, nothing short shipped, not MIL) · Partial Delivered (not MIL) · MIL Jobs
+// (the MIL jobs of both).
+function stationDiTabSets(readyQueue) {
+  const partial = stationPartialJobs();
+  const seen = new Set(), mil = [];
+  for (const j of [...readyQueue, ...partial]) if (stationIsMilJob(j) && !seen.has(j.id)) { seen.add(j.id); mil.push(j); }
+  return {
+    jobs: readyQueue.filter(j => !isPartialDelivery(j) && !stationIsMilJob(j)),
+    partial: partial.filter(j => !stationIsMilJob(j)),
+    'mil-jobs': mil,
+  };
+}
+// A search: the matches in his other tabs, one Go per tab (as the Jobs tab's searchElsewhereHtml).
+function stationDiElsewhereHtml(sets, sq, here) {
+  const hereIds = new Set(here.map(j => j.id));
+  const names = { jobs: 'Ready to Deliver', partial: 'Partial Delivered', 'mil-jobs': 'MIL Jobs' };
+  const btns = [];
+  for (const k of ['jobs', 'partial', 'mil-jobs']) {
+    if (k === stationReadyView) continue;
+    const hits = (sets[k] || []).filter(j => !hereIds.has(j.id) && stationJobMatches(j, sq));
+    if (!hits.length) continue;
+    const what = hits.length === 1 ? `#${hits[0].id} is in <b>${names[k]}</b>` : `${hits.length} in <b>${names[k]}</b>`;
+    btns.push(`<button type="button" class="btn btn-sm" onclick="stationReadyView = '${k}'; stationRender()" style="background:#eff6ff;border-color:#93c5fd;color:#1e3a8a;font-weight:600;">${what} &rarr; Go</button>`);
+  }
+  if (!btns.length) return '';
+  return `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 10px;margin:0 16px 8px;background:#f8fafc;border:1px dashed #93c5fd;border-radius:8px;font-size:12.5px;color:var(--text2);">
+      <span>${here.length ? 'Also found in:' : 'Not in this tab - found in:'}</span>${btns.join('')}</div>`;
+}
+// MIL Jobs tab: a tile per MIL group (its READY / IN PROCESS / DELIVERED, as the Jobs tab's group tile); View Jobs
+// opens its jobs here, each the usual tile (Record Delivery, the pills). A search opens the groups it matched in.
+const stationMilOpen = new Set();
+function stationMilToggle(key) { if (stationMilOpen.has(key)) stationMilOpen.delete(key); else stationMilOpen.add(key); stationRender(); }
+function stationMilGroupsHtml(list, rowOf, searching) {
+  const groups = new Map();
+  for (const j of list) { const k = j.stock_group_name || ('g' + j.group_job_id); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(j); }
+  return [...groups.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0]))).map(([k, mine]) => {
+    const all = (jobs || []).filter(j => j && !j.deleted_at && (j.stock_group_name ? j.stock_group_name === mine[0].stock_group_name : j.group_job_id === mine[0].group_job_id));
+    const stats = groupStats(all.length ? all : mine);
+    const open = searching || stationMilOpen.has(k);
+    const keyJs = esc(JSON.stringify(k));
+    return `<div class="station-job" style="display:block;cursor:default;border-left-color:#7c3aed;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span class="mil-sign">MIL</span>
+          <div style="flex:1;min-width:200px;"><div class="sj-name">${esc(mine[0].stock_group_name || mine[0].name || '')}</div>
+            <div class="sj-sub">${esc(mine[0].client || '')} &middot; ${mine.length} job${mine.length === 1 ? '' : 's'} at Ready / partly delivered${all.length > mine.length ? ` &middot; ${all.length} in the MIL` : ''}</div>
+            <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;">${groupStatChipsHtml(stats)}</div></div>
+          <button type="button" class="btn btn-sm" onclick="stationMilToggle(${keyJs})" style="background:#A32D2D;color:#fff;border-color:#A32D2D;font-weight:700;">&#128194; ${open ? 'Hide Jobs' : 'View Jobs'} (${mine.length})</button>
+        </div>
+        ${open ? `<div style="margin-top:10px;padding-left:10px;border-left:3px solid #ddd6fe;">${mine.map(rowOf).join('')}</div>` : ''}
+      </div>`;
+  }).join('');
+}
 function stationPartialJobs() {
   return (jobs || []).filter(j => j && !j.deleted_at && !isNewJob(j) && !isBlocked(j) && isPartialDelivery(j)).sort((a, b) => b.id - a.id);
 }
 function stationReadyTabsHtml(active) {
-  const n = stationReadyTabJobs().length, np = stationPartialJobs().length;
+  const n = stationReadyTabJobs().length, np = stationPartialJobs().filter(j => !stationIsMilJob(j)).length;
   const count = (k, bg) => k ? ` <span style="display:inline-block;min-width:18px;padding:0 6px;margin-left:4px;border-radius:999px;background:${bg};color:#fff;font-size:11px;line-height:18px;text-align:center;">${k}</span>` : '';
-  const tabs = [['jobs', 'Ready to Deliver', '#7a1f1f'], ['partial', 'Partial Delivered' + count(np, '#f59e0b'), '#c2410c'], ['ready', 'Notification' + count(n, '#dc2626'), '#16a34a']];
-  if (stationCanMilReport()) tabs.push(['mil', 'MIL Report', '#7c3aed']);
+  const tabs = [['jobs', 'Ready to Deliver', '#7a1f1f'], ['partial', 'Partial Delivered' + count(np, '#f59e0b'), '#c2410c'], ['mil-jobs', 'MIL Jobs', '#7c3aed'], ['ready', 'Notification' + count(n, '#dc2626'), '#16a34a']];
+  if (stationCanMilReport()) tabs.push(['mil', 'MIL Report', '#6d28d9']);
   const on = tabs.find(t => t[0] === active) || tabs[0];
   return `<div class="ctp-tabs" data-active="${on[0]}">
       <span class="ctp-tab-ind" id="ctp-tab-ind" style="background:${on[2]};"></span>
@@ -44584,7 +44637,10 @@ function stationQueueHtml() {
   queue = queue.reverse();
   // Dispatch Incharge (owner, 2026-11-25): Ready to Deliver = the jobs waiting with nothing shipped short; Partial
   // Delivered = every partly delivered job (also one past Ready with cartons still owed).
-  if (stIdx === STAGES.length - 2) queue = stationReadyView === 'partial' ? stationPartialJobs() : queue.filter(j => !isPartialDelivery(j));
+  // MIL jobs have their own tab (owner, 2026-11-25).
+  let diSets = null;
+  if (stIdx === STAGES.length - 2) { diSets = stationDiTabSets(queue); queue = diSets[stationReadyView] || diSets.jobs; }
+  const milView = !!diSets && stationReadyView === 'mil-jobs';
   // Job No. tab: the same queue, narrowed to one job number. Numbers only -
   // the operator is holding a printed job card and typing the number off it,
   // and a numeric keypad is far quicker on a tablet than a full keyboard.
@@ -44602,9 +44658,10 @@ function stationQueueHtml() {
   // A real job that is not in this queue would otherwise look like a broken
   // search, so say where it actually is. Read-only: no way in from here.
   const elsewhereAll = (searching && sq && !queue.length) ? jobs.filter(j => stationJobMatches(j, sq)) : [];
+  const diElsewhere = (diSets && searching) ? stationDiElsewhereHtml(diSets, sq, queue) : '';
   const elsewhere = elsewhereAll.length === 1 ? elsewhereAll[0] : null;
   const emptyMsg = !searching
-    ? (stIdx === STAGES.length - 2 && stationReadyView === 'partial' ? 'No partly delivered jobs.' : `Nothing waiting at ${esc(stageName)} right now.`)
+    ? (stIdx === STAGES.length - 2 && stationReadyView === 'partial' ? 'No partly delivered jobs.' : milView ? 'No MIL jobs at Ready or partly delivered.' : `Nothing waiting at ${esc(stageName)} right now.`)
     : !sq
       ? 'Type a job number, name or item code.'
       : elsewhere
@@ -44612,7 +44669,7 @@ function stationQueueHtml() {
         : elsewhereAll.length
           ? `${elsewhereAll.length} jobs match "${esc(sq)}", none of them in your queue.`
           : `No job matches "${esc(sq)}" in your queue.`;
-  const rows = queue.length ? queue.map(j => {
+  const rowOf = j => {
     // Unheard notes get a loud badge so the operator opens that job first.
     const notes = stationNotes.filter(n => n.job_id === j.id);
     const unheard = notes.filter(n => !n.heard_at);
@@ -44663,7 +44720,8 @@ function stationQueueHtml() {
       <div class="sj-go">›</div>
       ${readyRow}
     </button>`;
-  }).join('') : `<div class="empty">${emptyMsg}</div>`;
+  };
+  const rows = queue.length ? (milView ? stationMilGroupsHtml(queue, rowOf, searching) : queue.map(rowOf).join('')) : `<div class="empty">${emptyMsg}</div>`;
   // Full keyboard (names and item codes have letters); big for a tablet.
   const searchBox = stationSearchBarHtml('station-queue-search-input', stationQueueSearch, '\u{1F50D} Search job no., name or item code\u2026', 'stationQueueSearchInput(this.value)', 'stationQueueClearSearch()');
   return `
@@ -44672,8 +44730,9 @@ function stationQueueHtml() {
       <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
     ${stIdx === 0 ? stationCtpTabsHtml('jobs') : ''}
-    ${stIdx === STAGES.length - 2 ? stationReadyTabsHtml(stationReadyView === 'partial' ? 'partial' : 'jobs') : ''}
+    ${stIdx === STAGES.length - 2 ? stationReadyTabsHtml(['partial', 'mil-jobs'].includes(stationReadyView) ? stationReadyView : 'jobs') : ''}
     ${searchBox}
+    ${diElsewhere}
     <div class="station-queue">${rows}</div>`;
 }
 // ── Plates at the CTP Station (owner, 2026-11-23) ─────────────────────
