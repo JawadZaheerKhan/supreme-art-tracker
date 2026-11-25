@@ -5687,6 +5687,26 @@ function linkedJobBadgeHtml(j, clientPreview) {
 //   ready      — cartons physically finished but not yet shipped (green)
 //   inProcess  — booked − delivered − ready (sky blue)
 // Any zero bucket is omitted. Returns segmented HTML for the top badge.
+// A partly delivered job says so in words (owner, 2026-11-25) - on the Jobs tab tiles and at the Station.
+function partialDeliveredSignHtml() {
+  return `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">&#9680; PARTIAL DELIVERED</span>`;
+}
+// A stage pill's colour exactly as the Jobs tab paints it (owner, 2026-11-25: the Station's pills the same) - done /
+// active / blocked, the half-orange Delivered of a partial delivery, the half-green Ready of a partial ready.
+function jobStagePillCls(j, i) {
+  const si = j.stage_index || 0, done = isDone(j), blocked = isBlocked(j), pending_ = j.issuance_status === 'pending';
+  const lastLog = (Array.isArray(j.log) && j.log.length) ? j.log[j.log.length - 1] : null;
+  const regressed = !!(lastLog && /back to /i.test(String(lastLog.notes || '')));
+  const partialDelv = isPartialDelivery(j), partialReady = isPartialReady(j) && !partialDelv;
+  const readyIdx = STAGES.indexOf('Ready to Deliver');
+  let cls = 's-pending';
+  if (j.stages && j.stages[i] && j.stages[i].status === 'done') cls = 's-done';
+  else if (i === si && !done && !(pending_ && i === 1)) cls = (blocked || regressed) ? 's-blocked' : 's-active';
+  if (i === STAGES.length - 1 && partialDelv) cls = 's-partial';
+  if (i === readyIdx && partialReady && cls === 's-pending') cls = 's-partial-ready';
+  if (i === readyIdx && si === readyIdx && cls === 's-active') cls = 's-done';
+  return cls;
+}
 function partialSegmentsHtml(j, booked, shipped) {
   // "Ready" is whatever finished stock is sitting on the shelf but hasn't
   // shipped yet. QC's confirmed delivered_cartons_qty wins whenever it's
@@ -11032,8 +11052,8 @@ function renderJobRowCompact(j, opts) {
     const partialDelv = isPartialDelivery(j);
     const partialPill = partialDelv
       // No PO Qty (MIL sub jobs - owner, 2026-11-20: E-797) gets the same DELIVERED / READY chips, not a bare
-      // PARTIAL DELIVERY badge that hid its Ready cartons.
-      ? partialSegmentsHtml(j, bookedCartons || (parseFloat(String(j.cartonqty || '').replace(/[^0-9.-]/g, '')) || 0), shippedCartons)
+      // PARTIAL DELIVERY badge that hid its Ready cartons. The PARTIAL DELIVERED sign leads them (owner, 2026-11-25).
+      ? partialDeliveredSignHtml() + ' ' + partialSegmentsHtml(j, bookedCartons || (parseFloat(String(j.cartonqty || '').replace(/[^0-9.-]/g, '')) || 0), shippedCartons)
       : '';
     const deliveredLabel = shippedCartons
       ? `Delivered — ${shippedCartons.toLocaleString()} cartons`
@@ -11443,7 +11463,8 @@ function renderJobCard(j, opts) {
   const partialDelv = isPartialDelivery(j);
   const partialPill = partialDelv
     // No PO Qty (MIL sub jobs, E-797): the same DELIVERED / READY chips - the Unit Carton Qty stands in for it.
-    ? partialSegmentsHtml(j, bookedCartons || (parseFloat(String(j.cartonqty || '').replace(/[^0-9.-]/g, '')) || 0), shippedCartons)
+    // The PARTIAL DELIVERED sign leads them (owner, 2026-11-25).
+    ? partialDeliveredSignHtml() + ' ' + partialSegmentsHtml(j, bookedCartons || (parseFloat(String(j.cartonqty || '').replace(/[^0-9.-]/g, '')) || 0), shippedCartons)
     : '';
   // Partial-ready: Pasting operator saved some cartons but hasn't
   // moved the job to Ready yet. Stacked ALONGSIDE the current stage
@@ -44917,9 +44938,7 @@ function stationManagerPipelineHtml(j) {
   const si = j.stage_index || 0;
   return STAGES.map((s, i) => {
     const isLast = i === STAGES.length - 1;
-    let cls = 's-pending';
-    if (i < si || (j.stages && j.stages[i] && j.stages[i].status === 'done')) cls = 's-done';
-    else if (i === si) cls = 's-active';
+    const cls = jobStagePillCls(j, i);   // painted as on the Jobs tab (owner, 2026-11-25)
     const pill = isLast
       ? `<span class="stage-pill ${cls}" style="cursor:default;">${SHORT[i]}</span>`
       : `<span class="stage-pill ${cls}" title="Move to ${esc(s)}" onclick="stationManagerMoveToStage(${j.id},${i})" style="cursor:pointer">${SHORT[i]}</span>`;
@@ -44934,7 +44953,7 @@ function stationDiDetailsHtml(j) {
   const shipped = totalDeliveredCartons(j) || num(j.delqty);
   const chip = (txt, bg) => `<span class="badge" style="background:${bg};color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">${txt}</span>`;
   let badges = '';
-  if (shipped > 0) badges = partialSegmentsHtml(j, booked || num(j.cartonqty), shipped);
+  if (shipped > 0) badges = (isPartialDelivery(j) ? partialDeliveredSignHtml() + ' ' : '') + partialSegmentsHtml(j, booked || num(j.cartonqty), shipped);
   else if ((j.stage_index || 0) >= STAGES.length - 2) { const r = readyCartonsTotal(j); badges = chip(`&#128230; READY TO DELIVER${r ? ' - ' + r.toLocaleString() : ''}`, '#16a34a'); }
   else if (isPartialReady(j)) badges = chip(`READY - ${earlyReadyTotal(j).toLocaleString()}`, '#16a34a');
   const p = j.particulars || {};
@@ -44958,9 +44977,7 @@ function stationDiDetailsHtml(j) {
 function stationReadyPipelineHtml(j) {
   const si = j.stage_index || 0, last = STAGES.length - 1;
   return STAGES.map((s, i) => {
-    let cls = 's-pending';
-    if (i < si || (j.stages && j.stages[i] && j.stages[i].status === 'done')) cls = 's-done';
-    else if (i === si) cls = 's-active';
+    const cls = jobStagePillCls(j, i);   // painted as on the Jobs tab (owner, 2026-11-25)
     // Only once the PM has saved the delivery details (owner, 2026-11-25).
     const pmSaved = String(((j.delivery_draft && typeof j.delivery_draft === 'object') ? j.delivery_draft : {}).cartons ?? '').trim() !== '';
     const pill = i === last && si === last - 1 && pmSaved
