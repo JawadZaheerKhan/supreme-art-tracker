@@ -8949,7 +8949,11 @@ async function stationCtpGate(req, res, next) {
 }
 app.post('/api/station/plates/sizes', requireStationUser, stationCtpGate, (req, res) => plateH.sizeAdd(req, res));
 app.post('/api/station/plates/sizes/:id', requireStationUser, stationCtpGate, (req, res) => plateH.sizeEdit(req, res));
-app.post('/api/station/plates/stock', requireStationUser, stationCtpGate, (req, res) => plateH.stock(req, res));
+// The CTP Station only uses plates (owner, 2026-11-25): a Stock In from there is refused - plates come in through the Store.
+app.post('/api/station/plates/stock', requireStationUser, stationCtpGate, (req, res) => {
+  if (!(req.body && req.body.direction === 'out')) return res.status(403).json({ error: 'Plates are stocked in through the Store - the CTP Station only uses them.' });
+  return plateH.stock(req, res);
+});
 app.post('/api/station/plates/stock-tx', requireStationUser, stationCtpGate, (req, res) => plateH.stockTx(req, res));
 // Plates in process (owner, 2026-11-24): the jobs whose plates CTP has picked up again.
 // (The app's Plate Store tab has In Process too - the same handlers, its own Access Register row; owner, 2026-11-24.)
