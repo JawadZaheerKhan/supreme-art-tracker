@@ -44004,6 +44004,29 @@ function stationQaTick(n, on, el) {
   if (row) row.classList.toggle('is-on', !!on);
   stationResetIdle();
 }
+// The printed Line Clearance form (owner, 2026-11-25): the blank paper form, job card size (A4 landscape) - QA prints
+// it from his station. A laptop prints it straight away; an Android tablet cannot print a PDF inside the page, so
+// there it opens the form to print from the PDF viewer.
+const LC_FORM_PDF = '/forms/line-clearance-form.pdf';
+function stationLcFormButton() {
+  return (isSuperAdmin() || hasPerm('station_btn_lc_form')) ? `<button class="btn" onclick="stationPrintLcForm()" style="font-weight:700;" title="Print the blank Line Clearance form (job card size)">&#128424; Print LC Form</button>` : '';
+}
+function stationPrintLcForm() {
+  if (/Android|iPhone|iPad/i.test(navigator.userAgent || '')) { window.open(LC_FORM_PDF, '_blank'); return; }
+  let fr = document.getElementById('lc-form-print-frame');
+  if (fr) fr.remove();
+  fr = document.createElement('iframe');
+  fr.id = 'lc-form-print-frame';
+  fr.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  fr.onload = () => {
+    setTimeout(() => {
+      try { fr.contentWindow.focus(); fr.contentWindow.print(); }
+      catch (e) { window.open(LC_FORM_PDF, '_blank'); }   // the browser would not print it from here - open it instead
+    }, 300);
+  };
+  fr.src = LC_FORM_PDF;
+  document.body.appendChild(fr);
+}
 function stationQaHtml() {
   const q = stationQa || stationQaBlank();
   const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
@@ -44022,7 +44045,7 @@ function stationQaHtml() {
   return `
     <div class="station-head">
       <div><div class="station-who" style="font-size:20px;">${who}${whoUr}</div><div class="station-where" style="font-size:14px;">&#10003; Line Clearance &middot; QA</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">${stationPendingButton()}<button class="btn" onclick="stationOpenQaOps()" style="font-weight:700;">&#128119; Today's operators</button>${stationLcButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">${stationPendingButton()}<button class="btn" onclick="stationOpenQaOps()" style="font-weight:700;">&#128119; Today's operators</button>${stationLcButton()}${stationLcFormButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
     </div>
     ${others ? `<div style="padding:0 4px 8px;"><button class="btn btn-sm" onclick="stationView='stage-pick'; stationRender();">&lsaquo; Switch station</button></div>` : ''}
     <div class="lc-wrap">
@@ -47233,6 +47256,7 @@ const ACC_STATION_TAB_ROWS = [
   { key: 'station_access', type: 'tab' },
   { key: 'station_btn_deliver', type: 'action' },   // Ready to Deliver: Delivered pill + Record Delivery (owner, 2026-11-24)
   { key: 'station_btn_mil_report', type: 'action' },   // Ready to Deliver: the MIL Jobs Report, read only (owner, 2026-11-25)
+  { key: 'station_btn_lc_form', type: 'action' },   // QA: Print the blank Line Clearance form (owner, 2026-11-25)
 ];
 // Users tab. user_accessregister_tab_access is special-cased in
 // accGroupRow: every role except super_admin renders as a locked HIDDEN
