@@ -16204,6 +16204,12 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
         return res.status(400).json({ error: "This job isn't at your station right now." });
       }
     }
+    // Ready to Deliver -> Delivered only once the PM has saved the job's delivery details (owner, 2026-11-25) - the
+    // Delivered pill and the station's own Done alike.
+    if (advance && curStage === STAGES.length - 2 && !machine.is_manager
+        && !String(((job.delivery_draft && typeof job.delivery_draft === 'object') ? job.delivery_draft : {}).cartons ?? '').trim()) {
+      return res.status(400).json({ error: "The PM has not saved this job's delivery details yet - it can not go to Delivered." });
+    }
 
     // 4) Merge the stage's number fields into particulars. Two payload
     // shapes are supported per key:
