@@ -7045,6 +7045,33 @@ function startBtnAccess() {
   });
   _btnObserver.observe(document.body, { childList: true, subtree: true });
 }
+// The top-bar tabs, each by its Access Register row. Run at sign-in, and again when a QC / QA PIN at the Station
+// brings its own Operator column and when it signs out (owner, 2026-11-25: QA given the Stickers tab did not see it -
+// the tabs were only worked out once, at sign-in).
+function syncTopTabs() {
+  const showTab = (id, m) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.disabled = false;
+    el.classList.remove('mode-btn-locked');
+    el.removeAttribute('title');
+    el.style.display = tabAllowed(m) ? '' : 'none';
+  };
+  showTab('mode-jobs-btn', 'jobs');
+  showTab('mode-dashboard-btn', 'dashboard');
+  showTab('mode-products-btn', 'products');
+  showTab('mode-inventory-btn', 'inventory');
+  showTab('mode-store-btn', 'store');
+  showTab('mode-reports-btn', 'reports');
+  showTab('mode-stickers-btn', 'stickers');
+  showTab('mode-station-btn', 'station');
+  showTab('mode-users-btn', 'users');
+  showTab('mode-client-view-btn', 'client-view');
+  showTab('mode-factory-btn', 'factory');
+  showTab('mode-mgr-operators-btn', 'mgr-operators');
+  showTab('mode-mgr-dp-btn', 'mgr-dp');
+  if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
+}
 function tabAllowed(m) {
   if (m === 'mgr-operators' || m === 'mgr-dp') return mgrOpsUnlocked();   // only while a Manager PIN is in, even for Super Admin
   if (isSuperAdmin()) return true;
@@ -8219,28 +8246,7 @@ function renderUserChip() {
   else { pic.style.display = 'none'; }
   // Tab gating: each top-bar tab follows its Access Register row (see tabAllowed).
   // Not allowed = hidden, so "Hidden" in the register really means hidden.
-  const showTab = (id, m) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.disabled = false;
-    el.classList.remove('mode-btn-locked');
-    el.removeAttribute('title');
-    el.style.display = tabAllowed(m) ? '' : 'none';
-  };
-  showTab('mode-jobs-btn', 'jobs');
-  showTab('mode-dashboard-btn', 'dashboard');
-  showTab('mode-products-btn', 'products');
-  showTab('mode-inventory-btn', 'inventory');
-  showTab('mode-store-btn', 'store');
-  showTab('mode-reports-btn', 'reports');
-  showTab('mode-stickers-btn', 'stickers');
-  showTab('mode-station-btn', 'station');
-  showTab('mode-users-btn', 'users');
-  showTab('mode-client-view-btn', 'client-view');
-  showTab('mode-factory-btn', 'factory');
-  showTab('mode-mgr-operators-btn', 'mgr-operators');
-  showTab('mode-mgr-dp-btn', 'mgr-dp');
-  if (typeof syncFlowingTabIndicator === 'function') requestAnimationFrame(() => syncFlowingTabIndicator('mode-switch'));
+  syncTopTabs();
   const op = isOperator(), sm = isStoreManager(), fin = isFinance();
   // Trash card — gated by trash_view (default admin/ceo, was previously
   // just "anyone who isn't an operator," which let PM/Store Manager/
@@ -43175,7 +43181,17 @@ function stationResetIdle() {
   // A job-card entry is the signed-in app user, not a shared tablet —
   // no 90s PIN-pad kick-out.
   if (!stationOperator || stationOperator.viaJobCard) return;
-  stationIdleTimer = setTimeout(() => { if (mode === 'station') stationLogout(); }, 90000);
+  stationIdleTimer = setTimeout(() => { if (mode === 'station') stationLogout(); else if (_stationSavedPerms) stationAwayCheck(); }, 90000);
+}
+// A QC / QA PIN that went to another tab (e.g. Stickers, owner 2026-11-25) keeps its access while it is used there;
+// 5 minutes with no tap or key and it is signed out - the tablet's own access comes back, never left to the next one.
+let _stationLastActive = Date.now();
+if (typeof document !== 'undefined') ['pointerdown', 'keydown'].forEach(ev => document.addEventListener(ev, () => { _stationLastActive = Date.now(); }, true));
+function stationAwayCheck() {
+  if (!stationOperator || !_stationSavedPerms) return;
+  if (mode === 'station') { stationResetIdle(); return; }
+  if (Date.now() - _stationLastActive > 5 * 60000) { stationLogout(); return; }
+  stationIdleTimer = setTimeout(stationAwayCheck, 30000);
 }
 
 function stationLogout(silent) {
@@ -43603,9 +43619,18 @@ function stationApplyKindPerms(machine) {
   if (!machine || !machine.perms) return;
   if (!_stationSavedPerms) _stationSavedPerms = _rolePerms;
   _rolePerms = { ...machine.perms };
+  stationPermsChanged();
 }
 function stationRestorePerms() {
-  if (_stationSavedPerms) { _rolePerms = _stationSavedPerms; _stationSavedPerms = null; }
+  if (_stationSavedPerms) { _rolePerms = _stationSavedPerms; _stationSavedPerms = null; stationPermsChanged(); }
+}
+// The access changed (a QC / QA PIN in or out): the top tabs, the Reports cards and the buttons follow it at once;
+// a tab the restored access does not allow sends the tablet back to the Station (owner, 2026-11-25).
+function stationPermsChanged() {
+  try { syncTopTabs(); } catch (e) { /* the tabs follow on the next sign-in */ }
+  try { applyReportsAccess(); } catch (e) { /* ditto */ }
+  // (Buttons follow the access each time they are drawn - applyBtnAccess only hides, so it is not run over the page.)
+  try { if (typeof mode !== 'undefined' && mode !== 'station' && !tabAllowed(mode)) setMode('station'); } catch (e) { /* stay */ }
 }
 
 // ── Line Clearance (QA Incharge) station (owner, 2026-11-11) ───
