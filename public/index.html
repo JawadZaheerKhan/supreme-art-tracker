@@ -43305,7 +43305,8 @@ function stationIsTouchDevice() {
 function stationRender() {
   const root = document.getElementById('station-root');
   if (!root) return;
-  if (stationView !== 'mil-report') _milReadOnly = false;   // the MIL report is read only only at the Station
+  // The MIL report is read only only at the Station (its MIL Report tab, or the old full-screen view).
+  _milReadOnly = stationView === 'mil-report' || (stationView === 'queue' && stationReadyView === 'mil' && !!stationOperator && stationOperator.stage_index === STAGES.length - 2);
   if (!stationOperator) { root.innerHTML = stationPinPadHtml(); return; }
   stationResetIdle();
   if (stationView === 'mil-report') { root.innerHTML = stationMilReportHtml(); setTimeout(renderJrMil, 0); return; }
@@ -43325,6 +43326,7 @@ function stationRender() {
   else if (stationView === 'ctp-products') root.innerHTML = stationCtpProductsHtml();
   else root.innerHTML = stationQueueHtml();
   if (document.getElementById('ctp-tab-ind')) setTimeout(stationCtpTabsSync, 0);   // slide the CTP tab highlight
+  if (document.getElementById('mil-content')) setTimeout(renderJrMil, 0);          // the Dispatch Incharge's MIL Report tab
 }
 
 // Once-on-load keydown listener so a laptop user can type the PIN on
@@ -44452,12 +44454,19 @@ function stationReadyTabJobs() {
       && (isPartialReady(j) || readyNotiAt(j) >= READY_NOTI_SINCE))
     .sort((a, b) => (readyNotiAt(b) - readyNotiAt(a)) || (b.id - a.id));
 }
+// The Dispatch Incharge's tabs (owner, 2026-11-25): Ready to Deliver · Partial Delivered · Notification · MIL Report.
+function stationPartialJobs() {
+  return (jobs || []).filter(j => j && !j.deleted_at && !isNewJob(j) && !isBlocked(j) && isPartialDelivery(j)).sort((a, b) => b.id - a.id);
+}
 function stationReadyTabsHtml(active) {
-  const n = stationReadyTabJobs().length;
-  const tabs = [['jobs', 'Jobs', '#7a1f1f'], ['ready', `Ready${n ? ` <span style="display:inline-block;min-width:18px;padding:0 6px;margin-left:4px;border-radius:999px;background:#dc2626;color:#fff;font-size:11px;line-height:18px;text-align:center;">${n}</span>` : ''}`, '#16a34a']];
-  return `<div class="ctp-tabs" data-active="${active}">
-      <span class="ctp-tab-ind" id="ctp-tab-ind" style="background:${active === 'ready' ? '#16a34a' : '#7a1f1f'};"></span>
-      ${tabs.map(([id, label, color]) => `<button type="button" class="ctp-tab${id === active ? ' is-on' : ''}" onclick="stationReadyView = '${id}'; stationRender()" style="--tab-c:${color};">${label}</button>`).join('')}
+  const n = stationReadyTabJobs().length, np = stationPartialJobs().length;
+  const count = (k, bg) => k ? ` <span style="display:inline-block;min-width:18px;padding:0 6px;margin-left:4px;border-radius:999px;background:${bg};color:#fff;font-size:11px;line-height:18px;text-align:center;">${k}</span>` : '';
+  const tabs = [['jobs', 'Ready to Deliver', '#7a1f1f'], ['partial', 'Partial Delivered' + count(np, '#f59e0b'), '#c2410c'], ['ready', 'Notification' + count(n, '#dc2626'), '#16a34a']];
+  if (stationCanMilReport()) tabs.push(['mil', 'MIL Report', '#7c3aed']);
+  const on = tabs.find(t => t[0] === active) || tabs[0];
+  return `<div class="ctp-tabs" data-active="${on[0]}">
+      <span class="ctp-tab-ind" id="ctp-tab-ind" style="background:${on[2]};"></span>
+      ${tabs.map(([id, label, color]) => `<button type="button" class="ctp-tab${id === on[0] ? ' is-on' : ''}" onclick="stationReadyView = '${id}'; stationRender()" style="--tab-c:${color};">${label}</button>`).join('')}
     </div>`;
 }
 // The MIL Jobs Report at the Dispatch Incharge's station (owner, 2026-11-25: as QA has the Line Clearance Log) - the
@@ -44466,13 +44475,21 @@ function stationCanMilReport() { return !!stationOperator && stationOperator.sta
 function stationMilButton() { return stationCanMilReport() ? `<button class="btn" onclick="stationOpenMilReport()" style="font-weight:700;">&#128230; MIL Jobs Report</button>` : ''; }
 function stationOpenMilReport() { _milReadOnly = true; stationView = 'mil-report'; stationRender(); }
 function stationMilBack() { _milReadOnly = false; stationView = 'queue'; stationRender(); }
-function stationMilReportHtml() {
+function stationMilReportHtml(tabbed) {
   const who = esc((stationPerson && stationPerson.name) || stationOperator.name);
   const clients = [...new Set((jobs || []).filter(j => j && j.stock_group_name).map(j => j.client).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
-  return `<div class="station-head">
+  // As a tab (owner, 2026-11-25): the station's own head and the tabs, no Back.
+  const head = tabbed
+    ? `<div class="station-head">
+      <div><div class="station-who">${who}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(STAGES[stationOperator.stage_index] || '')}</div></div>
+      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
+    </div>
+    ${stationReadyTabsHtml('mil')}`
+    : `<div class="station-head">
       <div><div class="station-who" style="font-size:20px;">${who}</div><div class="station-where" style="font-size:14px;">&#128230; MIL Jobs Report</div></div>
       <div style="display:flex;gap:8px;"><button class="btn" onclick="stationMilBack()">&lsaquo; Back</button><button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
-    </div>
+    </div>`;
+  return `${head}
     <div style="padding:8px 16px 30px;">
       <div style="margin-bottom:12px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
         <div><div class="dash-flbl">Search (Product / Code)</div><input class="filter" type="text" value="${esc(milRptState.q)}" placeholder="e.g. norbac or 120186" oninput="milRptState.q=this.value; renderJrMil();" style="min-width:200px;"></div>
@@ -44506,7 +44523,7 @@ function stationReadyListHtml() {
   return `
     <div class="station-head">
       <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(STAGES[stIdx] || '')}</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">${stationMilButton()}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
     ${stationReadyTabsHtml('ready')}
     <div style="padding:8px 16px 0;font-size:12.5px;color:var(--text2);">Jobs that got Ready or Partial Ready - open one, write or check its Ready qty and save.</div>
@@ -44516,6 +44533,7 @@ function stationReadyListHtml() {
 function stationQueueHtml() {
   const stIdx = stationOperator.stage_index;
   if (stIdx === STAGES.length - 2 && stationReadyView === 'ready') return stationReadyListHtml();
+  if (stIdx === STAGES.length - 2 && stationReadyView === 'mil' && stationCanMilReport()) return stationMilReportHtml(true);
   const stageName = STAGES[stIdx] || ('Stage ' + stIdx);
   const myFinishes = stIdx === 2 ? allowedFinishesForOperator(stationOperator) : null;
   // Jobs currently sitting at this operator's stage, ready to work — PLUS
@@ -44564,6 +44582,9 @@ function stationQueueHtml() {
     });
   }
   queue = queue.reverse();
+  // Dispatch Incharge (owner, 2026-11-25): Ready to Deliver = the jobs waiting with nothing shipped short; Partial
+  // Delivered = every partly delivered job (also one past Ready with cartons still owed).
+  if (stIdx === STAGES.length - 2) queue = stationReadyView === 'partial' ? stationPartialJobs() : queue.filter(j => !isPartialDelivery(j));
   // Job No. tab: the same queue, narrowed to one job number. Numbers only -
   // the operator is holding a printed job card and typing the number off it,
   // and a numeric keypad is far quicker on a tablet than a full keyboard.
@@ -44583,7 +44604,7 @@ function stationQueueHtml() {
   const elsewhereAll = (searching && sq && !queue.length) ? jobs.filter(j => stationJobMatches(j, sq)) : [];
   const elsewhere = elsewhereAll.length === 1 ? elsewhereAll[0] : null;
   const emptyMsg = !searching
-    ? `Nothing waiting at ${esc(stageName)} right now.`
+    ? (stIdx === STAGES.length - 2 && stationReadyView === 'partial' ? 'No partly delivered jobs.' : `Nothing waiting at ${esc(stageName)} right now.`)
     : !sq
       ? 'Type a job number, name or item code.'
       : elsewhere
@@ -44648,10 +44669,10 @@ function stationQueueHtml() {
   return `
     <div class="station-head">
       <div><div class="station-who">${esc((stationPerson && stationPerson.name) || stationOperator.name)}${stationPerson && stationPerson.name_ur ? ` <span class="urdu station-who-ur" dir="rtl" lang="ur">${esc(stationPerson.name_ur)}</span>` : ''}${stationOperator.machine ? ` <span class="station-mach">⚙ ${esc(stationOperator.machine)}</span>` : ''}</div><div class="station-where">${esc(stageName)}</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">${stIdx === STAGES.length - 2 ? stationMilButton() : ''}<button class="btn station-logout" onclick="stationLogout()">Sign out</button></div>
+      <button class="btn station-logout" onclick="stationLogout()">Sign out</button>
     </div>
     ${stIdx === 0 ? stationCtpTabsHtml('jobs') : ''}
-    ${stIdx === STAGES.length - 2 ? stationReadyTabsHtml('jobs') : ''}
+    ${stIdx === STAGES.length - 2 ? stationReadyTabsHtml(stationReadyView === 'partial' ? 'partial' : 'jobs') : ''}
     ${searchBox}
     <div class="station-queue">${rows}</div>`;
 }
