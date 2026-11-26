@@ -5711,8 +5711,11 @@ function linkedJobBadgeHtml(j, clientPreview) {
 //   inProcess  — booked − delivered − ready (sky blue)
 // Any zero bucket is omitted. Returns segmented HTML for the top badge.
 // A partly delivered job says so in words (owner, 2026-11-25) - on the Jobs tab tiles and at the Station.
-function partialDeliveredSignHtml() {
-  return `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">&#9680; PARTIAL DELIVERED</span>`;
+// As the Deliveries box says it (owner, 2026-11-26): "PARTIAL — 53,600 UNIT CARTONS LEFT", small so it fits the tile.
+function partialDeliveredSignHtml(j) {
+  const left = j ? Math.max(0, (deliveryTargetCartons(j) || 0) - totalDeliveredCartons(j)) : 0;
+  const unit = j && j.is_shade_card ? 'COPIES' : 'UNIT CARTONS';
+  return `<span class="badge" style="background:#f59e0b;color:#fff;font-weight:800;letter-spacing:0.03em;white-space:nowrap;font-size:10px;padding:2px 8px;" title="Partly delivered - ${left.toLocaleString()} ${unit.toLowerCase()} still to ship">PARTIAL${left ? ` &mdash; ${left.toLocaleString()} ${unit} LEFT` : ''}</span>`;
 }
 // A stage pill's colour exactly as the Jobs tab paints it (owner, 2026-11-25: the Station's pills the same) - done /
 // active / blocked, the half-orange Delivered of a partial delivery, the half-green Ready of a partial ready.
@@ -11089,7 +11092,7 @@ function renderJobRowCompact(j, opts) {
     const partialPill = partialDelv
       // No PO Qty (MIL sub jobs - owner, 2026-11-20: E-797) gets the same DELIVERED / READY chips, not a bare
       // PARTIAL DELIVERY badge that hid its Ready cartons. The PARTIAL DELIVERED sign leads them (owner, 2026-11-25).
-      ? partialDeliveredSignHtml() + ' ' + partialSegmentsHtml(j, bookedCartons || (parseFloat(String(j.cartonqty || '').replace(/[^0-9.-]/g, '')) || 0), shippedCartons)
+      ? partialDeliveredSignHtml(j) + ' ' + partialSegmentsHtml(j, bookedCartons || (parseFloat(String(j.cartonqty || '').replace(/[^0-9.-]/g, '')) || 0), shippedCartons)
       : '';
     const deliveredLabel = shippedCartons
       ? `Delivered — ${shippedCartons.toLocaleString()} cartons`
@@ -11500,7 +11503,7 @@ function renderJobCard(j, opts) {
   const partialPill = partialDelv
     // No PO Qty (MIL sub jobs, E-797): the same DELIVERED / READY chips - the Unit Carton Qty stands in for it.
     // The PARTIAL DELIVERED sign leads them (owner, 2026-11-25).
-    ? partialDeliveredSignHtml() + ' ' + partialSegmentsHtml(j, bookedCartons || (parseFloat(String(j.cartonqty || '').replace(/[^0-9.-]/g, '')) || 0), shippedCartons)
+    ? partialDeliveredSignHtml(j) + ' ' + partialSegmentsHtml(j, bookedCartons || (parseFloat(String(j.cartonqty || '').replace(/[^0-9.-]/g, '')) || 0), shippedCartons)
     : '';
   // Partial-ready: Pasting operator saved some cartons but hasn't
   // moved the job to Ready yet. Stacked ALONGSIDE the current stage
@@ -45143,7 +45146,7 @@ function stationDiDetailsHtml(j) {
   const shipped = totalDeliveredCartons(j) || num(j.delqty);
   const chip = (txt, bg) => `<span class="badge" style="background:${bg};color:#fff;font-weight:800;letter-spacing:0.04em;white-space:nowrap;">${txt}</span>`;
   let badges = '';
-  if (shipped > 0) badges = (isPartialDelivery(j) ? partialDeliveredSignHtml() + ' ' : '') + partialSegmentsHtml(j, booked || num(j.cartonqty), shipped);
+  if (shipped > 0) badges = (isPartialDelivery(j) ? partialDeliveredSignHtml(j) + ' ' : '') + partialSegmentsHtml(j, booked || num(j.cartonqty), shipped);
   else if ((j.stage_index || 0) >= STAGES.length - 2) { const r = readyCartonsTotal(j); badges = chip(`&#128230; READY TO DELIVER${r ? ' - ' + r.toLocaleString() : ''}`, '#16a34a'); }
   else if (isPartialReady(j)) badges = chip(`READY - ${earlyReadyTotal(j).toLocaleString()}`, '#16a34a');
   const p = j.particulars || {};
