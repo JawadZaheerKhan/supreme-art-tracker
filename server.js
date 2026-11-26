@@ -11321,13 +11321,18 @@ app.post('/api/jobs/:id/station-waste-ready', requireStationUser, requirePermiss
       const left = Math.round((ready - shipped) * 1000) / 1000;
       if (!(shipped > 0)) return res.status(400).json({ error: 'Nothing shipped on this job yet - its Ready cartons are not left over.' });
       if (!(left > 0)) return res.status(400).json({ error: 'This job has no Ready cartons left.' });
+      // How many (owner, 2026-11-26): some or all of the Ready left - the rest stays in Ready. None given = all.
+      const asked = (req.body && req.body.qty !== undefined && req.body.qty !== null && String(req.body.qty).trim() !== '') ? Number(String(req.body.qty).replace(/,/g, '')) : left;
+      if (!Number.isFinite(asked) || asked <= 0) return res.status(400).json({ error: 'Enter how many Ready cartons go to waste.' });
+      if (asked > left + 1e-9) return res.status(400).json({ error: `Only ${left.toLocaleString()} Ready cartons are left.` });
+      const waste = Math.round(asked * 1000) / 1000;
       const today = businessDateISO();
       const seed = Array.isArray(row.entries) && row.entries.length ? row.entries
         : (String(row.quantity || '').trim() ? [{ qty: String(row.quantity).trim(), date: null, operator: row.signature || null, machine: row.name || null }] : []);
-      const entries = [...seed, { qty: String(-left), date: today, operator: person, machine: op.name, wasted: true }];
+      const entries = [...seed, { qty: String(-waste), date: today, operator: person, machine: op.name, wasted: true }];
       particulars.delivered_cartons_qty = { ...row, entries, quantity: entries.map(e => String((e && e.qty) || '')).filter(q => q !== '').join(' | ') };
       const prevW = (particulars.ready_wasted && typeof particulars.ready_wasted === 'object') ? particulars.ready_wasted : {};
-      particulars.ready_wasted = { qty: (Number(prevW.qty) || 0) + left, at: new Date().toISOString(), by: `${person} (${op.name})` };
+      particulars.ready_wasted = { qty: (Number(prevW.qty) || 0) + waste, at: new Date().toISOString(), by: `${person} (${op.name})` };
       // Still owed? The same target a delivery closes at (tolerance, MIL, reopened), with the Ready qty now = shipped.
       const tj = await withTolerance(sql, { ...job, particulars });
       const bookedQty = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
@@ -11337,19 +11342,19 @@ app.post('/api/jobs/:id/station-waste-ready', requireStationUser, requirePermiss
       const complete = target ? shipped >= target : shipped > 0;
       const time = businessStamp(), at = new Date().toISOString(), by = `${person} (${op.name})`;
       const log = Array.isArray(job.log) ? [...job.log] : [];
-      log.push({ stage: STAGES[stage_index], status: (stages[stage_index] && stages[stage_index].status) || 'active', notes: `Ready ${left.toLocaleString()} left wasted by ${person}${complete ? ' - nothing more owed' : ' - still short of the PO (the PM finalizes)'}`, by, time });
+      log.push({ stage: STAGES[stage_index], status: (stages[stage_index] && stages[stage_index].status) || 'active', notes: `Ready ${waste.toLocaleString()} wasted by ${person}${waste < left ? ` - ${(left - waste).toLocaleString()} stay in Ready` : (complete ? ' - nothing more owed' : ' - still short of the PO (the PM finalizes)')}`, by, time });
       if (complete && stage_index < STAGES.length - 1) {
         stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at, reopened: false };
-        stages[7] = { status: 'done', notes: `Delivered - Ready ${left.toLocaleString()} left wasted`, by, time, at };
+        stages[7] = { status: 'done', notes: `Delivered - Ready ${waste.toLocaleString()} wasted`, by, time, at };
         stage_index = 7;
-        log.push({ stage: STAGES[7], status: 'done', notes: `Delivered - the Ready cartons left (${left.toLocaleString()}) went to waste`, by, time });
+        log.push({ stage: STAGES[7], status: 'done', notes: `Delivered - the Ready cartons left (${waste.toLocaleString()}) went to waste`, by, time });
       }
       const [updated] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(particulars)}, stage_index = ${stage_index}, stages = ${JSON.stringify(stages)}, log = ${JSON.stringify(log)}
                                    WHERE id = ${id} RETURNING *`;
       await logAudit(sql, req, { action: 'job.ready_wasted', entityType: 'job', entityId: id,
-        summary: `Job E-${id}: Ready ${left.toLocaleString()} left wasted by ${by}${complete ? ' - Delivered' : ' - still Partial (short of the PO)'}` });
+        summary: `Job E-${id}: Ready ${waste.toLocaleString()} of ${left.toLocaleString()} left wasted by ${by}${complete ? ' - Delivered' : (waste < left ? '' : ' - still Partial (short of the PO)')}` });
       if (!canSeeFinanceData(req.user)) { delete updated.rate; delete updated.tax_pct; }
-      res.json({ ...updated, _wasted: left, _complete: complete });
+      res.json({ ...updated, _wasted: waste, _complete: complete });
     } finally { await releaseOpLocks(sql, held); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
