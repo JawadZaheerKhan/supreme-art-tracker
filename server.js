@@ -4364,20 +4364,22 @@ function workMinsByDay(start, end, endReal, offDays) {
   }
   return out;
 }
-// Completion entries in a job's log: { machine (lower case), min }.
+// A line clearance section's stage (as the job card's LC_SECTION_STAGE).
+const LC_SECTION_STAGE_IDX = { CTP: 0, Printing: 1, Coating: 2, 'Die Cutting': 3, Breaking: 4, Sorting: 4, 'Folder Gluer': 5, 'FG Dispatch': 6 };
+// Completion entries in a job's log: { machine (lower case), stage, min }.
 function jobLogEnds(log) {
   const out = [];
   for (const e of (Array.isArray(log) ? log : [])) {
     const m = /^(.+?)\s*·\s*([^()]+?)\s*\((.+?)\)$/.exec(String((e && e.by) || ''));
     const t = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/.exec(String((e && e.time) || ''));
-    if (m && t) out.push({ machine: m[2].trim().toLowerCase(), min: wcMin(`${t[3]}-${t[2]}-${t[1]}T${t[4]}:${t[5]}`) });
+    if (m && t) out.push({ machine: m[2].trim().toLowerCase(), stage: m[3].trim(), min: wcMin(`${t[3]}-${t[2]}-${t[1]}T${t[4]}:${t[5]}`) });
   }
   return out;
 }
 // date|machine (lower case) -> { machine, date, mins, jobs: [{ job_id, job, name, start, end, running, mins }] }.
 async function machineHoursMap(sql, from, to) {
   const rows = await sql`
-    SELECT machine, entry_date, entry_time, new_job, prev_job FROM line_clearance
+    SELECT machine, entry_date, entry_time, new_job, prev_job, sections FROM line_clearance
      WHERE deleted_at IS NULL AND entry_date <= ${to}
      ORDER BY machine, entry_date, entry_time, created_at`;
   const at = r => pgDay(r.entry_date) + 'T' + (r.entry_time || '00:00');
@@ -4386,6 +4388,22 @@ async function machineHoursMap(sql, from, to) {
   const byId = new Map(jobs.map(j => [j.id, { name: j.name, ends: jobLogEnds(j.log) }]));
   const nowMin = wcMin(businessNowWc()), fromMin = wcMin(from + 'T00:00'), toEnd = wcMin(to + 'T00:00') + 1440;
   const offDays = await loadOffDays(sql);
+  // A machine's last QA entry with no save of its own (owner, 2026-11-26 - the timing check: BOBST MEDIA's last QA
+  // entry, E-692 on 13/11, "ran" 99 hours over 12 days - QA stopped logging that machine, the Station kept saving
+  // other jobs on it): it ends at the first save of ANOTHER job on that machine. Those saves, for those machines only.
+  const lastOf = new Map();
+  rows.forEach((r, i) => { if (String(r.new_job || '').trim() && !(rows[i + 1] && rows[i + 1].machine === r.machine)) lastOf.set(String(r.machine || '').trim().toLowerCase(), r); });
+  const otherSaves = new Map();
+  const openM = [...lastOf.keys()].filter(Boolean);
+  if (openM.length) {
+    const pats = openM.map(m => '%· ' + m.replace(/[\\%_]/g, c => '\\' + c) + ' (%');
+    const others = await sql`SELECT id, log FROM jobs WHERE log::text ILIKE ANY(${pats})`;
+    for (const oj of others) for (const l of jobLogEnds(oj.log)) {
+      if (!lastOf.has(l.machine)) continue;
+      if (!otherSaves.has(l.machine)) otherSaves.set(l.machine, []);
+      otherSaves.get(l.machine).push({ job_id: oj.id, min: l.min });
+    }
+  }
   const out = new Map();
   rows.forEach((r, i) => {
     const start = wcMin(at(r));
@@ -4413,6 +4431,17 @@ async function machineHoursMap(sql, from, to) {
       if (ends.length) { end = Math.max(...ends); real = true; }
     }
     if (end == null && nx != null) { end = nx; real = true; }
+    if (end == null) {
+      const moved = (otherSaves.get(mLow) || []).filter(x => x.job_id !== id && x.min > start).map(x => x.min);
+      if (moved.length) { end = Math.min(...moved); real = true; }
+    }
+    // ...or when its own job was saved at a later stage (E-1370 on "breaking": the Station saves Breaking as SORTING,
+    // so no save names that machine - the job moved on to Pasting).
+    if (end == null && j) {
+      const secIdx = Math.max(-1, ...(Array.isArray(r.sections) ? r.sections : []).map(sec => LC_SECTION_STAGE_IDX[sec]).filter(n => n >= 0));
+      const later = secIdx >= 0 ? j.ends.filter(l => l.min > start && STAGES.indexOf(l.stage) > secIdx).map(l => l.min) : [];
+      if (later.length) { end = Math.min(...later); real = true; }
+    }
     if (end == null) { end = nowMin; real = false; }
     if (end < fromMin || start >= toEnd) return;
     for (const [date, mins] of workMinsByDay(start, end, real, offDays)) {
@@ -16781,11 +16810,13 @@ app.post('/api/jobs/:id/station-update', requireStationUser, async (req, res) =>
       // TOMORROW gets a fresh badge (different date). Waste on the
       // existing same-day badge is updated so multi-pass totals stay
       // accurate.
-      const todayIsoDate = new Date().toISOString().slice(0, 10);
+      // The factory's day, not UTC's (owner, 2026-11-26 - the timing check: a run after midnight before 5 am
+      // merged into the evening before's badge).
+      const todayIsoDate = businessDateISO();
       const dupIdx = coatings_done.findIndex(d =>
         d && d.kind === finishKind &&
         (d.machine || '') === (finishMachine || '') &&
-        String(d.done_at || '').slice(0, 10) === todayIsoDate
+        d.done_at && businessDateISO(new Date(d.done_at)) === todayIsoDate
       );
       if (dupIdx >= 0) {
         // Refresh the waste total on the existing badge so multi-pass
