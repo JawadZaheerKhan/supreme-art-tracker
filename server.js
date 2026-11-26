@@ -5375,20 +5375,28 @@ app.get('/api/jobs/:id/paper-reversals', requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!(id > 0)) return res.json([]);
     res.json(await sql`
-      SELECT 'reversal' AS kind, r.id, r.created_at, r.user_email, r.actor_name, r.change, r.reverses_tx_id, o.created_at AS issued_at,
+      SELECT 'reversal' AS kind, r.id, r.created_at, r.user_email, r.actor_name, r.change, r.reverses_tx_id, o.created_at AS issued_at, r.item_id,
              i.paper_type, i.size, i.gsm, i.brand, COALESCE(i.is_offcut, false) AS offcut
         FROM inventory_transactions r
         JOIN inventory_transactions o ON o.id = r.reverses_tx_id
         LEFT JOIN inventory_items i ON i.id = r.item_id
        WHERE o.job_id = ${id} AND o.change < 0   -- an issue undone; not a stock-in that names the job (an offcut left over)
       UNION ALL
-      SELECT 'offcut' AS kind, r.id, r.created_at, r.user_email, r.actor_name, r.change, r.paired_tx_id AS reverses_tx_id, o.created_at AS issued_at,
+      SELECT 'offcut' AS kind, r.id, r.created_at, r.user_email, r.actor_name, r.change, r.paired_tx_id AS reverses_tx_id, o.created_at AS issued_at, r.item_id,
              i.paper_type, i.size, i.gsm, i.brand, COALESCE(i.is_offcut, false) AS offcut
         FROM inventory_transactions r
         JOIN inventory_transactions o ON o.id = r.paired_tx_id
         LEFT JOIN inventory_items i ON i.id = r.item_id
        WHERE o.job_id = ${id} AND r.reason = 'job-offcut' AND r.reverses_tx_id IS NULL
          AND NOT EXISTS (SELECT 1 FROM inventory_transactions x WHERE x.reverses_tx_id = r.id)
+      UNION ALL
+      -- The job's own issues (owner, 2026-11-26): an older History line saved no paper list - its papers and packets
+      -- are the issues written with it (same moment).
+      SELECT 'issue' AS kind, o.id, o.created_at, o.user_email, o.actor_name, o.change, NULL::int AS reverses_tx_id, o.created_at AS issued_at, o.item_id,
+             i.paper_type, i.size, i.gsm, i.brand, COALESCE(i.is_offcut, false) AS offcut
+        FROM inventory_transactions o
+        LEFT JOIN inventory_items i ON i.id = o.item_id
+       WHERE o.job_id = ${id} AND o.change < 0 AND o.reverses_tx_id IS NULL
        ORDER BY created_at`);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });

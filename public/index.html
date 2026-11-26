@@ -12939,9 +12939,10 @@ const JH_REISSUE_ACTIONS = ['job.paper_change_reissue', 'job.move_to_pending_sto
 function jhWithReversals(audit, revs) {
   const rows = Array.isArray(audit) ? audit.slice() : [];
   const all = Array.isArray(revs) ? revs : [];
-  jhRevTx = new Set(all.filter(r => r.kind !== 'offcut').map(r => Number(r.reverses_tx_id)));
+  jhRevTx = new Set(all.filter(r => r.kind === 'reversal' || !r.kind).map(r => Number(r.reverses_tx_id)));
   jhSentTx = new Map();
   for (const r of all.filter(r => r.kind === 'offcut')) jhSentTx.set(Number(r.reverses_tx_id), (jhSentTx.get(Number(r.reverses_tx_id)) || 0) + Math.abs(+r.change || 0));
+  jhShortIssueLines(rows, all.filter(r => r.kind === 'issue'));
   // Edit paper (owner, 2026-11-21): the wrong paper's issue was reversed only to move it to the right paper - not paper
   // coming back. Its "Paper edited" line says so; the issue it moved says "(paper changed to ... on ...)", and no
   // separate "Issue reversed" line. The paper is named as it is NOW (a later rename shows).
@@ -12961,7 +12962,7 @@ function jhWithReversals(audit, revs) {
     if (to && from) s = s.replace(/ moved from .*? to .*?( · |$)/, ` moved from ${from} to ${to}$1`);
     rows[k] = { ...a, summary: s };
   }
-  const list = all.filter(r => r.kind !== 'offcut' && !edited.has(Number(r.reverses_tx_id)));
+  const list = all.filter(r => (r.kind === 'reversal' || !r.kind) && !edited.has(Number(r.reverses_tx_id)));
   const day = t => fmtDMY(localDateISO(new Date(t)));
   // With the time too (owner, 2026-11-26: several issues reversed the same day - which line undid which).
   const dayTime = t => `${day(t)} ${fmtTime12(t)}`;
@@ -12984,9 +12985,74 @@ function jhWithReversals(audit, revs) {
     const sheets = Math.abs(+r.change || 0), ps = packetSize(r.paper_type || '');
     const paper = [r.paper_type, r.size, r.gsm ? r.gsm + 'gsm' : ''].filter(Boolean).join(' ') + (r.brand ? ' · ' + r.brand : '') + (r.offcut ? ' (offcut)' : '');
     rows.push({ id: -Number(r.id), action: 'job.paper_reversed', created_at: r.created_at, user_email: r.user_email, actor_name: r.actor_name || '', _jhReversal: true,
-      summary: `Paper issue reversed: ${fmtPkts(sheets / ps, { keepZero: true })} ${packetUnitLabel(r.paper_type || '').toLowerCase()} (${sheets.toLocaleString()} sheets) of ${paper} back to stock — the issue of ${r.issued_at ? dayTime(r.issued_at) : '?'}` });
+      summary: `Issue reversed: ${fmtPkts(sheets / ps, { keepZero: true })} ${packetUnitLabel(r.paper_type || '').toLowerCase()} of ${paper} back to stock — the issue of ${r.issued_at ? dayTime(r.issued_at) : '?'}` });
   }
   return rows.sort((x, y) => new Date(y.created_at) - new Date(x.created_at));
+}
+// A paper issue in a job's History, short and in packets (owner, 2026-11-26: "Issued 46350 sheets (hamdam paper,
+// ningbo)" said nothing of how much of which paper): "1st paper: 463.5 packets - bleach board 25x36 230gsm (hamdam
+// paper 427 + ningbo 36.5) · 81.5 packets still needed". The papers are the entry's own (an older entry saved none:
+// the issues written with it, same moment - not everything the job was ever issued).
+function jhShortIssueLines(rows, issues) {
+  const inv = typeof inventoryAll !== 'undefined' ? inventoryAll : [];
+  const allJobs = typeof jobs !== 'undefined' ? jobs : [];
+  const claimed = new Set();
+  rows.forEach(a => { if (a && a.metadata && Array.isArray(a.metadata.tx_ids)) a.metadata.tx_ids.forEach(x => claimed.add(Number(x))); });
+  const ORD = { primary: '1st', secondary: '2nd', third: '3rd' };
+  for (let k = 0; k < rows.length; k++) {
+    const a = rows[k];
+    if (!a || a.action !== 'job.issue_stock') continue;
+    const job = allJobs.find(j => j.id === Number(a.entity_id)) || null;
+    const m = a.metadata || {};
+    const own = (job && Array.isArray(job.issued_items)) ? job.issued_items : [];
+    let items = Array.isArray(m.items) && m.items.length ? m.items.map(x => ({ ...x })) : [];
+    if (!items.length) {
+      const at = Date.parse(a.created_at) || 0;
+      items = issues.filter(t => !claimed.has(Number(t.id)) && Math.abs((Date.parse(t.created_at) || 0) - at) <= 30000)
+        .map(t => ({ item_id: t.item_id, tx_id: t.id, sheets: Math.abs(+t.change || 0), brand: t.brand || '', paper_type: t.paper_type,
+          paper: [t.paper_type, t.size, t.gsm ? t.gsm + 'gsm' : ''].filter(Boolean).join(' '), offcut: t.offcut }));
+      items.forEach(x => claimed.add(Number(x.tx_id)));
+    }
+    if (!items.length) continue;
+    items.forEach(x => {
+      const mine = own.find(o => o && x.tx_id && Number(o.tx_id) === Number(x.tx_id));
+      x.source = (mine && mine.source) || m.source || (m.secondary === true ? 'secondary' : m.secondary === false ? 'primary' : '');
+      const it = inv.find(i => i.id === Number(x.item_id));
+      if (!x.paper_type) x.paper_type = it ? it.paper_type : String(x.paper || '');
+      if (x.offcut === undefined) x.offcut = !!(it && it.is_offcut);
+    });
+    const groups = new Map();
+    for (const x of items) { const g = (x.source || '') + '|' + (x.paper || ''); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(x); }
+    const pk = (sheets, pt) => fmtPkts(sheets / packetSize(pt), { keepZero: true });
+    const parts = [...groups.values()].map(g => {
+      const f = g[0], unit = packetUnitLabel(f.paper_type).toLowerCase();
+      const total = g.reduce((s, x) => s + (+x.sheets || 0), 0);
+      const brands = g.filter(x => x.brand);
+      const by = g.length > 1 && brands.length ? ` (${g.map(x => `${x.brand || 'no brand'} ${pk(+x.sheets || 0, f.paper_type)}`).join(' + ')})` : (brands.length ? ` · ${brands[0].brand}` : '');
+      return `${ORD[f.source] ? ORD[f.source] + ' paper: ' : ''}${pk(total, f.paper_type)} ${unit} — ${f.paper || 'paper'}${f.offcut ? ' (offcut)' : ''}${by}`;
+    });
+    const s = String(a.summary || '');
+    const tail = [];
+    const need = /([\d,]+) sheets still needed/.exec(s);
+    const main = items.find(x => x.source === 'primary') || items[0];
+    if (need) tail.push(`${pk(parseInt(need[1].replace(/,/g, ''), 10) || 0, main.paper_type)} ${packetUnitLabel(main.paper_type).toLowerCase()} still needed`);
+    const cut = /cut to ([^,·]+?),/.exec(s);
+    if (cut) tail.push('cut to ' + cut[1].trim());
+    if (/issued while at CTP/.test(s)) tail.push('issued at CTP');
+    rows[k] = { ...a, summary: [parts.join(' · '), ...tail].join(' · '), _jhItems: items, _jhSources: [...new Set(items.map(x => x.source).filter(Boolean))] };
+  }
+}
+// History text in packets only (owner, 2026-11-26: "my concern is packets only no sheets"): "9 packets (-900 sheets)"
+// -> "9 packets", "99,400 -> 91,100 sheets (-8,300)" -> "994 -> 911 packets (-83)", "7000 sheets" -> "70 packets".
+// Display only - what was saved stays as it is.
+function histPacketsText(text, paperType) {
+  const ps = packetSize(paperType || ''), unit = packetUnitLabel(paperType || '').toLowerCase();
+  const P = n => fmtPkts((parseInt(String(n).replace(/,/g, ''), 10) || 0) / ps, { keepZero: true });
+  return String(text == null ? '' : text)
+    .replace(/(\d[\d,.]*\s+(?:packets?|reams?|pkts?))\s*\(\s*[-+]?[\d,]+\s+sheets\s*\)/gi, '$1')
+    .replace(/(\d[\d,.]*\s+(?:packets?|reams?|pkts?))\s*\/\s*[\d,]+\s+sheets/gi, '$1')
+    .replace(/\b([\d,]+)\s*(?:->|→)\s*([\d,]+)\s+sheets(?:\s*\(([-+])([\d,]+)\))?/g, (m, a, b, sg, c) => `${P(a)} -> ${P(b)} ${unit}${c ? ` (${sg}${P(c)})` : ''}`)
+    .replace(/([-+]?)\b([\d,]+)\s+sheets\b/g, (m, sg, n) => `${sg}${P(n)} ${unit}`);
 }
 // Which paper of the card an issue was (owner, 2026-11-16): "1st paper issued", "2nd paper issued"... - the issued
 // paper (type, size, gsm - any brand) matched with the card's 1st / 2nd / 3rd paper; offcut says so.
@@ -12996,6 +13062,8 @@ function jhIssueLabel(a, job) {
   const m = (a && a.metadata) || {};
   const saved = { primary: '1st', secondary: '2nd', third: '3rd' }[m.source] || (m.secondary === true ? '2nd' : m.secondary === false ? '1st' : '');
   if (saved) return saved + ' paper issued';
+  const srcs = (a && a._jhSources) || [];
+  if (srcs.length) return ['primary', 'secondary', 'third'].filter(x => srcs.includes(x)).map(x => ({ primary: '1st', secondary: '2nd', third: '3rd' })[x]).join(' + ') + ' paper issued';
   const inv = typeof inventoryAll !== 'undefined' ? inventoryAll : [];
   const key = it => it ? [it.paper_type, it.size, it.gsm].map(x => String(x == null ? '' : x).trim().toLowerCase()).join('|') : '';
   const p = (job && job.particulars) || {};
@@ -13056,6 +13124,7 @@ function jhIsIssueEntry(a) {
 // The paper items an entry is about: its own (newer entries), else what the
 // job was issued (issued_items).
 function jhEntryItems(a, job) {
+  if (a && Array.isArray(a._jhItems) && a._jhItems.length) return a._jhItems;
   const items = a && a.metadata && Array.isArray(a.metadata.items) ? a.metadata.items : null;
   if (items && items.length) return items;
   const own = job && Array.isArray(job.issued_items) ? job.issued_items : [];
@@ -16669,7 +16738,8 @@ async function renderInvHistory(id) {
       const splitSources = t._parts.length > 1
         ? [...t._parts].sort((a, b) => a.id - b.id).map(p => `${p.item_brand || 'no brand'} ${fmtPackets(Math.abs(p.change))}`).join(' + ')
         : '';
-      const notes = (t.user_notes !== null && t.user_notes !== undefined) ? t.user_notes : (splitSources || txDisplayNotes(t));
+      // A typed note as typed; the system's own note in packets (owner, 2026-11-26).
+      const notes = (t.user_notes !== null && t.user_notes !== undefined) ? t.user_notes : (splitSources || histPacketsText(txDisplayNotes(t), (it && it.paper_type) || ''));
       return `<tr data-tx-ids="${t._tx_ids.join(',')}" data-reason="${esc(t.reason || '')}" class="row-hover-red" style="${rowStyle}">
         <td class="lh-when">${date}</td>
         ${showBrand ? `<td style="font-weight:600;">${[...new Set(t._parts.map(p => p.item_brand || 'no brand'))].map(esc).join(' + ')}</td>` : ''}
@@ -16812,6 +16882,15 @@ function jhActionLabel(action) {
   const t = k.replace(/^job\./, '').replace(/[._]+/g, ' ').trim();
   return t ? t.charAt(0).toUpperCase() + t.slice(1) : 'Change';
 }
+// An Inventory item's Audit Log tags as words, not "INVENTORY.STOCK" (owner, 2026-11-26: short and to the point).
+function invAuditLabel(action) {
+  const map = { 'inventory.stock': 'Stock', 'inventory.correction': 'Corrected', 'inventory.create': 'Added', 'inventory.reverse': 'Reversed',
+    'inventory.delete': 'Deleted', 'inventory.restore': 'Restored', 'inventory.update': 'Edited', 'inventory.tx.edit': 'Entry edited', 'inventory.edit_paper': 'Paper edited' };
+  const k = String(action || '');
+  if (map[k]) return map[k];
+  const t = k.replace(/^inventory\./, '').replace(/[._]+/g, ' ').trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : 'Change';
+}
 function jhWho(a) {
   if (a.actor_name) return a.actor_name;
   const em = String(a.user_email || '').trim();
@@ -16820,7 +16899,8 @@ function jhWho(a) {
   return (u && u.name) || em;
 }
 function jhPlainSummary(a, j) {
-  let s = String(a.summary || '');
+  const jIt = j && typeof inventoryAll !== 'undefined' ? inventoryAll.find(i => i.id === Number(j.inventory_item_id)) : null;
+  let s = histPacketsText(a.summary || '', (jIt && jIt.paper_type) || (j && j.paper) || '');
   const reEsc = x => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (j) {
     const name = String(j.name || '').trim();
@@ -16852,6 +16932,7 @@ function renderAuditFeed(rows, opts) {
   const jhJob = jobId ? (typeof jobs !== 'undefined' ? jobs : []).find(j => j.id === jobId) : null;
   // Stock In / Out Challan No. or Notes edits open the edited row.
   const invItemId = (opts && opts.invItemId) || null;
+  const invItemPaperType = invItemId ? ((inventoryAll.find(i => i.id === invItemId) || {}).paper_type || '') : '';
   const isTxEdit = a => a && a.action === 'inventory.tx.edit' && a.metadata && Array.isArray(a.metadata.tx_ids) && a.metadata.tx_ids.length;
   rows.forEach(a => { if (isTxEdit(a)) txEditAuditRows[a.id] = a; });
   if (jobId) { jhAuditRows = {}; rows.forEach(a => { if (jhIsIssueEntry(a)) jhAuditRows[a.id] = a; }); }
@@ -16866,7 +16947,7 @@ function renderAuditFeed(rows, opts) {
     const papers = jhIssuePapers(a, job);
     const offcut = jhIsOffcutEntry(a, job);
     // New entries already name the paper in their text; older ones get it here.
-    const showPaper = papers.length && !(a.metadata && Array.isArray(a.metadata.items) && a.metadata.items.length);
+    const showPaper = papers.length && !a._jhItems && !(a.metadata && Array.isArray(a.metadata.items) && a.metadata.items.length);
     return `${showPaper ? `<div style="font-size:12px;color:var(--text);margin-top:2px;">Paper: <b>${esc(papers.join(' + '))}</b></div>` : ''}${jhToOffcutBtns(jobId, a, job)}
       <div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open in the ${offcut ? 'Offcut' : 'Stock Out'} report &rarr;</div>`;
   };
@@ -16892,8 +16973,8 @@ function renderAuditFeed(rows, opts) {
         return `
       <div class="audit-row${link || txLink ? ' cv-summary-row' : ''}${wasReversed ? ' jh-reversed' : ''}${isReversal ? ' jh-reversal' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in its report" style="cursor:pointer;"` : txLink ? ` onclick="openTxEditInReport(${a.id}, ${invItemId || 'null'})" title="Open the edited entry in the Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} report" style="cursor:pointer;"` : ''}>
         <div class="audit-time">${timeOf(a.created_at)}</div>
-        <div><span class="audit-tag-badge">${jobId ? esc(jhIsIssueEntry(a) ? jhIssueLabel(a, jhJob) : jhActionLabel(a.action)) : esc(String(a.action || '').toUpperCase())}</span></div>
-        <div class="audit-desc">${wasReversed && a._jhReversed ? '<span class="jh-rev-tag">REVERSED</span> ' : ''}${jobId ? jhPlainSummary(a, jhJob) : `<b>${esc(a.summary || '')}</b>`} <span class="audit-by">· by ${esc(jobId ? jhWho(a) : (a.user_email || 'system'))}</span>${issueExtra(a)}${revExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
+        <div><span class="audit-tag-badge">${jobId ? esc(jhIsIssueEntry(a) ? jhIssueLabel(a, jhJob) : jhActionLabel(a.action)) : invItemId ? esc(invAuditLabel(a.action)) : esc(String(a.action || '').toUpperCase())}</span></div>
+        <div class="audit-desc">${wasReversed && a._jhReversed ? '<span class="jh-rev-tag">REVERSED</span> ' : ''}${jobId ? jhPlainSummary(a, jhJob) : invItemId ? `<b>${esc(histPacketsText(a.summary || '', invItemPaperType))}</b>` : `<b>${esc(a.summary || '')}</b>`} <span class="audit-by">· by ${esc(jobId ? jhWho(a) : (a.user_email || 'system'))}</span>${issueExtra(a)}${revExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
       </div>`;
       }).join('')}
     </div>`).join('')}</div>`;
