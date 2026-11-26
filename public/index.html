@@ -1129,6 +1129,10 @@
   .ledger-pos      { color: #166534; font-weight: 600; }
   .ledger-neg      { color: #A32D2D; font-weight: 600; }
   .ledger-reversal { color: #065f46; font-weight: 600; }   /* mint — reversal/undo entry */
+  /* Job History (owner, 2026-11-26): a reversed line and its reversal in yellow, as in the Inventory history. */
+  .audit-row.jh-reversed { background: #fef9c3; box-shadow: inset 3px 0 0 #eab308; border-radius: 6px; }
+  .audit-row.jh-reversal { background: #fefce8; box-shadow: inset 3px 0 0 #fde68a; border-radius: 6px; }
+  .jh-rev-tag { display: inline-block; background: #eab308; color: #422006; font-size: 10px; font-weight: 800; padding: 1px 7px; border-radius: 999px; letter-spacing: 0.04em; vertical-align: middle; }
   /* Bulk-selection row checkbox + sticky action bar shared by Imports and
      Stock In/Out panes. The bar appears above the table when ≥1 row is ticked. */
   .bulk-actions {
@@ -12959,6 +12963,8 @@ function jhWithReversals(audit, revs) {
   }
   const list = all.filter(r => r.kind !== 'offcut' && !edited.has(Number(r.reverses_tx_id)));
   const day = t => fmtDMY(localDateISO(new Date(t)));
+  // With the time too (owner, 2026-11-26: several issues reversed the same day - which line undid which).
+  const dayTime = t => `${day(t)} ${fmtTime12(t)}`;
   for (let k = 0; k < rows.length; k++) {
     const a = rows[k];
     const ids = a && a.metadata && Array.isArray(a.metadata.tx_ids) ? a.metadata.tx_ids.map(Number) : [];
@@ -12971,14 +12977,14 @@ function jhWithReversals(audit, revs) {
     const a = rows[k];
     const ids = a && a.metadata && Array.isArray(a.metadata.tx_ids) ? a.metadata.tx_ids.map(Number) : [];
     const hit = ids.map(x => revOf.get(x)).filter(Boolean);
-    if (hit.length && jhIsIssueEntry(a)) rows[k] = { ...a, summary: `${a.summary || ''} (reversed on ${day(hit[0].created_at)})` };
+    if (hit.length && jhIsIssueEntry(a)) rows[k] = { ...a, summary: `${a.summary || ''} (reversed on ${dayTime(hit[0].created_at)})`, _jhReversed: true };
     else if (jhIsIssueEntry(a) && ids.some(x => jhSentTx.has(x))) rows[k] = { ...a, summary: `${a.summary || ''} (sent to offcut)` };
   }
   for (const r of list) {
     const sheets = Math.abs(+r.change || 0), ps = packetSize(r.paper_type || '');
     const paper = [r.paper_type, r.size, r.gsm ? r.gsm + 'gsm' : ''].filter(Boolean).join(' ') + (r.brand ? ' · ' + r.brand : '') + (r.offcut ? ' (offcut)' : '');
-    rows.push({ id: -Number(r.id), action: 'job.paper_reversed', created_at: r.created_at, user_email: r.user_email, actor_name: r.actor_name || '',
-      summary: `Paper issue reversed: ${fmtPkts(sheets / ps, { keepZero: true })} ${packetUnitLabel(r.paper_type || '').toLowerCase()} (${sheets.toLocaleString()} sheets) of ${paper} back to stock — the issue of ${day(r.issued_at)}` });
+    rows.push({ id: -Number(r.id), action: 'job.paper_reversed', created_at: r.created_at, user_email: r.user_email, actor_name: r.actor_name || '', _jhReversal: true,
+      summary: `Paper issue reversed: ${fmtPkts(sheets / ps, { keepZero: true })} ${packetUnitLabel(r.paper_type || '').toLowerCase()} (${sheets.toLocaleString()} sheets) of ${paper} back to stock — the issue of ${r.issued_at ? dayTime(r.issued_at) : '?'}` });
   }
   return rows.sort((x, y) => new Date(y.created_at) - new Date(x.created_at));
 }
@@ -16870,11 +16876,14 @@ function renderAuditFeed(rows, opts) {
       ${g.rows.map(a => {
         const link = jobId && jhIsIssueEntry(a);
         const txLink = !link && isTxEdit(a);
+        // A reversed line and its reversal in yellow, as in the Inventory history (owner, 2026-11-26).
+        const wasReversed = jobId && (a._jhReversed || reversedIds.has(Number(a.id)));
+        const isReversal = jobId && !wasReversed && (a._jhReversal || (a.metadata && a.metadata.reverses_audit_id));
         return `
-      <div class="audit-row${link || txLink ? ' cv-summary-row' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in its report" style="cursor:pointer;"` : txLink ? ` onclick="openTxEditInReport(${a.id}, ${invItemId || 'null'})" title="Open the edited entry in the Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} report" style="cursor:pointer;"` : ''}>
+      <div class="audit-row${link || txLink ? ' cv-summary-row' : ''}${wasReversed ? ' jh-reversed' : ''}${isReversal ? ' jh-reversal' : ''}"${link ? ` onclick="jhOpenIssuance(${jobId}, ${a.id})" title="Open this issuance in its report" style="cursor:pointer;"` : txLink ? ` onclick="openTxEditInReport(${a.id}, ${invItemId || 'null'})" title="Open the edited entry in the Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} report" style="cursor:pointer;"` : ''}>
         <div class="audit-time">${timeOf(a.created_at)}</div>
         <div><span class="audit-tag-badge">${jobId ? esc(jhIsIssueEntry(a) ? jhIssueLabel(a, jhJob) : jhActionLabel(a.action)) : esc(String(a.action || '').toUpperCase())}</span></div>
-        <div class="audit-desc">${jobId ? jhPlainSummary(a, jhJob) : `<b>${esc(a.summary || '')}</b>`} <span class="audit-by">· by ${esc(jobId ? jhWho(a) : (a.user_email || 'system'))}</span>${issueExtra(a)}${revExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
+        <div class="audit-desc">${wasReversed && a._jhReversed ? '<span class="jh-rev-tag">REVERSED</span> ' : ''}${jobId ? jhPlainSummary(a, jhJob) : `<b>${esc(a.summary || '')}</b>`} <span class="audit-by">· by ${esc(jobId ? jhWho(a) : (a.user_email || 'system'))}</span>${issueExtra(a)}${revExtra(a)}${isTxEdit(a) && !link ? `<div style="font-size:11.5px;color:#1d4ed8;margin-top:2px;">Open the edited entry in Stock ${a.metadata.direction === 'in' ? 'In' : 'Out'} &rarr;</div>` : ''}</div>
       </div>`;
       }).join('')}
     </div>`).join('')}</div>`;
