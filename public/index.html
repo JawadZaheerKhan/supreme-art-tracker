@@ -8509,11 +8509,14 @@ async function loadProductSpecials() {
 // Product names (owner, 2026-11-03): the earlier names folded into a product and the
 // name set on its tile. Loaded for everyone who makes jobs (GET /api/product-names).
 let _pnAliases = new Map(), _pnNames = new Map();
+// A product's key: its name, lower case, extra spaces ignored (owner, 2026-11-26: "fenbro susp 90ml uc" and
+// "fenbro susp  90ml uc" were two tiles) - as the server's productKeyOf.
+function prodKey(s) { return String(s == null ? '' : s).trim().replace(/\s+/g, ' ').toLowerCase(); }
 async function loadProductNames() {
   try {
     const d = await api('GET', '/api/product-names');
-    _pnAliases = new Map((d.aliases || []).map(a => [String(a.alias || '').trim().toLowerCase(), String(a.canonical || '').trim()]));
-    _pnNames = new Map((d.names || []).map(n => [String(n.key || '').trim().toLowerCase(), String(n.name || '').trim()]));
+    _pnAliases = new Map((d.aliases || []).map(a => [prodKey(a.alias), String(a.canonical || '').trim()]));
+    _pnNames = new Map((d.names || []).map(n => [prodKey(n.key), String(n.name || '').trim()]));
   } catch (e) { console.error('Product names not loaded', e); }
   await loadProductsMaster();
 }
@@ -8523,14 +8526,14 @@ let productsMaster = [];
 async function loadProductsMaster() {
   try { productsMaster = await api('GET', '/api/products'); } catch (e) { productsMaster = []; }
 }
-function productMasterOf(key) { return (productsMaster || []).find(p => p.key === key) || null; }
+function productMasterOf(key) { const k = prodKey(key); return (productsMaster || []).find(p => prodKey(p.key) === k) || null; }
 // The product a job name belongs to: { key, name } with the name as it is set now.
 function productOfName(jobName) {
   const own = String(jobName || '').trim();
   if (!own) return { key: '', name: '' };
-  const canon = _pnAliases.get(own.toLowerCase());
+  const canon = _pnAliases.get(prodKey(own));
   const base = canon || own;
-  const key = base.toLowerCase();
+  const key = prodKey(base);
   return { key, name: _pnNames.get(key) || base };
 }
 // What a new or duplicated job is saved as: its product's current name when the name
@@ -8539,10 +8542,10 @@ function productNameForNewJob(typed) {
   const t = String(typed || '').trim();
   if (!t) return t;
   const p = productOfName(t);
-  if (_pnAliases.has(t.toLowerCase()) || _pnNames.has(p.key)) return p.name;
+  if (_pnAliases.has(prodKey(t)) || _pnNames.has(p.key)) return p.name;
   const pm = productMasterOf(p.key);   // a product added on the Products tab (no job yet): as it was written there
   if (pm) return pm.name;
-  const same = (jobs || []).find(j => String(j.name || '').trim().toLowerCase() === p.key);
+  const same = (jobs || []).find(j => prodKey(j.name) === p.key);
   return same ? productOfName(same.name).name : t;
 }
 // The Job Name box's dropdown: every product's name, as set now.
@@ -8569,11 +8572,11 @@ async function loadProductAliases() {
 // product (via the "+" button) suggests THAT product's rate, not its own
 // name's (usually nonexistent) rate row.
 function productRateFor(productName) {
-  const own = String(productName || '').trim().toLowerCase();
+  const own = prodKey(productName);
   if (!own) return null;
-  const aliasRow = productAliases.find(a => a.alias === own);
-  const name = aliasRow ? String(aliasRow.canonical || '').trim().toLowerCase() : own;
-  const row = productRates.find(r => String(r.product || '').trim().toLowerCase() === name);
+  const aliasRow = productAliases.find(a => prodKey(a.alias) === own);
+  const name = aliasRow ? prodKey(aliasRow.canonical) : own;
+  const row = productRates.find(r => prodKey(r.product) === name);
   return row ? Number(row.rate) : null;
 }
 // What Rate to actually show/use for a job: its own saved rate once set
@@ -35788,7 +35791,7 @@ function companyInfoLine(j) {
 let productsFilter = loadPersistedFilters('products', { search: '', code: '', company: '', type: '', dateRange: '', dfrom: '', dto: '', noRate: false });
 // "No rate" filter (owner, 2026-11-21): products with no Rate saved on their tile (none, or 0).
 function productSavedRate(g) {
-  const row = productRates.find(r => String(r.product || '').trim().toLowerCase() === g.key);
+  const row = productRates.find(r => prodKey(r.product) === g.key);
   const v = row ? Number(row.rate) : null;
   return Number.isFinite(v) && v > 0 ? v : null;
 }
@@ -35830,10 +35833,10 @@ function detectProductType(name) {
 // canonical product's own name when aliased, so every folded-in job shows
 // under one consistent title rather than its own, possibly-different one).
 function resolveProductKey(jobName) {
-  const own = String(jobName || '').trim().toLowerCase();
-  const aliasRow = productAliases.find(a => a.alias === own);
+  const own = prodKey(jobName);
+  const aliasRow = productAliases.find(a => prodKey(a.alias) === own);
   const r = aliasRow
-    ? { key: String(aliasRow.canonical || '').trim().toLowerCase(), name: String(aliasRow.canonical || '').trim() }
+    ? { key: prodKey(aliasRow.canonical), name: String(aliasRow.canonical || '').trim() }
     : { key: own, name: String(jobName || '').trim() };
   if (_pnNames.has(r.key)) r.name = _pnNames.get(r.key);   // the name set on the tile
   return r;
@@ -35868,8 +35871,9 @@ function buildProductGroups() {
   }
   // Products added without a job card (owner, 2026-11-23): a tile with no jobs (red) - by the date it was added when a
   // date filter is on. Every tile carries its saved details (company, code, colours, UPS) when it has them.
-  for (const pm of (productsMaster || [])) {
-    if (!pm || !pm.key) continue;
+  for (const pm0 of (productsMaster || [])) {
+    if (!pm0 || !pm0.key) continue;
+    const pm = { ...pm0, key: prodKey(pm0.key) };
     if (!groups.has(pm.key)) {
       if (bounds) {
         const at = pm.created_at ? new Date(pm.created_at).getTime() : null;
@@ -35990,7 +35994,7 @@ function productCodesLine(g) {
   return `<div style="font-size:12px;color:var(--text);margin-top:3px;word-break:break-word;" title="${esc(codes.join(', '))}"><b>Code:</b> ${shown}${more}</div>`;
 }
 function productTileHtml(g, i) {
-  const rateRow = productRates.find(r => String(r.product || '').trim().toLowerCase() === g.key);
+  const rateRow = productRates.find(r => prodKey(r.product) === g.key);
   const savedRate = rateRow ? Number(rateRow.rate) : null;
   const avgRate = g.cartons > 0 && g.revenue > 0 ? g.revenue / g.cartons : savedRate;
   const companies = [...g.companies].sort().join(', ');
@@ -36036,7 +36040,8 @@ function productTileHtml(g, i) {
 // never applied to any job (owner, 2026-10-06) - and printed from here as
 // 4x3 stickers, four colours per label.
 function productSpecialsFor(key) {
-  const row = (productSpecials || []).find(r => r.product_key === key);
+  const k = prodKey(key);
+  const row = (productSpecials || []).find(r => prodKey(r.product_key) === k);
   return row && Array.isArray(row.special_colors) ? row.special_colors : [];
 }
 function specialColorsText(list) {
@@ -36961,7 +36966,7 @@ async function saveNewProduct() {
   try {
     const row = await api('POST', '/api/products', { name: v.name, company: v.company, code: v.code, colors: v.colors, ups: v.ups });
     if (rate !== null && hasPerm('products_btn_rate', 'yes')) {
-      const existing = productRates.find(r => String(r.product || '').trim().toLowerCase() === row.key);
+      const existing = productRates.find(r => prodKey(r.product) === row.key);
       if (existing) await api('PUT', `/api/product-rates/${existing.id}`, { product: row.name, rate });
       else await api('POST', '/api/product-rates', { product: row.name, rate });
       await loadProductRates();
@@ -37052,7 +37057,7 @@ async function saveProductRateInline(i, valueStr) {
   }
   showSaving(true);
   try {
-    const existing = productRates.find(r => String(r.product || '').trim().toLowerCase() === g.key);
+    const existing = productRates.find(r => prodKey(r.product) === g.key);
     if (rate === null) {
       if (existing) await api('DELETE', `/api/product-rates/${existing.id}`);
     } else if (existing) {
@@ -37160,7 +37165,7 @@ function openProductHistoryModal(i) {
   // The product's own standard Rate (top of the tile) — a shipment whose
   // job rate was edited away from this reads amber/yellow below, so an
   // override is obvious at a glance against the rest of the history.
-  const rateRow = productRates.find(r => String(r.product || '').trim().toLowerCase() === g.key);
+  const rateRow = productRates.find(r => prodKey(r.product) === g.key);
   const defaultRate = rateRow ? Number(rateRow.rate) : null;
   const rows = [];
   for (const j of g.jobs) {

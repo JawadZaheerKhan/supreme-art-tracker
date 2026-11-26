@@ -3416,7 +3416,7 @@ app.get('/api/jobs/:id/qa-starts', requireAuth, async (req, res) => {
     if (!Number.isFinite(id) || String(id).startsWith('4')) return res.json([]);
     const rows = await sql`
       SELECT id, machine, sections, to_char(entry_date, 'YYYY-MM-DD') AS entry_day, entry_time, new_job FROM line_clearance
-       WHERE deleted_at IS NULL AND regexp_replace(new_job, '\D', '', 'g') = ${String(id)}
+       WHERE deleted_at IS NULL AND new_job ~ ${'(^|[^0-9])' + id + '([^0-9]|$)'}   -- no backslash in a query here: the driver drops it ('\D' became 'D' - "E-1545" never matched, owner 2026-11-26)
        ORDER BY entry_date, entry_time, created_at`;
     // The day as text from the database (owner, 2026-11-26): a Date's toISOString moves it a day back off UTC.
     const at = r => String(r.entry_day || '').slice(0, 10) + 'T' + (r.entry_time || '00:00');
@@ -11981,7 +11981,8 @@ app.post('/api/product-rates', requirePermission('products_btn_rate'), async (re
     const rate = Number(req.body?.rate);
     if (!product) return res.status(400).json({ error: 'Product name is required.' });
     if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'Rate must be a non-negative number.' });
-    const existing = await sql`SELECT id FROM finance.product_rates WHERE lower(product) = lower(${product})`;
+    // Extra spaces ignored (owner, 2026-11-26) - one product, one rate, as productKeyOf.
+    const existing = await sql`SELECT id FROM finance.product_rates WHERE lower(regexp_replace(trim(product), '[[:space:]]+', ' ', 'g')) = lower(regexp_replace(trim(${product}), '[[:space:]]+', ' ', 'g'))`;
     if (existing.length) return res.status(409).json({ error: `"${product}" already has a rate — edit it instead of adding a duplicate.` });
     const inserted = await sql`
       INSERT INTO finance.product_rates (product, rate, updated_by, updated_at)
@@ -12004,7 +12005,7 @@ app.put('/api/product-rates/:id', requirePermission('products_btn_rate'), async 
     const rate = Number(req.body?.rate);
     if (!product) return res.status(400).json({ error: 'Product name is required.' });
     if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'Rate must be a non-negative number.' });
-    const dupe = await sql`SELECT id FROM finance.product_rates WHERE lower(product) = lower(${product}) AND id != ${id}`;
+    const dupe = await sql`SELECT id FROM finance.product_rates WHERE lower(regexp_replace(trim(product), '[[:space:]]+', ' ', 'g')) = lower(regexp_replace(trim(${product}), '[[:space:]]+', ' ', 'g')) AND id != ${id}`;
     if (dupe.length) return res.status(409).json({ error: `"${product}" already has a rate on a different row.` });
     const updated = await sql`
       UPDATE finance.product_rates
