@@ -6521,7 +6521,37 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
            deleted_by = CASE WHEN ${change} > 0 THEN NULL ELSE deleted_by END
      WHERE id = ${itemId}
   `;
+  if (reversesTxId) {
+    try { await dropOffcutItemIfUndone(sql, itemId, reversesTxId, user); } catch (e) { console.error('offcut item clean-up:', e.message); }
+  }
   return inserted[0] ? inserted[0].id : null;
+}
+// An offcut item whose FIRST entry was reversed and nothing else is left (owner, 2026-11-26, E-692: the offcut an Add
+// to Offcut made, its opening entry reversed - from Inventory or from the job's History, same thing): the item is
+// deleted outright - not kept at 0, not put in the Archive. Only when every entry it ever had is reversed, its
+// balance is 0 and no job card names it as its paper. The audit log keeps the record.
+async function dropOffcutItemIfUndone(sql, itemId, reversedTxId, user) {
+  const [item] = await sql`SELECT id, is_offcut, current_balance, paper_type, size, gsm, brand FROM inventory_items WHERE id = ${itemId}`;
+  if (!item || !item.is_offcut || Math.abs(parseFloat(item.current_balance) || 0) > 0.5) return false;
+  const txs = await sql`SELECT id, change, reverses_tx_id, created_at FROM inventory_transactions WHERE item_id = ${itemId} ORDER BY created_at, id`;
+  const originals = txs.filter(t => !t.reverses_tx_id);
+  if (!originals.length || Number(originals[0].id) !== Number(reversedTxId) || !((parseFloat(originals[0].change) || 0) > 0)) return false;
+  const undone = new Set(txs.filter(t => t.reverses_tx_id).map(t => Number(t.reverses_tx_id)));
+  if (!originals.every(t => undone.has(Number(t.id)))) return false;
+  const named = await sql`
+    SELECT id FROM jobs
+     WHERE inventory_item_id = ${itemId}
+        OR (particulars->'secondary_paper'->>'inventory_item_id') = ${String(itemId)}
+        OR (particulars->'third_paper'->>'inventory_item_id') = ${String(itemId)}
+     LIMIT 1`;
+  if (named[0]) return false;
+  await sql`DELETE FROM inventory_items WHERE id = ${itemId}`;
+  const label = [item.paper_type, item.size, item.gsm ? item.gsm + 'gsm' : ''].filter(Boolean).join(' ') + (item.brand ? ' · ' + item.brand : '');
+  try {
+    await logAudit(sql, { user: user || {} }, { action: 'inventory.delete', entityType: 'inventory', entityId: itemId,
+      summary: `Offcut ${label} removed - its first entry was reversed (TX #${reversedTxId}) and nothing is left in it`, metadata: { auto: 'first-entry-reversed', reversed_tx_id: reversedTxId } });
+  } catch (e) { /* the delete stands */ }
+  return true;
 }
 
 // Look up an offcut inventory item matching the source's paper_type, gsm,

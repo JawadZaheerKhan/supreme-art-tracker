@@ -6813,6 +6813,24 @@ function topupItem(j, t) {
 function topupOrd(t) { return t && t.paper ? TOPUP_ORD[t.paper] + ' paper' : '1st paper'; }
 function packetTopupsPending(j)   { return packetTopups(j).filter(t => t.status === 'pending'); }
 function packetTopupsApproved(j)  { return packetTopups(j).filter(t => t.status === 'approved'); }
+// The job card's green "with top-up" lines: per paper, the box's figure plus its approved top-ups - "864 packets
+// (774 + 90 topped up)" and the same for its sheets. Nothing when no top-up was approved.
+function jcTopupTotals(j, p1, s1, p2, s2, p3, s3) {
+  const by = { '': 0, secondary_paper: 0, third_paper: 0 };
+  for (const t of packetTopupsApproved(j)) { const k = t.paper || ''; if (k in by) by[k] += parseFloat(t.qty) || 0; }
+  const papers = [['', p1, s1, '1st'], ['secondary_paper', p2, s2, '2nd'], ['third_paper', p3, s3, '3rd']].filter(x => by[x[0]] > 0);
+  if (!papers.length) return { packets: '', sheets: '' };
+  const many = papers.length > 1 || by.secondary_paper > 0 || by.third_paper > 0;
+  const n = v => (+(+v).toFixed(2)).toLocaleString();
+  const line = t => `<div style="color:#166534;font-weight:800;font-size:13px;margin-top:3px;">${t}</div>`;
+  const pk = [], sh = [];
+  for (const [k, p, sv, ord] of papers) {
+    const add = by[k], lead = many ? ord + ': ' : '';
+    pk.push(line(`${lead}${n(p + add)} packets <span style="font-weight:600;font-size:11.5px;">(${n(p)} + ${n(add)} topped up)</span>`));
+    if (p > 0 && sv > 0) { const addSh = Math.round(sv / p * add); sh.push(line(`${lead}${n(sv + addSh)} <span style="font-weight:600;font-size:11.5px;">(+${n(addSh)} topped up)</span>`)); }
+  }
+  return { packets: pk.join(''), sheets: sh.join('') };
+}
 function hasPendingPacketTopup(j) { return packetTopupsPending(j).length > 0; }
 // Packets display for UI: original + approved1 + approved2 ... (same "+"
 // convention as the 2nd-paper primary+secondary split). Returns just the
@@ -17075,6 +17093,12 @@ function refreshVisibleStockMovement() {
 
 // Reverse a wrong stock-in entry. Confirms, hits the server, then reloads
 // inventory (balance changed) and re-renders the History modal in place.
+// An offcut item deleted by its reverse (first entry undone, nothing left - owner, 2026-11-26): its History closes.
+function invItemGoneAfterReverse(itemId) {
+  if (!itemId || inventoryAll.some(i => i.id === itemId)) return false;
+  if (document.getElementById('ledger-content')) closeModal();
+  return true;
+}
 async function reverseStockTx(txId, itemId) {
   const ok = await confirmDialog({
     title: 'Reverse this entry?',
@@ -17096,7 +17120,8 @@ async function reverseStockTx(txId, itemId) {
       // queue picks it up and the badge updates.
       if (result && (result.job_reverted || result.job_partial || result.over_issue_reopened)) await loadJobs();
       // Re-render the History modal only if it survived the re-render.
-      if (document.getElementById('ledger-content') && itemId) await renderInvHistory(itemId);
+      if (invItemGoneAfterReverse(itemId)) result._itemGone = true;
+      else if (document.getElementById('ledger-content') && itemId) await renderInvHistory(itemId);
       refreshVisibleStockMovement();
     } catch (uiErr) {
       console.error('Post-reverse UI refresh failed (reversal itself succeeded):', uiErr);
@@ -17108,6 +17133,7 @@ async function reverseStockTx(txId, itemId) {
       : result && result.job_reverted ? 'Entry reversed · job flipped back to Pending Stock'
       : part ? `Entry reversed · the job stays issued - ${(+part.sheets || 0).toLocaleString()} sheets of its ${part.paper || (part.secondary ? '2nd' : 'main')} paper are owed again`
       : 'Entry reversed');
+    if (result && result._itemGone) notify('Entry reversed · the offcut is deleted - its first entry was reversed and nothing is left in it');
   } catch (e) {
     notify('Reverse failed: ' + e.message);
   }
@@ -17300,7 +17326,8 @@ async function reverseStockTxGroup(txIds, itemId) {
     }
     await loadInventory();
     if (jobReverted || owedAgain) await loadJobs();
-    if (document.getElementById('ledger-content') && itemId) await renderInvHistory(itemId);
+    if (invItemGoneAfterReverse(itemId)) notify('The offcut is deleted - its first entry was reversed and nothing is left in it');
+    else if (document.getElementById('ledger-content') && itemId) await renderInvHistory(itemId);
     refreshVisibleStockMovement();
     // The last part of a split that was the job's ONLY issue sends it to
     // Pending Stock; parts of one issue among others leave the job issued.
@@ -34996,6 +35023,10 @@ function jobForm(j={}, opts) {
           const primSh   = Math.max(0, totalSh - secSh - thirdSh);
           const sheetsPrimVal  = hasSecond ? (primSh || '') : (j.sheets != null ? j.sheets : '');
           const packetsPrimVal = hasSecond ? (primPk || '') : (partsP.quantity_of_packets || '');
+          // Approved top-ups as totals (owner, 2026-11-26, E-692: "774 should become 864 and sheets also increase,
+          // topped up written with it in green"): the box keeps the job's own packets (what a save sends - the top-up is
+          // counted apart), the green line under it the total with the top-up. Sheets in the box's own (working) sheets.
+          const tuLines = jcTopupTotals(j, parseFloat(packetsPrimVal) || 0, parseFloat(sheetsPrimVal) || 0, secPkts, secSh, thirdPkts, thirdSh);
           const CUTS = ['1/1','1/2','1/3','1/4','1/6','1/8'];
           const cutOptions = CUTS.map(c => {
             const sel = (partsP.sheet_cut || '1/1') === c ? ' selected' : '';
@@ -35033,7 +35064,7 @@ function jobForm(j={}, opts) {
               <input type="text" id="f-sheets-3" value="${esc(hasThird ? String(thirdSh || '') : '')}" placeholder="0" oninput="jobThirdSheetsEdited();" style="flex:1 1 0;min-width:0;box-sizing:border-box;text-align:center;">
             </span>
           </div>
-          <div id="wp-top-sheets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newSheets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newSheets) ? topOverlay.sheetsDisplay : ''}</div>
+          <div id="wp-top-sheets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newSheets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newSheets) ? topOverlay.sheetsDisplay : ''}</div>${tuLines.sheets}
         </td>
         <td colspan="3">
           <span class="jc-lbl">Quantity of Packets</span>
@@ -35081,10 +35112,8 @@ function jobForm(j={}, opts) {
               </span>
             </div>
           </div>
-          <div id="wp-top-packets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newPackets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newPackets) ? topOverlay.packetsDisplay : ''}</div>`;
+          <div id="wp-top-packets" style="color:#7c3aed;font-weight:700;font-size:13px;margin-top:2px;${(topOverlay && topOverlay.newPackets) ? '' : 'display:none;'}">${(topOverlay && topOverlay.newPackets) ? topOverlay.packetsDisplay : ''}</div>${tuLines.packets}`;
         })()}
-          ${packetTopupsApproved(j).length
-            ? `<div style="margin-top:6px;"><span style="display:inline-block;background:#166534;color:#fff;font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#43; Top-up ${packetTopupsApproved(j).map(t=>(t.paper ? TOPUP_ORD[t.paper] + ': ' : '') + esc(String(t.qty))).join(' &#124; +')}</span></div>` : ''}
           ${hasPendingPacketTopup(j)
             ? `<div style="margin-top:4px;"><span style="display:inline-block;background:rgba(22,163,74,0.35);color:#166534;box-shadow:inset 0 0 0 1px rgba(22,163,74,0.55);font-weight:700;font-size:12px;padding:3px 9px;border-radius:12px;letter-spacing:0.02em;">&#9201; Pending +${packetTopupsPending(j).map(t=>(t.paper ? TOPUP_ORD[t.paper] + ': ' : '') + esc(String(t.qty))).join(', +')} packets</span></div>` : ''}
         </td>
