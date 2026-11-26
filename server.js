@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-26-item-removed';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-26-topups-in-packets';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -2403,6 +2403,35 @@ async function initDb() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+    // The top-ups approved before (owner, 2026-11-26) go into their job's packets too - once: the flag is claimed first
+    // (one server only), and each top-up is marked in_packets as it moves, so none is ever added twice.
+    try {
+      const claim = await sql`INSERT INTO schema_meta (key, value) VALUES ('topups_in_packets_v1', ${new Date().toISOString()}) ON CONFLICT (key) DO NOTHING RETURNING key`;
+      if (claim.length) {
+        const js = await sql`SELECT id, inventory_item_id, sheets, particulars FROM jobs WHERE jsonb_typeof(particulars->'packets_topups') = 'array'`;
+        for (const job of js) {
+          const p = { ...(job.particulars || {}) };
+          const tops = p.packets_topups.map(t => (t && typeof t === 'object' ? { ...t } : t));
+          let d = 0; const moved = [];
+          for (const t of tops) {
+            if (!t || t.status !== 'approved' || t.in_packets) continue;
+            d += await foldTopup(sql, job, p, t);
+            moved.push(t);
+            if (t.source === 'over-issue-reconcile' && Array.isArray(p.over_issue_decisions)) {
+              const at = new Date(t.approved_at).getTime();
+              const ix = p.over_issue_decisions.findIndex(x => x && x.decision === 'use' && !x.in_packets && (x.topup_id ? x.topup_id === t.id : Math.abs(new Date(x.decided_at).getTime() - at) < 120000));
+              if (ix >= 0) { p.over_issue_decisions = p.over_issue_decisions.slice(); p.over_issue_decisions[ix] = { ...p.over_issue_decisions[ix], in_packets: true, topup_id: t.id }; }
+            }
+          }
+          if (!moved.length) continue;
+          p.packets_topups = tops;
+          await sql`UPDATE jobs SET particulars = ${JSON.stringify(p)}, sheets = ${sheetsPlus(job, d)} WHERE id = ${job.id}`;
+          await logSystemAudit(sql, { action: 'job.packets_topup.into_packets', entityType: 'job', entityId: job.id,
+            summary: `Top-up ${moved.map(t => '+' + t.qty).join(', ')} moved into Quantity of Packets - now ${p.quantity_of_packets}`,
+            metadata: { topup_ids: moved.map(t => t.id || null), packets_before: (job.particulars || {}).quantity_of_packets, packets_after: p.quantity_of_packets, sheets_before: job.sheets } });
+        }
+      }
+    } catch (e) { console.error('Top-ups into packets:', e.message); }
     await sql`
       INSERT INTO schema_meta (key, value) VALUES ('schema_version', ${SCHEMA_VERSION})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
@@ -6191,6 +6220,48 @@ function jobDeductionSheets({ paperType, particulars }) {
 //             (job-offcut) are not counted in issued for the same reason.
 // The extra is split over the brands it came from, like an over-issue at
 // issue time, so the existing decision route can handle it unchanged.
+// Approved top-ups live INSIDE the job's packets (owner, 2026-11-26: "774 + 90" showed apart - "it should just simply
+// get added ... so I can also edit it later"): approving one adds its packets to the paper's Quantity of Packets (a 2nd
+// / 3rd paper's own packets) and Sheets Qty with it; the top-up row stays (History) marked in_packets and the paper
+// maths no longer count it apart. Undoing one (reversed, its Use decision undone, the issue reversed) takes them out.
+function cutPiecesOf(cut) { return parseInt(String(cut || '1/1').split('/')[1], 10) || 1; }
+// Adds (sign 1) or takes out (-1) a top-up's packets on p (in place); returns the Sheets Qty change.
+async function topupPacketsDelta(sql, job, p, t, sign) {
+  const qty = (parseFloat(t && t.qty) || 0) * sign;
+  if (!qty) return 0;
+  const r2 = n => Math.round(n * 100) / 100;
+  let itemId, cut;
+  if (t.paper) {
+    const ref = p[t.paper];
+    if (!ref || typeof ref !== 'object') return 0;
+    const was = parseFloat(ref.packets) || 0;
+    p[t.paper] = { ...ref, packets: typeof ref.packets === 'string' ? String(r2(Math.max(0, was + qty))) : r2(Math.max(0, was + qty)) };
+    // The card's packets are every paper's together (a 2nd / 3rd paper's come off the 1st): the total grows too.
+    p.quantity_of_packets = String(r2(Math.max(0, (parseFloat(p.quantity_of_packets) || 0) + qty)));
+    itemId = ref.inventory_item_id; cut = ref.sheet_cut;
+  } else {
+    const was = parseFloat(p.quantity_of_packets) || 0;
+    p.quantity_of_packets = String(r2(Math.max(0, was + qty)));
+    itemId = job.inventory_item_id; cut = p.sheet_cut;
+  }
+  const it = itemId ? (await sql`SELECT paper_type FROM inventory_items WHERE id = ${itemId}`)[0] : null;
+  return Math.round(qty * packetSize((it && it.paper_type) || '') * cutPiecesOf(cut));
+}
+async function foldTopup(sql, job, p, t) { const d = await topupPacketsDelta(sql, job, p, t, 1); t.in_packets = true; return d; }
+// The top-ups that were inside the packets before and are not now (gone, no longer approved, or taken out): out of p.
+async function unfoldGoneTopups(sql, job, pBefore, pAfter) {
+  const was = (pBefore && Array.isArray(pBefore.packets_topups) ? pBefore.packets_topups : []).filter(t => t && t.in_packets && t.status === 'approved');
+  const now = pAfter && Array.isArray(pAfter.packets_topups) ? pAfter.packets_topups : [];
+  const same = (a, b) => (a.id && b.id) ? String(a.id) === String(b.id) : (a.requested_at === b.requested_at && String(a.qty) === String(b.qty));
+  let d = 0;
+  for (const t of was) {
+    const n = now.find(x => x && same(x, t));
+    if (!n || n.status !== 'approved' || !n.in_packets) d += await topupPacketsDelta(sql, job, pAfter, t, -1);
+  }
+  return d;
+}
+// Sheets Qty after a change of d sheets (left alone when it is not a number).
+function sheetsPlus(job, d) { const cur = parseFloat(job && job.sheets); return d && Number.isFinite(cur) ? String(Math.max(0, Math.round(cur + d))) : (job ? job.sheets : null); }
 const OVER_ISSUE_LEDGER_REASONS = ['job-consumed', 'job-auto-offcut', 'job-auto-offcut-refund', 'job-issuance-reversed'];
 async function jobMainPaperOverIssue(sql, job) {
   const p = job.particulars || {};
@@ -6220,7 +6291,7 @@ async function jobMainPaperOverIssue(sql, job) {
   const extraTx = new Set((Array.isArray(job.issued_items) ? job.issued_items : [])
     .filter(x => x && EXTRA_SOURCES.has(x.source) && x.tx_id).map(x => Number(x.tx_id)));
   const topupSheets = (Array.isArray(p.packets_topups) ? p.packets_topups : [])
-    .filter(t => t && t.status === 'approved' && t.source !== 'over-issue-reconcile' && !t.paper)
+    .filter(t => t && t.status === 'approved' && t.source !== 'over-issue-reconcile' && !t.paper && !t.in_packets)
     .reduce((a, t) => a + Math.round((parseFloat(t.qty) || 0) * ps), 0);
   const needed = Math.max(0, total - secSheets) + topupSheets;
   const rows = await sql`
@@ -6250,7 +6321,7 @@ async function jobMainPaperOverIssue(sql, job) {
     e.sheets -= take; extraLeft -= take;
   }
   const issued = [...byItem.values()].reduce((a, e) => a + e.sheets, 0);
-  const settled = (Array.isArray(p.over_issue_decisions) ? p.over_issue_decisions : []).reduce((a, d) => a + (Number(d && d.total_sheets) || 0), 0)
+  const settled = (Array.isArray(p.over_issue_decisions) ? p.over_issue_decisions : []).filter(d => d && !d.in_packets).reduce((a, d) => a + (Number(d && d.total_sheets) || 0), 0)
     + (p.over_issue_pending ? (Number(p.over_issue_pending.total_sheets) || 0) : 0);
   const over = Math.round(issued - needed - settled);
   if (over < 1) return null;
@@ -6320,6 +6391,8 @@ async function resyncJobPaperAfterUndo(sql, req, job, sinceIso, why) {
   }
   p.over_issue_decisions = keep;
   delete p.over_issue_pending;
+  const sd = await unfoldGoneTopups(sql, job, job.particulars, p);
+  if (sd) await sql`UPDATE jobs SET sheets = ${sheetsPlus(job, sd)} WHERE id = ${job.id}`;
   const email = req.user && req.user.email;
   const oi = await jobMainPaperOverIssue(sql, { ...job, particulars: p });
   if (oi) p.over_issue_pending = overIssuePendingFrom(oi, email, 'edit-reversed');
@@ -10577,9 +10650,11 @@ app.post('/api/jobs/:id/reverse-issuance', requireWriteUser, async (req, res) =>
         .filter(t => !t || t.source !== 'over-issue-reconcile');
       if (!cleanParticulars.packets_topups.length) delete cleanParticulars.packets_topups;
     }
+    const revSheetsD = await unfoldGoneTopups(sql, job, job.particulars, cleanParticulars);
     const updated = await sql`
       UPDATE jobs
-         SET issuance_status = ${earlyAtCtp ? 'ctp' : 'pending'},
+         SET sheets = ${sheetsPlus(job, revSheetsD)},
+             issuance_status = ${earlyAtCtp ? 'ctp' : 'pending'},
              issued_at = NULL,
              issued_by_id = NULL,
              particulars = ${JSON.stringify(cleanParticulars)},
@@ -10731,8 +10806,9 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
       }
     }
     topups[idx] = { ...t, status: 'approved', approved_at: new Date().toISOString(), approved_by_id: req.user?.id || null, approved_by_email: req.user?.email || null };
+    const topupSheetsD = await foldTopup(sql, job, p, topups[idx]);   // into the packets (owner, 2026-11-26)
     p.packets_topups = topups;
-    const updated = await sql`UPDATE jobs SET particulars=${JSON.stringify(p)} WHERE id=${id} RETURNING *`;
+    const updated = await sql`UPDATE jobs SET particulars=${JSON.stringify(p)}, sheets = ${sheetsPlus(job, topupSheetsD)} WHERE id=${id} RETURNING *`;
     await logAudit(sql, req, {
       action: 'job.packets_topup.approve',
       entityType: 'job',
@@ -10851,7 +10927,7 @@ app.post('/api/jobs/:id/over-issue/decide', requireAnyBtn(['job_btn_over_issue',
     const totalPackets = Number(pending.total_packets) || 0;
     let summary = '';
     const decTxIds = [];   // for its History Reverse (owner, 2026-11-26)
-    let decTopupId = null;
+    let decTopupId = null, useSheetsD = 0;
     if (decision === 'use') {
       const topups = Array.isArray(p.packets_topups) ? p.packets_topups.slice() : [];
       decTopupId = 't' + Date.now() + Math.floor(Math.random() * 1000);
@@ -10867,6 +10943,7 @@ app.post('/api/jobs/:id/over-issue/decide', requireAnyBtn(['job_btn_over_issue',
         approved_by_email: req.user?.email || null,
         note: 'Auto-created from PM \"Use\" decision on over-issuance (sheets already deducted at issuance).',
       });
+      useSheetsD = await foldTopup(sql, job, p, topups[topups.length - 1]);   // into the packets (owner, 2026-11-26)
       p.packets_topups = topups;
       summary = `Job E-${id}: over-issued ${totalPackets} ${unit} added to job as approved packet top-up (PM: Use)`;
     } else if (decision === 'offcut') {
@@ -10908,10 +10985,11 @@ app.post('/api/jobs/:id/over-issue/decide', requireAnyBtn(['job_btn_over_issue',
       decided_at: new Date().toISOString(),
       decided_by_id: req.user?.id || null,
       decided_by_email: req.user?.email || null,
+      ...(decision === 'use' ? { in_packets: true, topup_id: decTopupId } : {}),
     });
     p.over_issue_decisions = decisions;
     delete p.over_issue_pending;
-    const updated = await sql`UPDATE jobs SET particulars=${JSON.stringify(p)} WHERE id=${id} RETURNING *`;
+    const updated = await sql`UPDATE jobs SET particulars=${JSON.stringify(p)}, sheets = ${sheetsPlus(job, useSheetsD)} WHERE id=${id} RETURNING *`;
     await logAudit(sql, req, {
       action: 'job.over_issue.decide',
       entityType: 'job',
@@ -13767,9 +13845,10 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
       decs.splice(ix, 1);
       p.over_issue_decisions = decs;
       delete p.over_issue_pending;
+      const sd = await unfoldGoneTopups(sql, job, pCur, p);   // its top-up's packets out of the box
       const oi = await jobMainPaperOverIssue(sql, { ...job, particulars: p });
       if (oi) p.over_issue_pending = overIssuePendingFrom(oi, req.user && req.user.email, 'decision-reversed');
-      const [u] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(p)} WHERE id = ${id} RETURNING *`;
+      const [u] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(p)}, sheets = ${sheetsPlus(job, sd)} WHERE id = ${id} RETURNING *`;
       const label = { use: 'Use in job', offcut: 'Add to Offcut', return: 'Send Back', ignore: 'Ignore' }[d.decision] || d.decision;
       await undoneLine(`over-issue decision "${label}" undone${txN ? ` (${txN} offcut credit${txN === 1 ? '' : 's'} reversed)` : ''}${oi ? ` - ${+(oi.overSheets / oi.ps).toFixed(2)} ${oi.unit} over-issued waiting for a decision again` : ''}`);
       return res.json(u);
@@ -13795,7 +13874,7 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
                               AND COALESCE(recorded_at, created_at) BETWEEN ${lo}::timestamptz AND ${hi}::timestamptz`).map(r => r.id);
         }
         txN = await reverseTxIds(txIds, `the top-up approval was reversed (Job E-${id})`);
-        const { approved_at, approved_by_id, approved_by_email, ...rest } = t;
+        const { approved_at, approved_by_id, approved_by_email, in_packets, ...rest } = t;
         topups[ix] = { ...rest, status: 'pending' };
         txt = `top-up +${t.qty} approval undone - its stock is back (${txN} entr${txN === 1 ? 'y' : 'ies'} reversed); the request waits again`;
       } else if (want === 'rejected') {
@@ -13807,7 +13886,8 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
         txt = `top-up request +${t.qty} withdrawn`;
       }
       const p = { ...pCur, packets_topups: topups };
-      const [u] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(p)} WHERE id = ${id} RETURNING *`;
+      const sd = await unfoldGoneTopups(sql, job, pCur, p);   // its packets out of the box
+      const [u] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(p)}, sheets = ${sheetsPlus(job, sd)} WHERE id = ${id} RETURNING *`;
       await undoneLine(txt);
       return res.json(u);
     }
@@ -15655,9 +15735,11 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, invH.reverse = 
             .filter(t => !t || t.source !== 'over-issue-reconcile');
           if (!cleanParticulars.packets_topups.length) delete cleanParticulars.packets_topups;
         }
+        const revSheetsD = await unfoldGoneTopups(sql, job, job.particulars, cleanParticulars);
         await sql`
           UPDATE jobs
-             SET issuance_status = 'pending',
+             SET sheets = ${sheetsPlus(job, revSheetsD)},
+                 issuance_status = 'pending',
                  issued_at = NULL,
                  issued_by_id = NULL,
                  issued_items = '[]'::jsonb,
@@ -15680,9 +15762,11 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, invH.reverse = 
             .filter(t => !t || t.source !== 'over-issue-reconcile');
           if (!cleanParticulars.packets_topups.length) delete cleanParticulars.packets_topups;
         }
+        const revSheetsD = await unfoldGoneTopups(sql, job, job.particulars, cleanParticulars);
         await sql`
           UPDATE jobs
-             SET issued_at = NULL,
+             SET sheets = ${sheetsPlus(job, revSheetsD)},
+                 issued_at = NULL,
                  issued_by_id = NULL,
                  issued_items = '[]'::jsonb,
                  particulars = ${JSON.stringify(cleanParticulars)}
