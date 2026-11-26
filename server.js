@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-26-waste-ready';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-26-item-removed';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1319,6 +1319,9 @@ async function initDb() {
     // coming back into it, brings it back.
     await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
     await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS deleted_by TEXT`;
+    // Removed for good (owner, 2026-11-26): an offcut whose first entry was reversed - out of Inventory AND the Archive,
+    // its entries kept in Stock In / Out and the reports.
+    await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ`;
 
     // (paper_type, size, gsm, brand, is_offcut) uniquely identifies an
     // inventory line. COALESCE keeps NULLs from defeating uniqueness —
@@ -6517,8 +6520,8 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
   // Stock coming back into a deleted item (a reversal, a receive) brings it back to Inventory.
   await sql`
     UPDATE inventory_items SET current_balance = current_balance + ${change},
-           deleted_at = CASE WHEN ${change} > 0 THEN NULL ELSE deleted_at END,
-           deleted_by = CASE WHEN ${change} > 0 THEN NULL ELSE deleted_by END
+           deleted_at = CASE WHEN ${change} > 0 AND removed_at IS NULL THEN NULL ELSE deleted_at END,
+           deleted_by = CASE WHEN ${change} > 0 AND removed_at IS NULL THEN NULL ELSE deleted_by END
      WHERE id = ${itemId}
   `;
   if (reversesTxId) {
@@ -6528,11 +6531,11 @@ async function applyInventoryChange(sql, { itemId, change, reason, jobId, notes,
 }
 // An offcut item whose FIRST entry was reversed and nothing else is left (owner, 2026-11-26, E-692: the offcut an Add
 // to Offcut made, its opening entry reversed - from Inventory or from the job's History, same thing): the item is
-// deleted outright - not kept at 0, not put in the Archive. Only when every entry it ever had is reversed, its
-// balance is 0 and no job card names it as its paper. The audit log keeps the record.
+// removed - not kept at 0, not put in the Archive; its entries stay in Stock In / Out and the reports (removed_at).
+// Only when every entry it ever had is reversed, its balance is 0 and no job card names it as its paper.
 async function dropOffcutItemIfUndone(sql, itemId, reversedTxId, user) {
-  const [item] = await sql`SELECT id, is_offcut, current_balance, paper_type, size, gsm, brand FROM inventory_items WHERE id = ${itemId}`;
-  if (!item || !item.is_offcut || Math.abs(parseFloat(item.current_balance) || 0) > 0.5) return false;
+  const [item] = await sql`SELECT id, is_offcut, current_balance, paper_type, size, gsm, brand, removed_at FROM inventory_items WHERE id = ${itemId}`;
+  if (!item || !item.is_offcut || item.removed_at || Math.abs(parseFloat(item.current_balance) || 0) > 0.5) return false;
   const txs = await sql`SELECT id, change, reverses_tx_id, created_at FROM inventory_transactions WHERE item_id = ${itemId} ORDER BY created_at, id`;
   const originals = txs.filter(t => !t.reverses_tx_id);
   if (!originals.length || Number(originals[0].id) !== Number(reversedTxId) || !((parseFloat(originals[0].change) || 0) > 0)) return false;
@@ -6545,7 +6548,7 @@ async function dropOffcutItemIfUndone(sql, itemId, reversedTxId, user) {
         OR (particulars->'third_paper'->>'inventory_item_id') = ${String(itemId)}
      LIMIT 1`;
   if (named[0]) return false;
-  await sql`DELETE FROM inventory_items WHERE id = ${itemId}`;
+  await sql`UPDATE inventory_items SET removed_at = NOW(), deleted_at = COALESCE(deleted_at, NOW()), deleted_by = COALESCE(deleted_by, ${(user && user.email) || 'system'}) WHERE id = ${itemId}`;
   const label = [item.paper_type, item.size, item.gsm ? item.gsm + 'gsm' : ''].filter(Boolean).join(' ') + (item.brand ? ' · ' + item.brand : '');
   try {
     await logAudit(sql, { user: user || {} }, { action: 'inventory.delete', entityType: 'inventory', entityId: itemId,
@@ -6589,7 +6592,7 @@ async function restoreDeletedItem(sql, { paper_type, size, gsm, brand, isOffcut 
   const rows = await sql`
     UPDATE inventory_items SET deleted_at = NULL, deleted_by = NULL
      WHERE id = (SELECT id FROM inventory_items
-                  WHERE deleted_at IS NOT NULL AND is_offcut = ${!!isOffcut}
+                  WHERE deleted_at IS NOT NULL AND removed_at IS NULL AND is_offcut = ${!!isOffcut}
                     AND lower(trim(paper_type))         = lower(trim(${paper_type}))
                     AND lower(trim(COALESCE(size,'')))  = lower(trim(COALESCE(${size||null},  '')))
                     AND lower(trim(COALESCE(gsm,'')))   = lower(trim(COALESCE(${gsm||null},   '')))
@@ -6607,6 +6610,7 @@ async function findOrCreateOffcutItem(sql, sourceItem, offcutSize) {
       AND COALESCE(gsm,'')   = COALESCE(${sourceItem.gsm||null}, '')
       AND COALESCE(brand,'') = COALESCE(${sourceItem.brand||null},'')
       AND is_offcut = true
+      AND removed_at IS NULL
     LIMIT 1
   `;
   if (existing[0]) {
@@ -16119,7 +16123,7 @@ app.get('/api/trash', requirePermission('trash_view', 'view'), async (req, res) 
     `;
     const papersRows = await sql`
       SELECT id, paper_type, size, gsm, brand, is_offcut, current_balance, deleted_at, deleted_by
-        FROM inventory_items WHERE deleted_at IS NOT NULL
+        FROM inventory_items WHERE deleted_at IS NOT NULL AND removed_at IS NULL
        ORDER BY deleted_at DESC
     `;
     // Everything in the Archive is kept until restored.
@@ -16173,7 +16177,7 @@ app.post('/api/trash/restore', requirePermission('trash_admin'), async (req, res
       return res.json({ ok: true });
     }
     if (type === 'paper') {
-      const updated = await sql`UPDATE inventory_items SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL RETURNING *`;
+      const updated = await sql`UPDATE inventory_items SET deleted_at=NULL, deleted_by=NULL WHERE id=${rowId} AND deleted_at IS NOT NULL AND removed_at IS NULL RETURNING *`;
       if (!updated.length) return res.status(404).json({ error: 'Paper item not in archive' });
       const p = updated[0];
       const label = `${p.paper_type}${p.size ? ' ' + p.size : ''}${p.gsm ? ' ' + p.gsm + 'gsm' : ''}${p.brand ? ' · ' + p.brand : ''}`;
