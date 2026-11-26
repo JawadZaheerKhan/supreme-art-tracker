@@ -6467,6 +6467,14 @@ function hasSecondaryPending(j) { return secondaryPendingSheets(j) > 0 || thirdP
 // stay visible in the queue so the store keeper knows to keep topping up,
 // even though the shop floor can already start processing them.
 function isPendingIssuance(j) { return j && (j.issuance_status === 'pending' || ctpAwaitingStock(j) || isPartialIssuance(j) || hasSecondaryPending(j)); }
+// In the Pending Stock queue (owner, 2026-11-26: low issuance ignored on the Jobs tab still sat in Pending Stock): a
+// job there only for its low issuance leaves once that low issuance was ignored (a new shortfall brings it back);
+// one waiting for another reason (not issued yet, CTP awaiting stock, a 2nd / 3rd paper owed) stays.
+function invPendingQueued(j) {
+  if (!isPendingIssuance(j)) return false;
+  if (j.issuance_status === 'pending' || ctpAwaitingStock(j) || hasSecondaryPending(j)) return true;
+  return !lowIssueIgnored(j);
+}
 
 // ── Process without paper (Admin only - owner, 2026-10-05) ──────────
 // A job waiting for paper - Pending Stock, part-issued, or 2nd paper still
@@ -13670,7 +13678,7 @@ function renderInventory() {
 function renderInvPendingToggle() {
   const btn = document.getElementById('inv-pending-toggle');
   if (!btn) return;
-  const pendCount   = jobs.filter(isPendingIssuance).length;
+  const pendCount   = jobs.filter(invPendingQueued).length;
   const topupCount  = jobs.reduce((n, j) => n + packetTopupsPending(j).length, 0);
   const count = pendCount + topupCount;
   const label = document.getElementById('inv-pending-label');
@@ -13703,7 +13711,7 @@ function invLookupJobs() {
   const numeric = /^\d+$/.test(idQ);
   const hit = j => (numeric && String(j.id).includes(idQ))
     || searchMatch([j.name, j.client, j.jobcode, j.ref].filter(Boolean).join(' '), q);
-  return jobs.filter(j => !isPendingIssuance(j) && !packetTopupsPending(j).length && hit(j))
+  return jobs.filter(j => !invPendingQueued(j) && !packetTopupsPending(j).length && hit(j))
     .sort((a, b) => (numeric ? (String(b.id) === idQ) - (String(a.id) === idQ) : 0) || b.id - a.id)
     .slice(0, 30);
 }
@@ -13831,7 +13839,7 @@ function renderInvPendingList() {
   // Job number order, lowest first, and the Inventory search box finds a
   // job here (owner, 2026-10-13 - it used to be deadline order).
   const pendingJobs = jobs
-    .filter(isPendingIssuance)
+    .filter(invPendingQueued)
     .filter(invPendingSearchHit)
     .sort((a, b) => a.id - b.id);
   // Extra-packets top-up requests: one row per pending request, grouped
@@ -15820,7 +15828,8 @@ function pendingJobChipsForGroup(key) {
       if (pIt && paperGroupKey(pIt) === key) {
         // CTP jobs awaiting stock are issuable here too — same rule as the
         // Pending Stock queue (issuing keeps them at CTP; see server).
-        const primaryPending = (j.issuance_status === 'pending') || ctpAwaitingStock(j) || isPartialIssuance(j);
+        // A low issuance ignored on the Jobs tab is not waiting for paper (owner, 2026-11-26).
+        const primaryPending = (j.issuance_status === 'pending') || ctpAwaitingStock(j) || (isPartialIssuance(j) && !lowIssueIgnored(j));
         if (primaryPending) {
           out.push({ job: j, jobId: j.id, source: 'primary', needSheets: jobDeductionSheetsClient(j), label: `E-${j.id}` });
         }
@@ -45308,7 +45317,7 @@ async function stationManagerMoveToStage(id, target) {
 // a server-computed field (see GET /api/jobs) rather than the usual
 // isOffcutJob()/inventory lookup, because operator-role Station sessions
 // never get the `inventory` array loaded client-side (403 there).
-function stationManagerOffcutPending(j) { return !!j.paper_is_offcut && isPendingIssuance(j); }
+function stationManagerOffcutPending(j) { return !!j.paper_is_offcut && invPendingQueued(j); }
 // Shade-card delivery eligibility — same rule the Jobs tab's yellow
 // Record Delivery button uses (canRecordDelivery() dropped: the manager
 // PIN is the authority here, verified server-side on manager-deliver).
