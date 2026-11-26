@@ -3415,10 +3415,11 @@ app.get('/api/jobs/:id/qa-starts', requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id) || String(id).startsWith('4')) return res.json([]);
     const rows = await sql`
-      SELECT id, machine, sections, entry_date, entry_time, new_job FROM line_clearance
+      SELECT id, machine, sections, to_char(entry_date, 'YYYY-MM-DD') AS entry_day, entry_time, new_job FROM line_clearance
        WHERE deleted_at IS NULL AND regexp_replace(new_job, '\D', '', 'g') = ${String(id)}
        ORDER BY entry_date, entry_time, created_at`;
-    const at = r => String(r.entry_date instanceof Date ? r.entry_date.toISOString() : r.entry_date).slice(0, 10) + 'T' + (r.entry_time || '00:00');
+    // The day as text from the database (owner, 2026-11-26): a Date's toISOString moves it a day back off UTC.
+    const at = r => String(r.entry_day || '').slice(0, 10) + 'T' + (r.entry_time || '00:00');
     res.json(rows.filter(r => lcJobId(r.new_job) === id).map(r => ({ id: r.id, machine: r.machine, sections: r.sections || [], start: at(r) })));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -4340,6 +4341,12 @@ async function loadOffDays(sql) {
   try { const r = await sql`SELECT value FROM schema_meta WHERE key = 'off_days'`; const a = r[0] ? JSON.parse(r[0].value) : []; return new Set(Array.isArray(a) ? a : []); }
   catch (e) { return new Set(); }
 }
+// A DATE column as YYYY-MM-DD (owner, 2026-11-26 - the timing check): the driver gives a Date at local midnight, so
+// toISOString() moves it a day back whenever the clock is not UTC. Read with local getters.
+function pgDay(v) {
+  if (v instanceof Date) return isNaN(v) ? '' : v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
+  return String(v || '').slice(0, 10);
+}
 const isOffDay = (d, offDays) => { const dt = new Date(d * 86400000); return dt.getUTCDay() === 0 || !!(offDays && offDays.has(dt.toISOString().slice(0, 10))); };
 // Work minutes of start -> end, day by day: 8:10 - 4:45, but the start counts from the entry even before 8:10,
 // and a real end (an entry) counts up to the entry even after 4:45. A job still running stops at 4:45 each day.
@@ -4373,7 +4380,7 @@ async function machineHoursMap(sql, from, to) {
     SELECT machine, entry_date, entry_time, new_job, prev_job FROM line_clearance
      WHERE deleted_at IS NULL AND entry_date <= ${to}
      ORDER BY machine, entry_date, entry_time, created_at`;
-  const at = r => String(r.entry_date instanceof Date ? r.entry_date.toISOString() : r.entry_date).slice(0, 10) + 'T' + (r.entry_time || '00:00');
+  const at = r => pgDay(r.entry_date) + 'T' + (r.entry_time || '00:00');
   const ids = [...new Set(rows.map(r => lcJobId(r.new_job)).filter(Boolean))];
   const jobs = ids.length ? await sql`SELECT id, name, log FROM jobs WHERE id = ANY(${ids})` : [];
   const byId = new Map(jobs.map(j => [j.id, { name: j.name, ends: jobLogEnds(j.log) }]));
@@ -5159,9 +5166,7 @@ async function aggregateProductionRange(sql, { from, to }) {
   for (const n of notes) {
     const hrs = parseFloat(String(n.hours || '').replace(/[^0-9.]/g, '')) || 0;
     if (hrs <= 0) continue;
-    const dateStr = n.date instanceof Date
-      ? n.date.toISOString().slice(0, 10)
-      : String(n.date).slice(0, 10);
+    const dateStr = pgDay(n.date);
     if (n.section === 'breaking') {
       if (n.machine) ensureOD(dateStr, n.machine).hours += hrs;
     } else {
@@ -9629,7 +9634,7 @@ async function lcUpdate(sql, req, id, b, by) {
   // New Job left empty and filled in now (owner, 2026-11-14): the new job starts now - its Job Time is this
   // moment, unless the date / time were changed in the same save. A number already there is just corrected.
   let dateOut = date, timeOut = lcText(b.entry_time, 10);
-  const curDate = String(cur.entry_date instanceof Date ? cur.entry_date.toISOString() : cur.entry_date || '').slice(0, 10);
+  const curDate = pgDay(cur.entry_date);
   if (!String(cur.new_job || '').trim() && next && date === curDate && timeOut === (cur.entry_time || '')) {
     dateOut = businessDateISO();
     timeOut = businessStamp().slice(-5);

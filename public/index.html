@@ -34314,7 +34314,11 @@ function ctpSetupRow(p) {
 // Worked out from the times written, so QA entering the start after the end was saved still works.
 // Its waste row too (owner, 2026-11-26): saved with the sheets, so the same times.
 const JC_STAGE_TIME_KEYS = new Set(['printed_sheets_qty', 'coating_sheets_qty', 'die_cutting_sheets', 'sorted_cartons_qty', 'pasted_cartons_qty', 'delivered_cartons_qty',
-  'printed_waste_sheets', 'uv_waste_sheets', 'die_cutting_waste', 'sorted_cartons_waste', 'pasting_waste_qty']);
+  'printed_waste_sheets', 'uv_waste_sheets', 'die_cutting_waste', 'sorted_cartons_waste', 'pasting_waste_qty', 'embellish_sheets_qty', 'embellish_waste_sheets']);
+// A waste row and its sheets row: the same saves.
+const JC_ROW_PAIR = { printed_sheets_qty: 'printed_waste_sheets', coating_sheets_qty: 'uv_waste_sheets', embellish_sheets_qty: 'embellish_waste_sheets',
+  die_cutting_sheets: 'die_cutting_waste', sorted_cartons_qty: 'sorted_cartons_waste', pasted_cartons_qty: 'pasting_waste_qty' };
+Object.entries({ ...JC_ROW_PAIR }).forEach(([a, b]) => { JC_ROW_PAIR[b] = a; });
 const LC_SECTION_STAGE = { CTP: 'CTP Plate Making', Printing: 'Printing', Coating: 'Coatings', 'Die Cutting': 'Die Cutting', Breaking: 'Sorting', Sorting: 'Sorting', 'Folder Gluer': 'Pasting', 'FG Dispatch': 'Ready to Deliver' };
 function jcLogTimeMs(t) {
   const m = String(t || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
@@ -34345,8 +34349,12 @@ function jcOpenLcEntry(id, date, machine) {
   setMode('reports');
   openLineClearancePage();
 }
-function jcStageTimeLines(job, stage, starts, log) {
+function jcStageTimeLines(job, stage, starts, log, key) {
   const lower = v => String(v || '').trim().toLowerCase();
+  if (stage !== 'Ready to Deliver' && key) {
+    const byEntries = jcRowTimeLines(job, stage, starts, log, key);
+    if (byEntries) return byEntries;
+  }
   if (stage === 'Ready to Deliver') {
     const pasted = log.filter(x => x.stage === 'Pasting').map(x => x.ms);
     const st = job.stages && job.stages[STAGES.indexOf('Pasting')];
@@ -34385,6 +34393,67 @@ function jcStageTimeLines(job, stage, starts, log) {
   }
   return lines.sort((a, b) => a.ms - b.ms).map(l => l.html);
 }
+// A row's times from its own saves (owner, 2026-11-26 - the timing check over every job): each entry of the row (or of
+// its waste / sheets partner when it has none) gets its log time - the same machine, by order when the counts agree,
+// else the same day; a save written twice in the log counts once; an entry with no log time shows its date (red).
+// Only this row's machines: a 2nd coating (Emboss on its own machine) no longer lands on the UV row. Its start is QA's
+// line clearance on its machine since that machine's save before it. null = the row has no entries (older jobs) - the
+// stage's log then, as before.
+function jcRowTimeLines(job, stage, starts, log, key) {
+  const lower = v => String(v || '').trim().toLowerCase();
+  const p = (job && job.particulars) || {};
+  const entsOf = k => (p[k] && Array.isArray(p[k].entries) ? p[k].entries : []).filter(x => x && String(x.qty == null ? '' : x.qty).trim() !== '');
+  let ents = entsOf(key);
+  if (!ents.length && JC_ROW_PAIR[key]) ents = entsOf(JC_ROW_PAIR[key]);
+  if (!ents.length) return null;
+  const machines = new Set(ents.map(x => lower(x.machine)).filter(Boolean));
+  const seen = new Set();
+  const logs = log.filter(l => l.stage === stage && (!machines.size || !l.machine || machines.has(lower(l.machine))))
+    .filter(l => { const k = lower(l.machine) + '|' + l.ms; if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((a, b) => a.ms - b.ms);
+  const dayOf = ms => { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+  // Each entry -> its log time.
+  const pts = ents.map((e, i) => ({ i, machine: e.machine || '', date: String(e.date || '').slice(0, 10), ms: null }));
+  const groups = new Map();
+  pts.forEach(pt => { const k = lower(pt.machine); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(pt); });
+  const usedLog = new Set();
+  for (const [m, list] of groups) {
+    const mine = logs.filter(l => !usedLog.has(l) && (!m || !l.machine || lower(l.machine) === m));
+    if (mine.length === list.length) { list.forEach((pt, n) => { pt.ms = mine[n].ms; usedLog.add(mine[n]); }); continue; }
+    for (const pt of list) {
+      const hit = mine.find(l => !usedLog.has(l) && pt.date && dayOf(l.ms) === pt.date);
+      if (hit) { pt.ms = hit.ms; usedLog.add(hit); }
+    }
+  }
+  // Order the saves; a date-only one sits at the end of its day.
+  const endOfDay = d => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d); return m ? new Date(+m[1], +m[2] - 1, +m[3], 23, 59).getTime() : NaN; };
+  pts.forEach(pt => { pt.sort = pt.ms != null ? pt.ms : endOfDay(pt.date); });
+  pts.sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.i - b.i);
+  const sameM = (st, e) => !st.machine || !e.machine || lower(st.machine) === lower(e.machine);
+  const qa = starts.filter(x => (x.sections || []).some(sec => LC_SECTION_STAGE[sec] === stage))
+    .filter(x => !machines.size || !x.machine || machines.has(lower(x.machine)))
+    .map(x => ({ ...x, ms: new Date(x.start).getTime(), used: false })).filter(x => isFinite(x.ms)).sort((a, b) => a.ms - b.ms);
+  const lcOf = st => st && st.id ? { id: st.id, date: String(st.start).slice(0, 10), machine: st.machine } : null;
+  const dm = d => { const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(d); return m ? m[2] + '/' + m[1] : d; };
+  const lines = [];
+  pts.forEach((pt, n) => {
+    const prev = [...pts.slice(0, n)].reverse().find(q => sameM(q, pt));
+    const from = prev ? prev.sort : -Infinity;
+    const cand = isFinite(pt.sort) ? qa.filter(x => !x.used && sameM(x, pt) && x.ms <= pt.sort && x.ms > from) : [];
+    const st = cand.length ? cand[cand.length - 1] : null;
+    if (st) st.used = true;
+    const html = pt.ms != null ? jcSpan(st ? st.ms : null, pt.ms, lcOf(st))
+      : [st ? jcSpan(st.ms, null, lcOf(st)) : '', pt.date ? `<span class="jc-t-end" title="Saved without a time">${dm(pt.date)}</span>` : ''].filter(Boolean).join(' - ');
+    // Two machines on the row (E-1088: SORM-2 and SOLNA124-UV saved the same minute): each line names its machine.
+    const tag = machines.size > 1 && pt.machine ? `<b>${esc(pt.machine)}</b>: ` : '';
+    if (html) lines.push({ ms: st ? st.ms : pt.sort, html: tag + html });
+  });
+  for (const x of qa) {
+    if (x.used) continue;
+    if (!pts.some(pt => sameM(x, pt) && pt.sort >= x.ms)) lines.push({ ms: x.ms, html: jcSpan(x.ms, null, lcOf(x)) });
+  }
+  return lines.sort((a, b) => a.ms - b.ms).map(l => l.html);
+}
 async function fillJcStageTimes(job) {
   const slots = [...document.querySelectorAll('.jc-stage-time')];
   if (!slots.length || !job || !job.id) return;
@@ -34392,7 +34461,7 @@ async function fillJcStageTimes(job) {
   try { starts = await api('GET', '/api/jobs/' + job.id + '/qa-starts'); } catch (e) { starts = []; }
   const log = jcStageLog(job);
   for (const el of document.querySelectorAll('.jc-stage-time')) {
-    const lines = jcStageTimeLines(job, el.dataset.stage, Array.isArray(starts) ? starts : [], log);
+    const lines = jcStageTimeLines(job, el.dataset.stage, Array.isArray(starts) ? starts : [], log, el.dataset.key);
     el.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
     // The times take the saved date's place; a row that can be edited opens the date box on a click.
     const td = el.closest('td');
@@ -34838,7 +34907,7 @@ function particularsTable(p, job, opts) {
       // the green ▶ in Quantity opens that stage's operator entry instead.
       const locked = jcStageRowsLocked && !!stage;
       // Each stage's time (owner, 2026-11-11), filled in once QA's starts arrive - see fillJcStageTimes.
-      const stageTimeSlot = stage && JC_STAGE_TIME_KEYS.has(r.key) && job && job.id && !opts.preview ? `<div class="jc-stage-time" data-stage="${esc(stage)}"></div>` : '';
+      const stageTimeSlot = stage && JC_STAGE_TIME_KEYS.has(r.key) && job && job.id && !opts.preview ? `<div class="jc-stage-time" data-stage="${esc(stage)}" data-key="${esc(r.key)}"></div>` : '';
       const lockAttr = locked ? ` readonly title="Recorded at the Station - use the green ▶ to change it there"` : '';
       return `
     <tr${locked ? ' class="jc-row-locked"' : ''}>
