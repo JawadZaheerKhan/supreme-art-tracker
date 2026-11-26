@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-25-lc-form';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-26-waste-ready';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -499,7 +499,7 @@ function extraPaperBySource(source) { return EXTRA_PAPERS.find(e => e.source ===
 // group (currently just inventory_reverse's '30-day').
 // Buttons that are only Edit or Hidden (owner, 2026-11-11): a View on a button only greyed it
 // out, so these rows have no View. The rest keep View, where seeing something means something.
-const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_edit_paper', 'inv_btn_rename_paper', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'products_btn_new', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'plate_btn_add', 'plate_btn_stock_in', 'plate_btn_use', 'plate_btn_pickup', 'plate_btn_delete', 'store_btn_edit', 'store_btn_stock_in', 'store_btn_stock_out', 'store_btn_reverse', 'station_btn_deliver', 'station_btn_mil_report', 'station_btn_lc_form', 'store_btn_delete_history', 'store_btn_part_delete', 'store_btn_reconcile', 'store_btn_settings', 'store_btn_orders', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
+const ACTION_BUTTON_KEYS = ['job_btn_history_reverse', 'job_btn_link', 'job_btn_print', 'job_btn_block', 'job_btn_delete', 'job_btn_duplicate', 'job_btn_create_mil', 'job_btn_new_job', 'job_btn_stage_moves', 'job_btn_process_without_paper', 'job_btn_extra_packets', 'job_btn_over_issue', 'job_btn_over_issue_ignore', 'job_btn_paper_to_offcut', 'job_btn_record_delivery', 'job_btn_pm_check', 'job_btn_warning_ignore','job_btn_low_issue_ignore','qa_btn_waiting_ignore', 'job_btn_operator_entry', 'job_btn_delete_delivery', 'job_btn_adjust', 'inv_btn_stock_in', 'inv_btn_stock_out', 'inv_btn_offcut_issuance', 'inv_btn_edit', 'inv_btn_delete', 'inv_btn_add_offcut', 'inv_btn_add_paper', 'inv_btn_add_import', 'inv_btn_reverse', 'inv_btn_edit_paper', 'inv_btn_rename_paper', 'inv_btn_dismiss_pending', 'inv_btn_print_sticker', 'rpt_btn_delete_history', 'rpt_btn_delete_consumption', 'rpt_job_number_reuse', 'rpt_party_ledger_entry', 'rpt_chart_accounts_edit', 'products_btn_name', 'products_btn_new', 'user_btn_change_role', 'carton_btn_types', 'carton_btn_stock_in', 'carton_btn_issue', 'carton_btn_reverse', 'plate_btn_add', 'plate_btn_stock_in', 'plate_btn_use', 'plate_btn_pickup', 'plate_btn_delete', 'store_btn_edit', 'store_btn_stock_in', 'store_btn_stock_out', 'store_btn_reverse', 'station_btn_deliver', 'station_btn_mil_report', 'station_btn_lc_form', 'station_btn_waste_ready', 'store_btn_delete_history', 'store_btn_part_delete', 'store_btn_reconcile', 'store_btn_settings', 'store_btn_orders', 'dash_btn_ignore_warning', 'rpt_line_clearance_edit', 'rpt_line_clearance_delete', 'rpt_days_off'];
 const ROLE_PERMISSION_DEFAULTS = {
   job_write:            { label: 'Create, edit/save, move, duplicate, link/unlink, block/unblock a job, or manage a MIL group', levels: { admin: 'yes', production_manager: 'yes' } },
   job_print:            { label: 'Print a job card (display only — not independently server-enforced)', levels: { admin: 'yes', production_manager: 'yes', ceo: 'yes' } },
@@ -523,6 +523,7 @@ const ROLE_PERMISSION_DEFAULTS = {
   station_access:       { label: 'Station tab — open the Station terminal (a PIN is still needed to process)', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes', ceo: 'yes' } },
   station_write:        { label: 'Process a station — save / advance / skip / notes', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes' } },
   station_manager_pin:  { label: 'Attempt Manager-PIN actions (stage, machine, offcut, shade-card delivery) — a valid manager PIN is still required either way', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes', ceo: 'yes' } },
+  station_btn_waste_ready: { label: 'Ready to Deliver station — Wasted: the Ready cartons left on a partly delivered job go to waste (nothing more owed = Delivered; still short of the PO = stays Partial for the PM)', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes' } },
   station_btn_lc_form:  { label: 'QA station — Print LC Form: the blank Line Clearance form (job card size)', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes' } },
   station_btn_mil_report: { label: 'Ready to Deliver station — MIL Jobs Report (read only, as in Reports; nothing can be changed there)', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes' } },
   station_btn_deliver:  { label: 'Ready to Deliver station — the Delivered pill and Record Delivery (the delivery fields only, no Rate / Sale Tax / E-FBR / MSI) — the station PIN is still needed', levels: { admin: 'yes', production_manager: 'yes', operator: 'yes' } },
@@ -11290,6 +11291,68 @@ async function recordDeliveryHandler(req, res, o) {
     } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 }
+// The Dispatch Incharge writes off the Ready cartons left on a partly delivered job (owner, 2026-11-26): they go to
+// waste - a minus entry on the Ready qty (QC's own entries stay), so Ready left is 0. Nothing more owed: the job is
+// Delivered; still short of its PO: it stays Partial for the PM to finalize.
+app.post('/api/jobs/:id/station-waste-ready', requireStationUser, requirePermission('station_btn_waste_ready'), async (req, res) => {
+  try {
+    if (!canProcessStation(req.user)) return res.status(403).json({ error: 'View-only: your role cannot process jobs at the station.' });
+    await dbReady;
+    const sql = getDb();
+    const id = parseInt(req.params.id, 10);
+    const pin = String(req.body.pin || '').trim();
+    if (!validPin(pin)) return res.status(400).json({ error: 'Enter a 3-digit PIN' });
+    const [op] = await sql`SELECT id, name, stage_index, stage_indices, persons FROM operators WHERE pin = ${pin} AND active LIMIT 1`;
+    if (!op) return res.status(401).json({ error: 'PIN not recognized' });
+    const st = (Array.isArray(op.stage_indices) && op.stage_indices.length ? op.stage_indices : [op.stage_index]).map(Number);
+    if (!st.includes(STAGES.length - 2)) return res.status(403).json({ error: 'Ready cartons are written off at the Ready to Deliver station.' });
+    const persons = Array.isArray(op.persons) ? op.persons : [];
+    const want = String(req.body.person_name || '').trim();
+    const person = (want && persons.find(p => p && String(p.name || '').trim() === want)) ? want : op.name;
+    const held = await takeOpLocks(sql, [`job-delivery:${id}`]);
+    if (!held) return res.status(409).json({ error: OP_BUSY });
+    try {
+      const [job] = await sql`SELECT * FROM jobs WHERE id = ${id} AND deleted_at IS NULL`;
+      if (!job) return res.status(404).json({ error: 'Job not found' });
+      const particulars = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+      const row = (particulars.delivered_cartons_qty && typeof particulars.delivered_cartons_qty === 'object') ? { ...particulars.delivered_cartons_qty } : {};
+      const shipped = sumDeliveryCartons(job.deliveries);
+      const ready = readyQtyFromParticularsRow(row);
+      const left = Math.round((ready - shipped) * 1000) / 1000;
+      if (!(shipped > 0)) return res.status(400).json({ error: 'Nothing shipped on this job yet - its Ready cartons are not left over.' });
+      if (!(left > 0)) return res.status(400).json({ error: 'This job has no Ready cartons left.' });
+      const today = businessDateISO();
+      const seed = Array.isArray(row.entries) && row.entries.length ? row.entries
+        : (String(row.quantity || '').trim() ? [{ qty: String(row.quantity).trim(), date: null, operator: row.signature || null, machine: row.name || null }] : []);
+      const entries = [...seed, { qty: String(-left), date: today, operator: person, machine: op.name, wasted: true }];
+      particulars.delivered_cartons_qty = { ...row, entries, quantity: entries.map(e => String((e && e.qty) || '')).filter(q => q !== '').join(' | ') };
+      const prevW = (particulars.ready_wasted && typeof particulars.ready_wasted === 'object') ? particulars.ready_wasted : {};
+      particulars.ready_wasted = { qty: (Number(prevW.qty) || 0) + left, at: new Date().toISOString(), by: `${person} (${op.name})` };
+      // Still owed? The same target a delivery closes at (tolerance, MIL, reopened), with the Ready qty now = shipped.
+      const tj = await withTolerance(sql, { ...job, particulars });
+      const bookedQty = parseFloat(String(job.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+      let stage_index = job.stage_index || 0;
+      const stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+      const target = deliveryTargetQty(tj, stage_index, stages, bookedQty);
+      const complete = target ? shipped >= target : shipped > 0;
+      const time = businessStamp(), at = new Date().toISOString(), by = `${person} (${op.name})`;
+      const log = Array.isArray(job.log) ? [...job.log] : [];
+      log.push({ stage: STAGES[stage_index], status: (stages[stage_index] && stages[stage_index].status) || 'active', notes: `Ready ${left.toLocaleString()} left wasted by ${person}${complete ? ' - nothing more owed' : ' - still short of the PO (the PM finalizes)'}`, by, time });
+      if (complete && stage_index < STAGES.length - 1) {
+        stages[6] = { ...(stages[6] || {}), status: 'done', by, time, at, reopened: false };
+        stages[7] = { status: 'done', notes: `Delivered - Ready ${left.toLocaleString()} left wasted`, by, time, at };
+        stage_index = 7;
+        log.push({ stage: STAGES[7], status: 'done', notes: `Delivered - the Ready cartons left (${left.toLocaleString()}) went to waste`, by, time });
+      }
+      const [updated] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(particulars)}, stage_index = ${stage_index}, stages = ${JSON.stringify(stages)}, log = ${JSON.stringify(log)}
+                                   WHERE id = ${id} RETURNING *`;
+      await logAudit(sql, req, { action: 'job.ready_wasted', entityType: 'job', entityId: id,
+        summary: `Job E-${id}: Ready ${left.toLocaleString()} left wasted by ${by}${complete ? ' - Delivered' : ' - still Partial (short of the PO)'}` });
+      if (!canSeeFinanceData(req.user)) { delete updated.rate; delete updated.tax_pct; }
+      res.json({ ...updated, _wasted: left, _complete: complete });
+    } finally { await releaseOpLocks(sql, held); }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 // The Ready to Deliver station records a delivery (owner, 2026-11-24): its PIN, the delivery fields the Production
 // Manager sees - not the invoicing ones.
 app.post('/api/jobs/:id/station-deliver', requireStationUser, requirePermission('station_btn_deliver'), async (req, res) => {

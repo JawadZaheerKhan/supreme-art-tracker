@@ -45163,9 +45163,40 @@ function stationDiDetailsHtml(j) {
   ].filter(Boolean);
   const list = Array.isArray(j.deliveries) ? j.deliveries : [];
   const ships = list.slice(-4).map(d => `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><b>${esc(d.date || '')}</b> &middot; ${esc(String(d.cartons || ''))} unit cartons${d.po_no ? ' &middot; PO ' + esc(d.po_no) : ''}${deliveryChallanText(d) ? ' &middot; Invoice ' + esc(deliveryChallanText(d)) : ''}</div>`).join('');
-  return (badges ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">${badges}</div>` : '')
+  // Wasted (owner, 2026-11-26): under READY - n LEFT, the Ready cartons left on a partly shipped job can go to waste.
+  const readyLeftN = shipped > 0 ? Math.max(0, readyCartonsTotal(j) - shipped) : 0;
+  const wasteBtn = (readyLeftN > 0 && (isSuperAdmin() || hasPerm('station_btn_waste_ready')))
+    ? `<div style="margin-top:4px;"><span role="button" tabindex="0" class="btn btn-sm" onclick="event.stopPropagation();stationWasteReady(${j.id})" style="background:#dc2626;border-color:#b91c1c;color:#fff;font-weight:800;font-size:11px;padding:2px 10px;" title="The ${readyLeftN.toLocaleString()} Ready cartons left go to waste">&#128465; Wasted ${readyLeftN.toLocaleString()}</span></div>` : '';
+  return (badges ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">${badges}</div>` : '') + wasteBtn
     + (facts.length ? `<div style="margin-top:5px;font-size:13px;display:flex;flex-wrap:wrap;gap:4px 14px;color:var(--text);">${facts.map(f => `<span>${f}</span>`).join('')}</div>` : '')
     + (ships ? `<div style="margin-top:5px;padding:5px 8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;font-size:12px;color:#14532d;">${list.length > 4 ? `<div style="color:var(--text2);">${list.length} shipments - the last 4:</div>` : ''}${ships}</div>` : '');
+}
+async function stationWasteReady(id) {
+  const j = jobs.find(x => x.id === id);
+  if (!j || !stationOperator) return;
+  const shipped = totalDeliveredCartons(j), left = Math.max(0, readyCartonsTotal(j) - shipped);
+  if (!(left > 0)) { notify('This job has no Ready cartons left.'); return; }
+  // After the waste the job still owes only its PO (the server decides the same, with the company's tolerance).
+  const po = parseFloat(String(j.qty || '').replace(/[^0-9.\-]/g, '')) || 0;
+  const band = (typeof jobTolBand === 'function' && !(j.stock_group_name || j.group_job_id) && !j.is_shade_card) ? jobTolBand(j) : null;
+  const shortPo = po > 0 && shipped < po && !(band && shipped >= band.lo);
+  const ok = await confirmDialog({
+    title: `Waste the Ready left on #${id}?`,
+    message: `${j.name || ''}\n\nThe ${left.toLocaleString()} Ready cartons left go to waste - they leave Ready and cannot be shipped.\n\n`
+      + (shortPo ? `It is still ${(po - shipped).toLocaleString()} short of its PO, so it stays Partial - the PM finalizes it.` : 'Nothing more is owed on its PO, so the job goes to Delivered.'),
+    danger: true, confirmText: 'Wasted',
+  });
+  if (!ok) return;
+  showSaving(true);
+  try {
+    const body = { pin: stationOperator.pin };
+    if (stationPerson && stationPerson.name) body.person_name = stationPerson.name;
+    const updated = await api('POST', `/api/jobs/${id}/station-waste-ready`, body);
+    jobs = jobs.map(x => x.id === id ? { ...x, ...updated } : x);
+    notify(updated && updated._complete ? `#${id}: ${left.toLocaleString()} wasted - Delivered` : `#${id}: ${left.toLocaleString()} wasted - still Partial (short of the PO), the PM finalizes it`);
+    stationRender();
+  } catch (e) { notify('Error: ' + e.message); }
+  showSaving(false);
 }
 // Ready to Deliver station (owner, 2026-11-24): the job's stage pills; only Delivered can be tapped - it sends a job
 // that is at Ready to Deliver on, the same as the station's own Done.
@@ -47288,6 +47319,7 @@ const ACC_STATION_TAB_ROWS = [
   { key: 'station_btn_deliver', type: 'action' },   // Ready to Deliver: Delivered pill + Record Delivery (owner, 2026-11-24)
   { key: 'station_btn_mil_report', type: 'action' },   // Ready to Deliver: the MIL Jobs Report, read only (owner, 2026-11-25)
   { key: 'station_btn_lc_form', type: 'action' },   // QA: Print the blank Line Clearance form (owner, 2026-11-25)
+  { key: 'station_btn_waste_ready', type: 'action' },   // Ready to Deliver: Wasted - the Ready left goes to waste (owner, 2026-11-26)
 ];
 // Users tab. user_accessregister_tab_access is special-cased in
 // accGroupRow: every role except super_admin renders as a locked HIDDEN
