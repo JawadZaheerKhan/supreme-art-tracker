@@ -16721,6 +16721,14 @@ const JH_REVERSIBLE = {
   'job.pricing.update':         { perm: 'job_btn_pricing',         ok: m => 'prior_tax_pct' in m, what: 'puts the old rate and sale tax back' },
   'job.cartons_packets.update': { perm: 'job_btn_pricing',         ok: m => 'prior' in m, what: 'puts the old Carton Shipper back' },
   'job.update':                 { perm: 'job_btn_edit',            ok: m => !!(m.revert && (m.revert.reversible || m.revert.paper_resync || m.revert.why === 'it changed issued paper')), what: 'puts the job card fields back as they were (an issued-paper change: the over-issue decisions made since are undone and the over-issue / owed paper worked out again)' },
+  // (owner, 2026-11-26) - the server checks each one's own row too.
+  'job.over_issue.decide':      { perm: 'job_btn_over_issue',      ok: () => true, what: 'undoes this decision (an Add to Offcut credit is reversed, a Use top-up comes off) - the over-issue waits for a decision again' },
+  'job.packets_topup.approve':  { perm: 'inv_btn_stock_out',       ok: () => true, what: 'puts the top-up\'s stock back - the request waits again' },
+  'job.packets_topup.reject':   { perm: 'inv_btn_stock_out',       ok: () => true, what: 'the top-up request waits again' },
+  'job.packets_topup.request':  { perm: 'job_btn_extra_packets',   ok: () => true, what: 'withdraws the top-up request (while it still waits)' },
+  'job.ready_wasted':           { perm: 'job_btn_edit',            ok: () => true, what: 'puts the wasted Ready cartons back in Ready (a job it closed goes back to Ready to Deliver)' },
+  'job.process_without_paper':  { perm: 'job_btn_process_without_paper', ok: () => true, what: 'the job waits for its paper again (back in Pending Stock / its paper owed again)' },
+  'job.warning_ignored':        { perm: null,                      ok: () => true, what: 'shows the warning on the job again' },
 };
 // One delivery entry in words (cartons, Carton Shipper, Invoice No., PO, Batch, date).
 function deliveryFactsLine(d) {
@@ -16749,7 +16757,7 @@ function jhReverseHtml(jobId, a, reversedIds) {
   if (a.action === 'job.update' && m.revert && !m.revert.reversible && !m.revert.paper_resync && m.revert.why !== 'it changed issued paper') {
     return facts + `<div style="font-size:11px;color:var(--text2);margin-top:2px;">Can't be reversed here - ${esc(m.revert.why || 'it moved stock')}; change it back on the job card.</div>`;
   }
-  if (!r.ok(m) || !(isSuperAdmin() || (hasPerm(r.perm) && seeBtn('job_btn_history_reverse')))) return facts;
+  if (!r.ok(m) || !(isSuperAdmin() || ((!r.perm || hasPerm(r.perm)) && seeBtn('job_btn_history_reverse')))) return facts;
   return facts + `<div style="margin-top:4px;"><button class="btn btn-sm ceo-hide" style="background:#DC2626;color:#fff;border-color:#DC2626;font-weight:600;padding:2px 9px;font-size:11px;" onclick="event.stopPropagation(); reverseJobHistory(${jobId}, ${a.id})" title="Undo this change - ${esc(r.what)}">&#8634; Reverse</button></div>`;
 }
 async function reverseJobHistory(jobId, auditId) {
@@ -16797,7 +16805,9 @@ async function reverseJobHistory(jobId, auditId) {
 function jhActionLabel(action) {
   const k = String(action || '');
   const map = { 'job.create': 'Created', 'job.update': 'Edited', 'job.station': 'Station', 'job.issue_stock': 'Paper issued', 'job.paper_reversed': 'Issue reversed', 'job.paper_to_offcut': 'Sent to offcut',
-    'job.process_to_ctp': 'Sent to CTP', 'job.process_from_ctp': 'CTP done', 'job.delete': 'Archived', 'job.restore': 'Restored' };
+    'job.process_to_ctp': 'Sent to CTP', 'job.process_from_ctp': 'CTP done', 'job.delete': 'Archived', 'job.restore': 'Restored',
+    'job.ready_wasted': 'Wasted', 'job.over_issue.decide': 'Over-issue decided', 'job.packets_topup.request': 'Top-up asked', 'job.packets_topup.approve': 'Top-up approved',
+    'job.packets_topup.reject': 'Top-up rejected', 'job.process_without_paper': 'No paper', 'job.warning_ignored': 'Warning ignored' };
   if (map[k]) return map[k];
   const t = k.replace(/^job\./, '').replace(/[._]+/g, ' ').trim();
   return t ? t.charAt(0).toUpperCase() + t.slice(1) : 'Change';

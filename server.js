@@ -7750,7 +7750,8 @@ app.post('/api/jobs/:id/process-without-paper', requireAuth, async (req, res) =>
       entityType: 'job',
       entityId: id,
       summary: `Processed Job E-${id}: ${job.name} without paper (Admin) - no stock issued${owedTxt ? '; waived ' + owedTxt : ''}. Was ${status === 'pending' ? 'in Pending Stock' : 'part-issued'}.`,
-      metadata: { from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed, third_owed_sheets: thirdOwed },
+      metadata: { from_status: status, main_owed_sheets: mainOwed, second_owed_sheets: secondOwed, third_owed_sheets: thirdOwed,
+        prev_stage_index: job.stage_index || 0, prev_partial: p0.partial_pending_sheets ?? null, prev_issued_at: job.issued_at || null },   // for its History Reverse
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -10561,6 +10562,7 @@ app.post('/api/jobs/:id/packets-topup', requirePermission('job_btn_extra_packets
       action: 'job.packets_topup.request',
       entityType: 'job',
       entityId: id,
+      metadata: { topup_id: entry.id },   // for its History Reverse (owner, 2026-11-26)
       summary: `Requested +${qty} extra packets${topupPaper ? ` of the ${topupPaper === 'third_paper' ? '3rd' : '2nd'} paper` : ''} for Job E-${id}: ${job.name} — pending store-keeper approval`,
     });
     res.json(updated[0]);
@@ -10614,6 +10616,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
     const entry = stockEntryInstant(req.body && req.body.entry_date);
     if (entry.error) return res.status(400).json({ error: entry.error });
     const occurredAt = entry.at;
+    const topupTxIds = [];   // its History Reverse undoes exactly these (owner, 2026-11-26)
     for (const s of splits) {
       const splitItem = byId.get(s.item_id);
       if (!splitItem) return res.status(400).json({ error: `Inventory item ${s.item_id} not found.` });
@@ -10623,7 +10626,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
         String(splitItem.gsm || '') === String(sourceItem.gsm || '') &&
         !!splitItem.is_offcut === !!sourceItem.is_offcut;
       if (!sameGroup) return res.status(400).json({ error: 'A selected brand is not in this job’s paper group.' });
-      await applyInventoryChange(sql, {
+      topupTxIds.push(await applyInventoryChange(sql, {
         itemId: s.item_id,
         change: -s.sheets,
         batch: s.batch,
@@ -10633,13 +10636,13 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
         user: req.user,
         challanNo,
         occurredAt,
-      });
+      }));
     }
     if (topupRef.cut_size && topupRef.offcut_size && sourceItem) {
       for (const s of splits) {
         const splitItem = byId.get(s.item_id);
         const offcutItem = await findOrCreateOffcutItem(sql, splitItem, topupRef.offcut_size);
-      await applyInventoryChange(sql, {
+      topupTxIds.push(await applyInventoryChange(sql, {
         itemId: offcutItem.id,
           change: +s.sheets,
         reason: 'job-offcut',
@@ -10648,7 +10651,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
         user: req.user,
           challanNo,
           occurredAt,
-      });
+      }));
       }
     }
     topups[idx] = { ...t, status: 'approved', approved_at: new Date().toISOString(), approved_by_id: req.user?.id || null, approved_by_email: req.user?.email || null };
@@ -10658,6 +10661,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/approve', requirePermission('inv_
       action: 'job.packets_topup.approve',
       entityType: 'job',
       entityId: id,
+      metadata: { topup_id: t.id, tx_ids: topupTxIds.filter(Boolean) },
       summary: `Approved +${t.qty} extra packets for Job E-${id}: ${sheets} sheets deducted`,
     });
     res.json(updated[0]);
@@ -10687,6 +10691,7 @@ app.post('/api/jobs/:id/packets-topup/:topupId/reject', requirePermission('inv_b
       action: 'job.packets_topup.reject',
       entityType: 'job',
       entityId: id,
+      metadata: { topup_id: t.id },
       summary: `Rejected +${t.qty} extra packets request for Job E-${id}`,
     });
     res.json(updated[0]);
@@ -10769,10 +10774,13 @@ app.post('/api/jobs/:id/over-issue/decide', requireAnyBtn(['job_btn_over_issue',
     const unit = pending.unit || 'packets';
     const totalPackets = Number(pending.total_packets) || 0;
     let summary = '';
+    const decTxIds = [];   // for its History Reverse (owner, 2026-11-26)
+    let decTopupId = null;
     if (decision === 'use') {
       const topups = Array.isArray(p.packets_topups) ? p.packets_topups.slice() : [];
+      decTopupId = 't' + Date.now() + Math.floor(Math.random() * 1000);
       topups.push({
-        id: 't' + Date.now() + Math.floor(Math.random() * 1000),
+        id: decTopupId,
         qty: totalPackets,
         status: 'approved',
         source: 'over-issue-reconcile',
@@ -10792,7 +10800,7 @@ app.post('/api/jobs/:id/over-issue/decide', requireAnyBtn(['job_btn_over_issue',
         if (!invRows.length) continue;
         const it = invRows[0];
         const offcutItem = await findOrCreateOffcutItem(sql, it, it.size || '');
-        await applyInventoryChange(sql, {
+        decTxIds.push(await applyInventoryChange(sql, {
           itemId: offcutItem.id,
           change: +s.sheets,
           reason: 'job-offcut',
@@ -10800,7 +10808,7 @@ app.post('/api/jobs/:id/over-issue/decide', requireAnyBtn(['job_btn_over_issue',
           notes: `Job E-${id}: ${s.packets} ${unit} over-issued from ${it.brand || 'no brand'} added to offcut stock (PM: Add to Offcut)`,
           user: req.user,
           challanNo: pending.challan_no || null,
-        });
+        }));
       }
       summary = `Job E-${id}: over-issued ${totalPackets} ${unit} credited to offcut (PM: Add to Offcut)`;
     } else if (decision === 'ignore') {
@@ -10833,6 +10841,7 @@ app.post('/api/jobs/:id/over-issue/decide', requireAnyBtn(['job_btn_over_issue',
       entityType: 'job',
       entityId: id,
       summary,
+      metadata: { decision_id: pending.id, decision, tx_ids: decTxIds.filter(Boolean), topup_id: decTopupId },
     });
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
@@ -11380,7 +11389,8 @@ app.post('/api/jobs/:id/station-waste-ready', requireStationUser, requirePermiss
       const today = businessDateISO();
       const seed = Array.isArray(row.entries) && row.entries.length ? row.entries
         : (String(row.quantity || '').trim() ? [{ qty: String(row.quantity).trim(), date: null, operator: row.signature || null, machine: row.name || null }] : []);
-      const entries = [...seed, { qty: String(-waste), date: today, operator: person, machine: op.name, wasted: true }];
+      const wasteId = 'w' + Date.now() + Math.floor(Math.random() * 1000);   // its History Reverse removes exactly this one
+      const entries = [...seed, { qty: String(-waste), date: today, operator: person, machine: op.name, wasted: true, waste_id: wasteId }];
       particulars.delivered_cartons_qty = { ...row, entries, quantity: entries.map(e => String((e && e.qty) || '')).filter(q => q !== '').join(' | ') };
       const prevW = (particulars.ready_wasted && typeof particulars.ready_wasted === 'object') ? particulars.ready_wasted : {};
       particulars.ready_wasted = { qty: (Number(prevW.qty) || 0) + waste, at: new Date().toISOString(), by: `${person} (${op.name})` };
@@ -11403,7 +11413,9 @@ app.post('/api/jobs/:id/station-waste-ready', requireStationUser, requirePermiss
       const [updated] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(particulars)}, stage_index = ${stage_index}, stages = ${JSON.stringify(stages)}, log = ${JSON.stringify(log)}
                                    WHERE id = ${id} RETURNING *`;
       await logAudit(sql, req, { action: 'job.ready_wasted', entityType: 'job', entityId: id,
-        summary: `Job E-${id}: Ready ${waste.toLocaleString()} of ${left.toLocaleString()} left wasted by ${by}${complete ? ' - Delivered' : (waste < left ? '' : ' - still Partial (short of the PO)')}` });
+        summary: `Job E-${id}: Ready ${waste.toLocaleString()} of ${left.toLocaleString()} left wasted by ${by}${complete ? ' - Delivered' : (waste < left ? '' : ' - still Partial (short of the PO)')}`,
+        // For its History Reverse (owner, 2026-11-26): the entry it added and the stage it closed.
+        metadata: { waste, left, complete, waste_id: wasteId, waste_at: entries[entries.length - 1].date, operator: person, prev_stage_index: job.stage_index || 0, prev_stage6: (job.stages || {})[6] || null, moved_to_delivered: complete && (job.stage_index || 0) < STAGES.length - 1 } });
       if (!canSeeFinanceData(req.user)) { delete updated.rate; delete updated.tax_pct; }
       res.json({ ...updated, _wasted: waste, _complete: complete });
     } finally { await releaseOpLocks(sql, held); }
@@ -13585,6 +13597,142 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
         summary: `Reversed - Job E-${id} edit put back${undone.length ? ': ' + undone.join('; ') : ''}${paperNote ? ' — paper: ' + paperNote : ''}`,
         metadata: { reverses_audit_id: auditId, changes: undone } });
       return res.json(finalJob);
+    }
+    // ── More of a job's changes undone from its History (owner, 2026-11-26): over-issue decisions, packets top-ups,
+    // Wasted, Process without paper, warnings ignored. Older lines (before they kept what Reverse needs) are matched
+    // by their time.
+    const near = (iso, ms = 120000) => !!iso && Math.abs(new Date(iso).getTime() - new Date(a.created_at).getTime()) < ms;
+    const pCur = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+    const reverseTxIds = async (txIds, why) => {
+      let n = 0;
+      for (const tid of txIds) {
+        const [t] = await sql`SELECT t.* FROM inventory_transactions t WHERE t.id = ${tid} AND t.reverses_tx_id IS NULL
+                                 AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)`;
+        if (!t) continue;
+        await applyInventoryChange(sql, { itemId: t.item_id, change: -t.change, reason: 'correction', jobId: null, notes: `Reversal of TX #${t.id} - ${why}`, user: req.user, reversesTxId: t.id });
+        n++;
+      }
+      return n;
+    };
+    const undoneLine = (txt) => logAudit(sql, req, { action: a.action, entityType: 'job', entityId: id, summary: `Reversed - Job E-${id}: ${txt}`, metadata: { reverses_audit_id: auditId } });
+
+    if (a.action === 'job.warning_ignored') {
+      const ign = (job.warn_ignored && typeof job.warn_ignored === 'object') ? { ...job.warn_ignored } : {};
+      const rule = m.rule || Object.keys(ign).find(k => ign[k] && near(ign[k].at));
+      if (!rule || !ign[rule]) return res.status(409).json({ error: 'That warning is not ignored any more.' });
+      if (!can(rule === 'low_issue' ? 'job_btn_low_issue_ignore' : 'job_btn_warning_ignore')) return res.status(403).json({ error: 'Not allowed' });
+      if (m.ignored_at && ign[rule].at !== m.ignored_at) return res.status(409).json({ error: 'That warning was ignored again since - nothing to undo here.' });
+      delete ign[rule];
+      const [u] = await sql`UPDATE jobs SET warn_ignored = ${JSON.stringify(ign)} WHERE id = ${id} RETURNING *`;
+      await undoneLine(`${rule === 'low_issue' ? 'Low issuance' : 'warning'} shown again - ${String(a.summary || '').replace(/^.*warning ignored - /, '')}`);
+      return res.json(u);
+    }
+
+    if (a.action === 'job.process_without_paper') {
+      if (!can('job_btn_process_without_paper')) return res.status(403).json({ error: 'Not allowed - Process without paper is off for your role.' });
+      const w = pCur.paper_waived;
+      if (!w) return res.status(409).json({ error: 'This job is not processed without paper any more.' });
+      if (!near(w.at)) return res.status(409).json({ error: 'It was processed without paper again since - reverse the newer one.' });
+      const prevStage = (m.prev_stage_index !== undefined && m.prev_stage_index !== null) ? Number(m.prev_stage_index) : (job.stage_index || 0);
+      if ((job.stage_index || 0) > Math.max(1, prevStage)) return res.status(409).json({ error: `The job has moved on since (now at ${STAGES[job.stage_index] || 'a later stage'}) - change it on the job card.` });
+      const from = m.from_status || w.from_status || 'pending';
+      const p = { ...pCur };
+      delete p.paper_waived;
+      const prevOwed = (m.prev_partial !== undefined && m.prev_partial !== null) ? Number(m.prev_partial) : Number(w.main_owed_sheets) || 0;
+      if (from === 'issued' && prevOwed > 0) p.partial_pending_sheets = prevOwed; else delete p.partial_pending_sheets;
+      const log = Array.isArray(job.log) ? [...job.log] : [];
+      log.push({ stage: STAGES[prevStage] || '', status: 'active', notes: `Process without paper undone by ${by} - waiting for its paper again`, by, time });
+      const [u] = await sql`UPDATE jobs SET issuance_status = ${from}, stage_index = ${prevStage}, particulars = ${JSON.stringify(p)}, log = ${JSON.stringify(log)} WHERE id = ${id} RETURNING *`;
+      await undoneLine(`Process without paper undone - ${from === 'pending' ? 'back in Pending Stock' : 'part-issued again, its paper owed again'}`);
+      return res.json(u);
+    }
+
+    if (a.action === 'job.ready_wasted') {
+      if (!can('job_btn_edit')) return res.status(403).json({ error: 'Not allowed' });
+      const row = (pCur.delivered_cartons_qty && typeof pCur.delivered_cartons_qty === 'object') ? { ...pCur.delivered_cartons_qty } : {};
+      const entries = Array.isArray(row.entries) ? [...row.entries] : [];
+      let ix = m.waste_id ? entries.findIndex(e => e && e.waste_id === m.waste_id) : -1;
+      if (ix < 0) {
+        const w = Number(m.waste) || parseFloat(((String(a.summary || '').match(/Ready ([\d,.]+)/) || [])[1] || '').replace(/,/g, '')) || 0;
+        for (let k = entries.length - 1; k >= 0; k--) { const e = entries[k]; if (e && e.wasted && Math.abs(Math.abs(parseFloat(e.qty) || 0) - w) < 1e-6) { ix = k; break; } }
+      }
+      if (ix < 0) return res.status(409).json({ error: 'That waste is not on the job any more.' });
+      const wasteQty = Math.abs(parseFloat(entries[ix].qty) || 0);
+      entries.splice(ix, 1);
+      const p = { ...pCur, delivered_cartons_qty: { ...row, entries, quantity: entries.map(e => String((e && e.qty) || '')).filter(q => q !== '').join(' | ') } };
+      if (p.ready_wasted) { const leftW = (Number(p.ready_wasted.qty) || 0) - wasteQty; if (leftW > 0) p.ready_wasted = { ...p.ready_wasted, qty: leftW }; else delete p.ready_wasted; }
+      let stage_index = job.stage_index || 0;
+      const stages = (job.stages && typeof job.stages === 'object') ? { ...job.stages } : {};
+      const closedIt = m.moved_to_delivered === true || (m.moved_to_delivered === undefined && / - Delivered$/.test(String(a.summary || '')));
+      const reopen = closedIt && stage_index === STAGES.length - 1 && stages[7] && /wasted/i.test(String(stages[7].notes || ''));
+      if (reopen) { stage_index = STAGES.length - 2; delete stages[7]; stages[6] = m.prev_stage6 ? { ...m.prev_stage6 } : { ...(stages[6] || {}), status: 'active' }; }
+      const log = Array.isArray(job.log) ? [...job.log] : [];
+      log.push({ stage: STAGES[stage_index] || '', status: (stages[stage_index] && stages[stage_index].status) || 'active', notes: `Waste of Ready ${wasteQty.toLocaleString()} undone by ${by} - back in Ready${reopen ? '; back at Ready to Deliver' : ''}`, by, time });
+      const [u] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(p)}, stage_index = ${stage_index}, stages = ${JSON.stringify(stages)}, log = ${JSON.stringify(log)} WHERE id = ${id} RETURNING *`;
+      await undoneLine(`waste of Ready ${wasteQty.toLocaleString()} undone - back in Ready${reopen ? ', the job back at Ready to Deliver' : ''}`);
+      return res.json(u);
+    }
+
+    if (a.action === 'job.over_issue.decide') {
+      const decs = Array.isArray(pCur.over_issue_decisions) ? pCur.over_issue_decisions.slice() : [];
+      let ix = m.decision_id ? decs.findIndex(d => d && d.id === m.decision_id && near(d.decided_at, 600000)) : -1;
+      if (ix < 0) ix = decs.findIndex(d => d && near(d.decided_at));
+      if (ix < 0) return res.status(409).json({ error: 'That decision is not on the job any more.' });
+      const d = decs[ix];
+      if (!can(d.decision === 'ignore' ? 'job_btn_over_issue_ignore' : 'job_btn_over_issue')) return res.status(403).json({ error: 'Not allowed' });
+      const why = `the over-issue decision was reversed (Job E-${id})`;
+      let txN = 0;
+      if (d.decision === 'offcut') txN = (Array.isArray(m.tx_ids) && m.tx_ids.length) ? await reverseTxIds(m.tx_ids, why) : await reverseOffcutCreditsOf(sql, req, id, d.decided_at, why);
+      const p = { ...pCur };
+      if (d.decision === 'use' && Array.isArray(p.packets_topups)) {
+        p.packets_topups = p.packets_topups.filter(t => !(t && t.source === 'over-issue-reconcile' && (m.topup_id ? t.id === m.topup_id : Math.abs(new Date(t.approved_at).getTime() - new Date(d.decided_at).getTime()) < 120000)));
+      }
+      decs.splice(ix, 1);
+      p.over_issue_decisions = decs;
+      delete p.over_issue_pending;
+      const oi = await jobMainPaperOverIssue(sql, { ...job, particulars: p });
+      if (oi) p.over_issue_pending = overIssuePendingFrom(oi, req.user && req.user.email, 'decision-reversed');
+      const [u] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(p)} WHERE id = ${id} RETURNING *`;
+      const label = { use: 'Use in job', offcut: 'Add to Offcut', return: 'Send Back', ignore: 'Ignore' }[d.decision] || d.decision;
+      await undoneLine(`over-issue decision "${label}" undone${txN ? ` (${txN} offcut credit${txN === 1 ? '' : 's'} reversed)` : ''}${oi ? ` - ${+(oi.overSheets / oi.ps).toFixed(2)} ${oi.unit} over-issued waiting for a decision again` : ''}`);
+      return res.json(u);
+    }
+
+    if (a.action === 'job.packets_topup.approve' || a.action === 'job.packets_topup.reject' || a.action === 'job.packets_topup.request') {
+      if (!can(a.action === 'job.packets_topup.request' ? 'job_btn_extra_packets' : 'inv_btn_stock_out')) return res.status(403).json({ error: 'Not allowed' });
+      const topups = Array.isArray(pCur.packets_topups) ? pCur.packets_topups.slice() : [];
+      const want = a.action === 'job.packets_topup.approve' ? 'approved' : a.action === 'job.packets_topup.reject' ? 'rejected' : 'pending';
+      const atKey = { approved: 'approved_at', rejected: 'rejected_at', pending: 'requested_at' }[want];
+      let ix = m.topup_id ? topups.findIndex(t => t && String(t.id) === String(m.topup_id)) : topups.findIndex(t => t && t.status === want && t.source !== 'over-issue-reconcile' && near(t[atKey]));
+      if (ix < 0) return res.status(409).json({ error: 'That top-up is not on the job any more.' });
+      const t = topups[ix];
+      if (t.status !== want) return res.status(409).json({ error: `That top-up is ${t.status} now - nothing to undo here.` });
+      let txt = '', txN = 0;
+      if (want === 'approved') {
+        // Its stock out (and the offcut it returned) comes back - those entries, else the ones written with it.
+        let txIds = Array.isArray(m.tx_ids) && m.tx_ids.length ? m.tx_ids : null;
+        if (!txIds) {
+          const lo = new Date(new Date(a.created_at).getTime() - 120000).toISOString(), hi = new Date(new Date(a.created_at).getTime() + 60000).toISOString();
+          txIds = (await sql`SELECT id FROM inventory_transactions WHERE job_id = ${id}
+                              AND ((reason = 'job-consumed' AND notes LIKE '%top-up from%') OR (reason = 'job-offcut' AND notes LIKE '%(top-up)%'))
+                              AND COALESCE(recorded_at, created_at) BETWEEN ${lo}::timestamptz AND ${hi}::timestamptz`).map(r => r.id);
+        }
+        txN = await reverseTxIds(txIds, `the top-up approval was reversed (Job E-${id})`);
+        const { approved_at, approved_by_id, approved_by_email, ...rest } = t;
+        topups[ix] = { ...rest, status: 'pending' };
+        txt = `top-up +${t.qty} approval undone - its stock is back (${txN} entr${txN === 1 ? 'y' : 'ies'} reversed); the request waits again`;
+      } else if (want === 'rejected') {
+        const { rejected_at, rejected_by_email, ...rest } = t;
+        topups[ix] = { ...rest, status: 'pending' };
+        txt = `top-up +${t.qty} rejection undone - the request waits again`;
+      } else {
+        topups.splice(ix, 1);
+        txt = `top-up request +${t.qty} withdrawn`;
+      }
+      const p = { ...pCur, packets_topups: topups };
+      const [u] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(p)} WHERE id = ${id} RETURNING *`;
+      await undoneLine(txt);
+      return res.json(u);
     }
     return res.status(400).json({ error: 'This kind of change cannot be reversed from History.' });
     } finally { await releaseOpLocks(sql, _opHeld); }
@@ -16920,7 +17068,8 @@ app.post('/api/jobs/:id/warning-ignore', requireAnyBtn(['job_btn_warning_ignore'
     const raised = (rows[0].warn_raised && typeof rows[0].warn_raised === 'object') ? { ...rows[0].warn_raised } : {};
     delete raised[rule];
     const updated = await sql`UPDATE jobs SET warn_ignored = ${JSON.stringify(ign)}, warn_raised = ${JSON.stringify(raised)} WHERE id = ${id} RETURNING *`;
-    await logAudit(sql, req, { action: 'job.warning_ignored', entityType: 'job', entityId: id, summary: `Job E-${id}: warning ignored - ${label}` });
+    await logAudit(sql, req, { action: 'job.warning_ignored', entityType: 'job', entityId: id, summary: `Job E-${id}: warning ignored - ${label}`,
+      metadata: { rule, sig, ignored_at: ign[rule].at } });   // for its History Reverse (owner, 2026-11-26)
     res.json(updated[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
