@@ -16714,7 +16714,7 @@ const JH_REVERSIBLE = {
   'job.delivery.edit':          { perm: 'job_btn_pricing',         ok: m => !!m.field && m.index !== undefined && m.index !== null, what: 'puts the old value back on that delivery' },
   'job.pricing.update':         { perm: 'job_btn_pricing',         ok: m => 'prior_tax_pct' in m, what: 'puts the old rate and sale tax back' },
   'job.cartons_packets.update': { perm: 'job_btn_pricing',         ok: m => 'prior' in m, what: 'puts the old Carton Shipper back' },
-  'job.update':                 { perm: 'job_btn_edit',            ok: m => !!(m.revert && m.revert.reversible), what: 'puts the job card fields back as they were' },
+  'job.update':                 { perm: 'job_btn_edit',            ok: m => !!(m.revert && (m.revert.reversible || m.revert.paper_resync || m.revert.why === 'it changed issued paper')), what: 'puts the job card fields back as they were (an issued-paper change: the over-issue decisions made since are undone and the over-issue / owed paper worked out again)' },
 };
 // One delivery entry in words (cartons, Carton Shipper, Invoice No., PO, Batch, date).
 function deliveryFactsLine(d) {
@@ -16739,7 +16739,8 @@ function jhReverseHtml(jobId, a, reversedIds) {
   if (reversedIds.has(Number(a.id))) return facts + '<div style="margin-top:3px;"><span style="display:inline-block;background:#e5e7eb;color:#374151;font-size:10.5px;font-weight:700;padding:1px 8px;border-radius:999px;">&#8634; Reversed</span></div>';
   const r = JH_REVERSIBLE[a.action];
   if (!r) return facts;
-  if (a.action === 'job.update' && m.revert && !m.revert.reversible) {
+  // An edit that changed issued paper is reversible now (owner, 2026-11-26) - the server puts the paper right too.
+  if (a.action === 'job.update' && m.revert && !m.revert.reversible && !m.revert.paper_resync && m.revert.why !== 'it changed issued paper') {
     return facts + `<div style="font-size:11px;color:var(--text2);margin-top:2px;">Can't be reversed here - ${esc(m.revert.why || 'it moved stock')}; change it back on the job card.</div>`;
   }
   if (!r.ok(m) || !(isSuperAdmin() || (hasPerm(r.perm) && seeBtn('job_btn_history_reverse')))) return facts;
@@ -16993,7 +16994,7 @@ async function reverseStockTx(txId, itemId) {
       await loadInventory();           // current_balance changed
       // Job state might have flipped — refresh jobs so the Pending Stock
       // queue picks it up and the badge updates.
-      if (result && (result.job_reverted || result.job_partial)) await loadJobs();
+      if (result && (result.job_reverted || result.job_partial || result.over_issue_reopened)) await loadJobs();
       // Re-render the History modal only if it survived the re-render.
       if (document.getElementById('ledger-content') && itemId) await renderInvHistory(itemId);
       refreshVisibleStockMovement();
@@ -17002,7 +17003,9 @@ async function reverseStockTx(txId, itemId) {
     }
     // One of several issues undone: the job stays issued, only these sheets are owed again.
     const part = result && result.job_partial;
-    notify(result && result.job_reverted ? 'Entry reversed · job flipped back to Pending Stock'
+    const oiBack = result && result.over_issue_reopened;   // an Add to Offcut credit reversed (owner, 2026-11-26)
+    notify(oiBack ? (oiBack.sheets > 0 ? `Entry reversed · Job E-${oiBack.job_id} is over-issued again (${+(+oiBack.packets).toFixed(2)} ${oiBack.unit || 'packets'}) - waiting for a decision` : `Entry reversed · Job E-${oiBack.job_id} updated`)
+      : result && result.job_reverted ? 'Entry reversed · job flipped back to Pending Stock'
       : part ? `Entry reversed · the job stays issued - ${(+part.sheets || 0).toLocaleString()} sheets of its ${part.paper || (part.secondary ? '2nd' : 'main')} paper are owed again`
       : 'Entry reversed');
   } catch (e) {

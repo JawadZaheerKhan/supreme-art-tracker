@@ -6239,6 +6239,53 @@ function overIssuePendingFrom(oi, email, why) {
     needed_sheets: oi.needed,
   };
 }
+// Reverse the offcut credits an Add to Offcut decision made, those still standing (owner, 2026-11-26). They are the
+// job's 'job-offcut' rows written with the decision (its notes say "(PM: Add to Offcut)").
+async function reverseOffcutCreditsOf(sql, req, jobId, decidedAt, why) {
+  const at = decidedAt ? new Date(decidedAt) : null;
+  if (!at || isNaN(at)) return 0;
+  const txs = await sql`
+    SELECT t.* FROM inventory_transactions t
+     WHERE t.job_id = ${jobId} AND t.reason = 'job-offcut' AND t.notes LIKE '%(PM: Add to Offcut)%'
+       AND t.created_at BETWEEN ${at.toISOString()}::timestamptz - interval '10 seconds' AND ${at.toISOString()}::timestamptz + interval '2 minutes'
+       AND t.reverses_tx_id IS NULL AND NOT EXISTS (SELECT 1 FROM inventory_transactions r WHERE r.reverses_tx_id = t.id)`;
+  for (const t of txs) {
+    await applyInventoryChange(sql, { itemId: t.item_id, change: -t.change, reason: 'correction', jobId: null,
+      notes: `Reversal of TX #${t.id} - ${why}`, user: req.user, reversesTxId: t.id });
+  }
+  return txs.length;
+}
+// After a change to an issued job's paper is undone (owner, 2026-11-26: "every edit can be reversed"): the over-issue
+// decisions made since `sinceIso` are undone (Add to Offcut: its offcut credits reversed; Use: its top-up taken off),
+// then the job's over-issue and the paper it still owes are worked out again from its figures now. Returns the
+// particulars to save.
+async function resyncJobPaperAfterUndo(sql, req, job, sinceIso, why) {
+  const p = (job.particulars && typeof job.particulars === 'object') ? { ...job.particulars } : {};
+  const since = sinceIso ? new Date(sinceIso).toISOString() : null;
+  const decisions = Array.isArray(p.over_issue_decisions) ? p.over_issue_decisions : [];
+  const keep = [];
+  for (const d of decisions) {
+    const after = since && d && d.decided_at && new Date(d.decided_at).toISOString() >= since;
+    if (!after) { keep.push(d); continue; }
+    if (d.decision === 'offcut') await reverseOffcutCreditsOf(sql, req, job.id, d.decided_at, why);
+    if (d.decision === 'use' && Array.isArray(p.packets_topups)) {
+      const dt = new Date(d.decided_at).getTime();
+      p.packets_topups = p.packets_topups.filter(t => !(t && t.source === 'over-issue-reconcile' && Math.abs(new Date(t.approved_at).getTime() - dt) < 120000));
+    }
+  }
+  p.over_issue_decisions = keep;
+  delete p.over_issue_pending;
+  const email = req.user && req.user.email;
+  const oi = await jobMainPaperOverIssue(sql, { ...job, particulars: p });
+  if (oi) p.over_issue_pending = overIssuePendingFrom(oi, email, 'edit-reversed');
+  // The paper it still owes (a processed-without-paper job keeps its own reckoning).
+  const primaryIssued = (Array.isArray(job.issued_items) ? job.issued_items : []).some(x => x && !EXTRA_SOURCES.has(x.source));
+  if (!p.paper_waived && primaryIssued && (job.issuance_status === 'issued' || job.issuance_status === 'ctp')) {
+    const owed = await primaryOwedSheets(sql, { ...job, particulars: { ...p, partial_pending_sheets: 1 } });
+    if (owed > 0) p.partial_pending_sheets = owed; else delete p.partial_pending_sheets;
+  }
+  return p;
+}
 
 // Helper: apply a stock change (+/-) and write a ledger row. Must be called
 // after dbReady. Assumes the item exists. Updates current_balance atomically
@@ -7483,15 +7530,19 @@ app.put('/api/jobs/:id', requirePermission('job_btn_edit'), async (req, res) => 
     for (const k of new Set([...Object.keys(priorParticulars || {}), ...Object.keys(pAfter)])) {
       if (!sameVal((priorParticulars || {})[k], pAfter[k])) revParts[k] = { before: (priorParticulars || {})[k] ?? null, after: pAfter[k] ?? null };
     }
+    // Changed issued paper (owner, 2026-11-26: every edit can be reversed): reversible now - the Reverse puts the
+    // figures back, undoes the over-issue decisions made since and works the over-issue / owed paper out again
+    // (paper_resync). A job processed without paper keeps its own reckoning, so that one still is not.
+    const issuedPaperChanged = wasIssued && oldSheets !== newSheets;
     const revBlock = paperItemChanged ? 'the paper was changed'
-      : (wasIssued && oldSheets !== newSheets) ? 'it changed issued paper'
+      : (issuedPaperChanged && ((priorParticulars || {}).paper_waived || pAfter.paper_waived)) ? 'it changed the paper of a job processed without paper'
       : (oldOffcutSize !== newOffcutSize) ? 'it changed the offcut'
       : ((prior[0].stage_index || 0) !== (job.stage_index || 0)) ? 'it moved the job to another stage'
       : finalLog ? 'it changed the production log' : null;
     await logAudit(sql, req, {
       action: 'job.update', entityType: 'job', entityId: job.id,
       summary: `Edited Job E-${job.id}: ${job.name}${allChanges.length ? ' — ' + allChanges.join('; ') : ''}`,
-      metadata: { changes: allChanges, revert: { reversible: !revBlock, why: revBlock, cols: revCols, particulars: revParts },
+      metadata: { changes: allChanges, revert: { reversible: !revBlock, why: revBlock, cols: revCols, particulars: revParts, paper_resync: issuedPaperChanged || undefined },
         // The main paper before / after - Pending Stock's job lookup shows it (owner, 2026-10-29).
         paper_item: paperItemChanged ? { before: oldItemId, after: newItemId } : undefined },
     });
@@ -13495,7 +13546,10 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
       if (!can('job_btn_edit')) return res.status(403).json({ error: 'Not allowed' });
       const rv = m.revert;
       if (!rv) return res.status(400).json({ error: 'This edit was saved before Reverse existed - change it back on the job card.' });
-      if (!rv.reversible) return res.status(400).json({ error: `This edit cannot be reversed here because ${rv.why || 'it moved stock'} - change it back on the job card.` });
+      // An older edit that changed issued paper was marked not reversible; it is now (owner, 2026-11-26).
+      const paperResync = !!rv.paper_resync || (!rv.reversible && rv.why === 'it changed issued paper');
+      if (!rv.reversible && !paperResync) return res.status(400).json({ error: `This edit cannot be reversed here because ${rv.why || 'it moved stock'} - change it back on the job card.` });
+      if (paperResync && ((job.particulars || {}).paper_waived)) return res.status(400).json({ error: 'This job was processed without paper - change it back on the job card.' });
       const sameVal = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
       const cols = rv.cols || {}, parts = rv.particulars || {};
       const pNow = (job.particulars && typeof job.particulars === 'object') ? job.particulars : {};
@@ -13514,10 +13568,23 @@ app.post('/api/jobs/:id/history/:auditId/reverse', requireAuth, async (req, res)
                particulars = ${JSON.stringify(particulars)}
          WHERE id = ${id} RETURNING *`;
       const undone = (Array.isArray(m.changes) ? m.changes : []).map(s => String(s).replace(/^(.*?): ([\s\S]*) -> ([\s\S]*)$/, '$1: $3 -> $2'));
+      // Issued paper (owner, 2026-11-26): undo what the edit set off - the over-issue decisions made since (Add to
+      // Offcut credits reversed, a Use top-up taken off) - and work the over-issue / owed paper out again.
+      let finalJob = upd, paperNote = '';
+      if (paperResync && upd) {
+        const before = upd.particulars || {};
+        const np = await resyncJobPaperAfterUndo(sql, req, upd, a.created_at, `the job edit it came from was reversed (Job E-${id})`);
+        const [u2] = await sql`UPDATE jobs SET particulars = ${JSON.stringify(np)} WHERE id = ${id} RETURNING *`;
+        if (u2) finalJob = u2;
+        const undoneDecisions = (Array.isArray(before.over_issue_decisions) ? before.over_issue_decisions.length : 0) - (Array.isArray(np.over_issue_decisions) ? np.over_issue_decisions.length : 0);
+        paperNote = [undoneDecisions > 0 ? `${undoneDecisions} over-issue decision${undoneDecisions === 1 ? '' : 's'} undone` : '',
+          np.over_issue_pending ? `over-issue ${(+np.over_issue_pending.total_packets).toFixed(2).replace(/\.?0+$/, '')} ${np.over_issue_pending.unit || 'packets'} waiting for a decision` : (before.over_issue_pending ? 'over-issue cleared' : ''),
+          np.partial_pending_sheets ? `${Number(np.partial_pending_sheets).toLocaleString()} sheets still owed` : (before.partial_pending_sheets ? 'nothing owed now' : '')].filter(Boolean).join('; ');
+      }
       await logAudit(sql, req, { action: 'job.update', entityType: 'job', entityId: id,
-        summary: `Reversed - Job E-${id} edit put back${undone.length ? ': ' + undone.join('; ') : ''}`,
+        summary: `Reversed - Job E-${id} edit put back${undone.length ? ': ' + undone.join('; ') : ''}${paperNote ? ' — paper: ' + paperNote : ''}`,
         metadata: { reverses_audit_id: auditId, changes: undone } });
-      return res.json(upd);
+      return res.json(finalJob);
     }
     return res.status(400).json({ error: 'This kind of change cannot be reversed from History.' });
     } finally { await releaseOpLocks(sql, _opHeld); }
@@ -15242,6 +15309,42 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, invH.reverse = 
         offcutRefundedSheets += Math.abs(paired.change);
       }
     }
+    // An over-issue's Add to Offcut credit reversed (owner, 2026-11-26: "it should have also got reversed totally and
+    // the job should have got the over issued sign"): its job's decision loses those sheets and the over-issue is
+    // worked out again, so the job asks for a decision once more (Use / Add to Offcut / Send Back).
+    let overIssueReopened = null;
+    if (tx.reason === 'job-offcut' && tx.job_id && /\(PM: Add to Offcut\)/.test(String(tx.notes || ''))) {
+      try {
+        const [oj] = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
+        if (oj) {
+          const p = (oj.particulars && typeof oj.particulars === 'object') ? { ...oj.particulars } : {};
+          const decs = Array.isArray(p.over_issue_decisions) ? p.over_issue_decisions.map(d => ({ ...d })) : [];
+          const txAt = new Date(tx.created_at).getTime();
+          // The Add to Offcut decision it was written with (just before it), else the latest one.
+          let ix = -1;
+          for (let k = decs.length - 1; k >= 0; k--) {
+            const d = decs[k];
+            if (!d || d.decision !== 'offcut' || !(Number(d.total_sheets) > 0)) continue;
+            if (ix < 0) ix = k;
+            if (Math.abs(new Date(d.decided_at).getTime() - txAt) < 120000) { ix = k; break; }
+          }
+          if (ix >= 0) {
+            const d = decs[ix], sh = Math.abs(Number(tx.change) || 0), was = Number(d.total_sheets) || 0;
+            const left = Math.max(0, was - sh);
+            if (left > 0) { d.total_packets = was ? (Number(d.total_packets) || 0) * left / was : 0; d.total_sheets = left; } else decs.splice(ix, 1);
+            p.over_issue_decisions = decs;
+            delete p.over_issue_pending;   // worked out again below, with these sheets back in
+            const oi = await jobMainPaperOverIssue(sql, { ...oj, particulars: p });
+            if (oi) p.over_issue_pending = overIssuePendingFrom(oi, req.user && req.user.email, 'offcut-reversed');
+            await sql`UPDATE jobs SET particulars = ${JSON.stringify(p)} WHERE id = ${oj.id}`;
+            overIssueReopened = oi ? { job_id: oj.id, sheets: oi.overSheets, packets: oi.overSheets / oi.ps, unit: oi.unit } : { job_id: oj.id, sheets: 0 };
+            await logAudit(sql, req, { action: 'job.over_issue.raised', entityType: 'job', entityId: oj.id,
+              summary: `Job E-${oj.id}: the Add to Offcut credit (TX #${tx.id}, ${sh.toLocaleString()} sheets) was reversed in Inventory${oi ? ` - ${oi.overSheets.toLocaleString()} sheets (${+(oi.overSheets / oi.ps).toFixed(2)} ${oi.unit}) over-issued again, waiting for a decision (Use in job / Add to Offcut / Send Back)` : ' - nothing over-issued now'}.`,
+              metadata: { reversed_tx_id: tx.id, over_sheets: oi ? oi.overSheets : 0 } });
+          }
+        }
+      } catch (e) { console.error('over-issue reopen after offcut reversal failed:', e.message); }   // the reversal itself stands
+    }
     if (tx.reason === 'job-consumed' && tx.job_id) {
       const jobRows = await sql`SELECT * FROM jobs WHERE id = ${tx.job_id} AND deleted_at IS NULL`;
       const job = jobRows[0];
@@ -15398,7 +15501,7 @@ app.post('/api/inventory/transactions/:id/reverse', requireAuth, invH.reverse = 
       summary: `Reversed TX #${tx.id} (${tx.change > 0 ? '+' : ''}${tx.change} sheets) on ${label}${jobReverted ? ` · Job E-${tx.job_id} flipped back to Pending Stock` : ''}${jobPartial ? ` · Job E-${tx.job_id} stays issued - ${jobPartial.sheets.toLocaleString()} sheets of its ${jobPartial.paper || (jobPartial.secondary ? '2nd' : 'main')} paper owed again` : ''}${offcutRefundedSheets ? ` · ${offcutRefundedSheets} offcut sheets also pulled back` : ''}`,
     });
 
-    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted, job_partial: jobPartial, offcut_refunded_sheets: offcutRefundedSheets });
+    res.json({ ok: true, reversal_tx_id: newTxId, original_tx_id: tx.id, job_reverted: jobReverted, job_partial: jobPartial, offcut_refunded_sheets: offcutRefundedSheets, over_issue_reopened: overIssueReopened });
     } finally { await releaseOpLocks(sql, _opHeld); }
   } catch (err) {
     console.error(err);
