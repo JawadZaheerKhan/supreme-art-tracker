@@ -8411,6 +8411,7 @@ async function onGoogleCredential(response) {
 }
 async function logout() {
   try { await api('POST', '/api/auth/logout'); } catch {}
+  await jobsCacheClear();   // nothing of this login left in the browser (owner, 2026-11-27)
   currentUser = null;
   showLogin();
 }
@@ -8437,11 +8438,92 @@ let jobsFullSyncAt = 0;       // when the last full (paged) load ran
 // change to a linked inventory item's paper type with no change to the job
 // (paper_resolved / paper_is_offcut); that now waits up to 4 hours or a page
 // reload instead of 30 minutes.
-const JOBS_FULL_RELOAD_MS = 4 * 60 * 60 * 1000;
+// Once a day now (owner, 2026-11-27: the app stuck on its opening animation - every open downloaded all ~10 MB of
+// jobs; Neon showed 42 GB sent in November): the list is kept in this browser (see jobsCache*), so an open asks only
+// for what changed; a full reload that falls due right after an open runs in the background, not before the app shows.
+const JOBS_FULL_RELOAD_MS = 24 * 60 * 60 * 1000;
 let jobsSyncWho = null;       // who the loaded list belongs to (prices differ by role)
+
+// ── Jobs kept in this browser (owner, 2026-11-27) ──
+// IndexedDB 'sa-cache' / 'kv' holds one list: this login + roles' jobs, the server time of its last load and of its
+// last full load. Opening the app restores it and asks only for the changes since; anything odd (none, another login,
+// older than 7 days, a newer format, the browser refusing) loads everything as before. Cleared on sign-out; saving
+// one login's list drops any other's.
+const JOBS_CACHE_V = 1, JOBS_CACHE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+let _jobsCacheTried = false, _jobsCacheSaveT = null;
+function jobsCacheWho() { return currentUser ? `${currentUser.id || currentUser.email}:${myRoles().join(',')}` : ''; }
+function jobsCacheDb() {
+  return new Promise((resolve, reject) => {
+    try {
+      if (!window.indexedDB) return reject(new Error('no IndexedDB'));
+      const r = indexedDB.open('sa-cache', 1);
+      r.onupgradeneeded = () => { try { r.result.createObjectStore('kv'); } catch (e) { /* already there */ } };
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error || new Error('IndexedDB'));
+      r.onblocked = () => reject(new Error('IndexedDB blocked'));
+    } catch (e) { reject(e); }
+  });
+}
+// Never let the browser's storage hold the app up: 2.5 s at most.
+function jobsCacheTimeout(p) { return Promise.race([p, new Promise(res => setTimeout(() => res(null), 2500))]); }
+async function jobsCacheOp(mode, fn) {
+  const db = await jobsCacheDb();
+  try {
+    return await new Promise((resolve) => {
+      const tx = db.transaction('kv', mode);
+      const out = fn(tx.objectStore('kv'));
+      tx.oncomplete = () => resolve(out && 'result' in out ? out.result : true);
+      tx.onerror = tx.onabort = () => resolve(null);
+    });
+  } finally { try { db.close(); } catch (e) { /* closed */ } }
+}
+async function jobsCacheRestore() {
+  if (_jobsCacheTried) return false;
+  _jobsCacheTried = true;
+  try {
+    const who = jobsCacheWho();
+    const c = await jobsCacheTimeout(jobsCacheOp('readonly', s => s.get('jobs')));
+    if (!c || c.v !== JOBS_CACHE_V || !who || c.who !== who || !Array.isArray(c.jobs) || !c.syncAt) return false;
+    if (Date.now() - (c.savedAt || 0) > JOBS_CACHE_MAX_AGE) return false;
+    jobs = c.jobs; jobsSyncAt = c.syncAt; jobsFullSyncAt = c.fullAt || 0; jobsSyncWho = who;
+    return true;
+  } catch (e) { return false; }
+}
+function jobsCacheSaveSoon() {
+  clearTimeout(_jobsCacheSaveT);
+  _jobsCacheSaveT = setTimeout(() => {
+    const who = jobsCacheWho();
+    if (!who || !jobsSyncAt || !Array.isArray(jobs)) return;
+    const val = { v: JOBS_CACHE_V, who, jobs, syncAt: jobsSyncAt, fullAt: jobsFullSyncAt, savedAt: Date.now() };
+    jobsCacheOp('readwrite', s => { s.clear(); s.put(val, 'jobs'); }).catch(() => { /* storage refused - next time */ });
+  }, 1500);
+}
+async function jobsCacheClear() {
+  clearTimeout(_jobsCacheSaveT);
+  try { await jobsCacheTimeout(jobsCacheOp('readwrite', s => s.clear())); } catch (e) { /* nothing kept */ }
+}
+// The full reload that fell due just after an open: in the background, redrawn when it lands.
+function jobsFullReloadLater() {
+  setTimeout(async () => {
+    try {
+      const changed = await fetchJobsSynced(true);
+      if (changed && !pollWouldDisrupt()) render();
+    } catch (e) { /* the next one */ }
+  }, 90 * 1000);
+}
 async function fetchJobsSynced(forceFull) {
-  const who = currentUser ? `${currentUser.id || currentUser.email}:${myRoles().join(',')}` : '';
-  const full = forceFull || !jobsSyncAt || who !== jobsSyncWho || (Date.now() - jobsFullSyncAt) > JOBS_FULL_RELOAD_MS;
+  // A fresh page: the list kept in this browser first - then only the changes since (owner, 2026-11-27).
+  let restored = false;
+  if (!forceFull && !jobsSyncAt) restored = await jobsCacheRestore();
+  const r0 = await fetchJobsSyncedNet(forceFull, restored);
+  if (jobsSyncAt) jobsCacheSaveSoon();
+  return r0 || restored;
+}
+async function fetchJobsSyncedNet(forceFull, restored) {
+  const who = jobsCacheWho();
+  const due = (Date.now() - jobsFullSyncAt) > JOBS_FULL_RELOAD_MS;
+  if (restored && due) jobsFullReloadLater();
+  const full = forceFull || !jobsSyncAt || who !== jobsSyncWho || (due && !restored);
   jobsSyncWho = who;
   if (!full) {
     const r = await api('GET', '/api/jobs?since=' + encodeURIComponent(jobsSyncAt));
@@ -8455,7 +8537,7 @@ async function fetchJobsSynced(forceFull) {
         const old = byId.get(j.id);
         if (!old || JSON.stringify(old) !== JSON.stringify(j)) { byId.set(j.id, j); changed = true; }
       }
-      for (const id of live) if (!byId.has(id)) return fetchJobsSynced(true);         // missed one - reload all
+      for (const id of live) if (!byId.has(id)) return fetchJobsSyncedNet(true);      // missed one - reload all
       jobsSyncAt = r.server_now;
       if (changed) jobs = [...byId.values()].sort((a, b) => a.id - b.id);
       return changed;
@@ -48990,6 +49072,18 @@ const introMinTime = new Promise(resolve => {
   document.documentElement.style.overflow = 'hidden';
   document.body.style.overflow = 'hidden';
 })();
+// The bar at the top while the app's data is still on its way (see init).
+function showStillLoadingBar(on) {
+  let el = document.getElementById('still-loading-bar');
+  if (!on) { if (el) el.remove(); return; }
+  if (el) return;
+  el = document.createElement('div');
+  el.id = 'still-loading-bar';
+  el.setAttribute('role', 'status');
+  el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2000;background:#fef3c7;color:#92400e;border-bottom:1px solid #f59e0b;font-weight:700;font-size:13px;text-align:center;padding:6px 12px;';
+  el.textContent = 'Still loading jobs… the internet or the server is slow right now - the lists fill in by themselves.';
+  document.body.appendChild(el);
+}
 function hideLoadingScreen() {
   introMinTime.then(() => {
     const el = document.getElementById('loading-screen');
@@ -49045,7 +49139,11 @@ async function init() {
       loaders.push(loadProductRates(), loadProductAliases(), loadCompanySettings(), loadProductSpecials());
     }
     if (!isOperator()) loaders.push(loadInventory());
-    await Promise.all(loaders);
+    // Never stuck on the opening animation (owner, 2026-11-27): after 15 s the app shows with a "Still loading" bar
+    // and fills in when the rest arrives.
+    const slowT = setTimeout(() => { hideLoadingScreen(); showStillLoadingBar(true); }, 15000);
+    try { await Promise.all(loaders); }
+    finally { clearTimeout(slowT); showStillLoadingBar(false); }
     // Route to the same landing tab the login flow uses so a refresh
     // doesn't dump operators onto Jobs (which they can't even see) or
     // store managers onto the default Jobs view.
@@ -49126,6 +49224,7 @@ async function sessionCheck(force) {
     if (r.status === 401 && currentUser) {
       try { sessionStorage.setItem('sa_signed_out', '1'); } catch (e) {}
       currentUser = null;
+      await jobsCacheClear();   // signed out by an admin: the kept job list goes too
       location.reload();
     }
   } catch (e) { /* offline / server busy - try again next time */ }
