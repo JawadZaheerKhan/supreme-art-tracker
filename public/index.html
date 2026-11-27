@@ -2424,7 +2424,10 @@
   .jc-stage-time a.jc-t-link { text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   .lc-rep tr.lc-hl td { background: #fef08a !important; transition: background .4s; }
   .jc-stage-time:empty { display: none; }
-  .jc-details-cell.jc-has-time > input, .jc-details-cell.jc-has-time > .jc-details-pick { display: none; }
+  .jc-details-cell.jc-has-time > input, .jc-details-cell.jc-has-time > .jc-details-pick, .jc-details-cell.jc-has-time > .jc-fit-wrap { display: none; }
+  /* A long box's text wrapped onto more lines (see jcFitInput). */
+  table.jc-part input.jc-fit-hide { display: none; }
+  table.jc-part .jc-fit-wrap { flex: 1; min-width: 0; font-size: 11px; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; box-sizing: border-box; cursor: text; display: flex; align-items: center; }
   .jc-details-cell.jc-has-time .jc-stage-time { font-size: 12.5px; margin-top: 0; }
   @media print { .jc-stage-time { display: none !important; } }
   .lc-sec-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
@@ -34559,19 +34562,41 @@ function jcRowTimeLines(job, stage, starts, log, key) {
 // Long text in the job card's boxes (owner, 2026-11-27: "the long text gets hidden ... 1st priority is the text
 // smaller"): a box whose text does not fit gets a smaller font, step by step down to 8.5px; still too long - the
 // whole text shows on hover. Again as it is typed in.
+// Still too long at 9.5px (owner, 2026-11-27: "it doesnt shift to another row regardless of having space"): the
+// text shows wrapped onto more lines in the box's place; a click opens the box itself to type, and leaving it wraps again.
 function jcFitInput(el) {
   if (!el || !el.isConnected) return;
+  const old = el.nextElementSibling;
+  if (old && old.classList.contains('jc-fit-wrap')) old.remove();
+  el.classList.remove('jc-fit-hide');
   el.style.fontSize = '';
   if (el.dataset.fitTitle) { el.removeAttribute('title'); delete el.dataset.fitTitle; }
   if (!el.value || el.clientWidth <= 0) return;
   let size = parseFloat(getComputedStyle(el).fontSize) || 12;
-  while (el.scrollWidth > el.clientWidth + 1 && size > 8.5) { size -= 0.5; el.style.fontSize = size + 'px'; }
-  if (el.scrollWidth > el.clientWidth + 1 && !el.getAttribute('title')) { el.title = el.value; el.dataset.fitTitle = '1'; }
+  while (el.scrollWidth > el.clientWidth + 1 && size > 9.5) { size -= 0.5; el.style.fontSize = size + 'px'; }
+  if (el.scrollWidth <= el.clientWidth + 1) return;
+  if (document.activeElement === el) {   // being typed in: smaller still, the whole text on hover
+    while (el.scrollWidth > el.clientWidth + 1 && size > 8.5) { size -= 0.5; el.style.fontSize = size + 'px'; }
+    if (el.scrollWidth > el.clientWidth + 1 && !el.getAttribute('title')) { el.title = el.value; el.dataset.fitTitle = '1'; }
+    return;
+  }
+  el.style.fontSize = '';
+  const cs = getComputedStyle(el);
+  const w = document.createElement('div');
+  w.className = 'jc-fit-wrap';
+  w.textContent = el.value;
+  w.style.padding = cs.padding;
+  w.style.minHeight = el.offsetHeight + 'px';
+  if (el.readOnly) w.title = el.getAttribute('title') || '';
+  else { w.title = 'Click to change'; w.onclick = () => { w.remove(); el.classList.remove('jc-fit-hide'); el.focus(); jcFitInput(el); }; }
+  el.after(w);
+  el.classList.add('jc-fit-hide');
 }
 function jcFitInputs(root) {
   (root || document).querySelectorAll('table.jc-part input[type="text"]').forEach(jcFitInput);
 }
 document.addEventListener('input', e => { const t = e.target; if (t && t.matches && t.matches('table.jc-part input[type="text"]')) jcFitInput(t); });
+document.addEventListener('focusout', e => { const t = e.target; if (t && t.matches && t.matches('table.jc-part input[type="text"]')) setTimeout(() => jcFitInput(t), 0); });
 async function fillJcStageTimes(job) {
   const slots = [...document.querySelectorAll('.jc-stage-time')];
   if (!slots.length || !job || !job.id) return;
@@ -42460,6 +42485,19 @@ function fitPrintCardText() {
     const startPx = parseFloat(cs.fontSize);
     if (!isFinite(startPx) || startPx <= 0) return;
     let size = startPx;
+    // Particulars values as on the screen (owner, 2026-11-27: "it should also get in print same"): a little smaller,
+    // then onto more lines in the same cell - smaller again only while the row would grow past ~1.6 rows.
+    if (el.closest('.pp-data-row')) {
+      el.style.whiteSpace = 'nowrap';
+      const mid = Math.max(9, startPx * 0.7);
+      for (let i = 0; i < 40 && el.scrollWidth > el.clientWidth + 0.5 && size > mid; i++) { size -= 0.5; el.style.setProperty('font-size', size + 'px', 'important'); }
+      if (el.scrollWidth <= el.clientWidth + 0.5) return;
+      el.style.setProperty('white-space', 'normal', 'important');
+      el.style.setProperty('overflow-wrap', 'anywhere', 'important');
+      const rowMax = 48;
+      for (let i = 0; i < 40 && el.offsetHeight > rowMax && size > 7; i++) { size -= 0.5; el.style.setProperty('font-size', size + 'px', 'important'); }
+      return;
+    }
     const floor = Math.max(7, startPx * 0.55); // never below 55% or 7px
     const prevWhite = el.style.whiteSpace;
     el.style.whiteSpace = 'nowrap';
