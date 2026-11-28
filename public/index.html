@@ -28890,6 +28890,8 @@ function lcSortCmp(a, b) {
   return lcState.sort === 'entry' ? (lcEntryAt(a) - lcEntryAt(b)) || (a.id - b.id)
     : lcJobAt(a).localeCompare(lcJobAt(b)) || (lcEntryAt(a) - lcEntryAt(b)) || (a.id - b.id);
 }
+// The new job's Starting Time (owner, 2026-11-28); an older entry's one time is both - none without a new job.
+function lcStartTime(e) { return (e && e.start_time) || (e && String(e.new_job || '').trim() ? e.entry_time || '' : ''); }
 function lcEntryTimeHtml(e) { const t = lcEntryAt(e); return t ? `${esc(fmtDMY(new Date(t)))}<div class="lc-sub">${esc(fmtTime12(new Date(t)))}</div>` : ''; }
 // One log per machine - a machine with entries on both paper forms (Die Cutting + Coating) is one log too
 // (owner, 2026-11-18): its forms B then A, so Die Cutting sits left of Coating.
@@ -28977,10 +28979,10 @@ function lcTableHtml(g, withLegend) {
   const pinCan = k => !!(stationOperator && stationOperator.perms && stationOperator.perms[k] === 'yes');
   const canEdit = atStation ? pinCan('rpt_line_clearance_edit') : seeBtn('rpt_line_clearance_edit');
   const canDel = atStation ? pinCan('rpt_line_clearance_delete') : seeBtn('rpt_line_clearance_delete');
-  const head = `<tr><th>#</th><th>Date</th><th>Job Time</th><th title="When QA saved this entry">Entry Time</th><th>Previous Job</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
+  const head = `<tr><th>#</th><th>Date</th><th title="The previous job's completion">Completion Time</th><th title="The new job's start">Starting Time</th><th title="When QA saved this entry">Entry Time</th><th>Previous Job</th><th title="Green: the previous job's waste on its job card. Red: what QA counted.">Waste <span style="font-weight:500;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th>New Job</th>
     ${cols.map(c => { const sec = c.sec; return `<th class="lc-pth" style="--sec:${LC_SEC_STRONG[sec.color] || 'var(--border)'};" title="${esc(sec.name || '')}: ${esc(((sec.points || []).find(pt => pt[0] === c.n) || [])[1] || '')}">${c.n}</th>`; }).join('')}
     <th style="text-align:center;line-height:1.15;" title="Line cleared by the Line Manager">Line<br>Manager</th><th>QA</th><th>Remarks</th>${canDel ? '<th></th>' : ''}</tr>`;
-  const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td style="white-space:nowrap;">${esc(hm12(e.entry_time))}</td><td style="white-space:nowrap;">${lcEntryTimeHtml(e)}</td>
+  const body = g.list.map((e, i) => `<tr class="row-hover-red${lcState.highlight === e.id ? ' lc-hl' : ''}" data-lc-id="${e.id}"><td style="white-space:nowrap;">${canEdit ? `<button class="lc-dot" data-acc="rpt_line_clearance_edit" onclick="openLcEdit(${e.id})" title="Open this entry and correct it"></button>` : ''}${i + 1}</td><td>${esc(fmtDMY(e.entry_date))}</td><td style="white-space:nowrap;">${esc(hm12(e.entry_time))}</td><td style="white-space:nowrap;">${esc(hm12(lcStartTime(e)))}</td><td style="white-space:nowrap;">${lcEntryTimeHtml(e)}</td>
     <td>${lcSecTagHtml(e, mixed)}${lcWarnHtml(e)}${canEdit ? lcJobCellIn(e, 'prev') : lcJobCell(e.prev_job, e.prev_company, false, e.prev_job_name)}</td><td style="text-align:right;">${canEdit ? lcWasteIn(e) : lcWasteHtml(e)}</td><td>${canEdit ? lcJobCellIn(e, 'new') : lcJobCell(e.new_job, e.new_company, false, e.new_job_name)}</td>
     ${cols.map(col => { const [c, m] = lcColMark(e, col); return canEdit && c !== 'lc-na' ? `<td class="${c} lc-tap" data-acc="rpt_line_clearance_edit" onclick="lcTogglePoint(${e.id}, ${col.n})" title="Click to ${c === 'lc-ok' ? 'untick' : 'tick'}">${m}</td>` : `<td class="${c}">${m}</td>`; }).join('')}
     <td class="${e.qc_cleared ? 'lc-ok' : 'lc-no'}${canEdit ? ' lc-tap' : ''}"${canEdit ? ` data-acc="rpt_line_clearance_edit" onclick="lcToggleQc(${e.id})" title="Click to mark ${e.qc_cleared ? 'not cleared' : 'cleared'} by the Line Manager"` : ''}>${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td>${esc(e.qa_name || '')}</td><td>${canEdit ? lcRemarksIn(e) : esc(e.remarks || '')}</td>${canDel ? `<td><button class="btn btn-sm btn-danger" data-acc="rpt_line_clearance_delete" style="padding:2px 8px;font-size:11px;" onclick="deleteLcEntry(${e.id})" title="Delete this entry">&#128465;</button></td>` : ''}</tr>`).join('');
@@ -29048,7 +29050,7 @@ function openLcEdit(id) {
   openModal(`<div class="modal" onclick="event.stopPropagation()" style="max-width:720px;">
     <h2>Correct Line Clearance &middot; ${esc(e.machine)}</h2>
     <div style="color:var(--text2);font-size:13px;margin:-6px 0 10px;">${esc(secs.map(x => x.name).join(' · '))} &middot; saved by ${esc(e.qa_name || 'QA')}</div>
-    <div class="form-row">${inp('entry_date', 'Date', 'date')}${inp('entry_time', 'Time', 'time')}</div>
+    <div class="form-row">${inp('entry_date', 'Date', 'date')}${inp('entry_time', 'Completion Time', 'time')}<div class="form-group"><label class="form-label">Starting Time (new job)</label><input type="time" id="lce-start_time" value="${esc(lcStartTime(e))}"></div></div>
     <div class="form-row">${inp('prev_job', 'Previous Job No.')}${inp('prev_company', 'Previous Company')}${inp('waste', 'Waste (QA)', 'number', 'min="0" step="any"')}</div>
     <div class="form-row">${inp('new_job', 'New Job No.')}${inp('new_company', 'New Company')}</div>
     <div class="form-group"><label class="form-label">Check points</label>
@@ -29107,7 +29109,7 @@ async function lcCellSave(id, key, el) {
   await lcSaveRow(e, { [key]: v });
 }
 async function lcSaveRow(e, change) {
-  const body = { entry_date: String(e.entry_date || '').slice(0, 10), entry_time: e.entry_time || '', prev_job: e.prev_job || '', prev_company: e.prev_company || '',
+  const body = { entry_date: String(e.entry_date || '').slice(0, 10), entry_time: e.entry_time || '', start_time: lcStartTime(e), prev_job: e.prev_job || '', prev_company: e.prev_company || '',
     waste: e.waste == null ? '' : String(e.waste), new_job: e.new_job || '', new_company: e.new_company || '', points: { ...(e.points || {}) },
     qc_cleared: !!e.qc_cleared, remarks: e.remarks || '', ...change };
   try {
@@ -29122,7 +29124,7 @@ async function saveLcEdit(id) {
   const v = k => (document.getElementById('lce-' + k) || {}).value || '';
   const points = {};
   document.querySelectorAll('.lce-pt').forEach(cb => { points[cb.value] = cb.checked; });
-  const body = { entry_date: v('entry_date'), entry_time: v('entry_time'), prev_job: v('prev_job').trim(), prev_company: v('prev_company').trim(),
+  const body = { entry_date: v('entry_date'), entry_time: v('entry_time'), start_time: v('start_time'), prev_job: v('prev_job').trim(), prev_company: v('prev_company').trim(),
     waste: v('waste'), new_job: v('new_job').trim(), new_company: v('new_company').trim(), points, qc_cleared: !!document.getElementById('lce-qc')?.checked, remarks: v('remarks').trim() };
   if (!body.prev_job) { notify('Enter the previous job'); return; }
   showSaving(true);
@@ -29164,11 +29166,11 @@ function printLineClearance() {
     const legend = secs.map(x => x.points.map((pt, j) => `<tr>
       ${j === 0 ? `<td rowspan="${x.points.length}" style="${td}background:${x.color};font-weight:bold;width:90px;">${esc(x.name)}<div style="font-weight:normal;" dir="rtl">${x.ur}</div></td>` : ''}
       <td style="${td}background:${x.color};text-align:center;font-weight:bold;width:22px;">${pt[0]}</td><td style="${td}">${esc(pt[1])}</td><td style="${td}text-align:right;" dir="rtl">${pt[2]}</td></tr>`).join('')).join('');
-    const head = `<tr style="background:#f7f1ea;"><th style="${td}">#</th><th style="${td}">Date</th><th style="${td}">Job Time</th><th style="${td}">Entry Time</th><th style="${td}">Previous Job No.</th>
+    const head = `<tr style="background:#f7f1ea;"><th style="${td}">#</th><th style="${td}">Date</th><th style="${td}">Completion Time</th><th style="${td}">Starting Time</th><th style="${td}">Entry Time</th><th style="${td}">Previous Job No.</th>
       <th style="${td}">Waste <span style="font-weight:normal;"><span style="color:#166534;">job card</span> / <span style="color:#b91c1c;">QA</span></span></th><th style="${td}">New Job No.</th>
       ${cols.map(c => `<th style="${td}background:${c.sec.color};width:20px;">${c.n}</th>`).join('')}
       <th style="${td}">Line Manager</th><th style="${td}">QA</th><th style="${td}">Remarks</th></tr>`;
-    const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(hm12(e.entry_time))}</td><td style="${td}">${lcEntryAt(e) ? esc(fmtDMYT12(new Date(lcEntryAt(e)))) : ''}</td>
+    const body = g.list.map((e, i) => `<tr><td style="${td}text-align:center;">${i + 1}</td><td style="${td}">${esc(fmtDMY(e.entry_date))}</td><td style="${td}">${esc(hm12(e.entry_time))}</td><td style="${td}">${esc(hm12(lcStartTime(e)))}</td><td style="${td}">${lcEntryAt(e) ? esc(fmtDMYT12(new Date(lcEntryAt(e)))) : ''}</td>
       <td style="${td}">${lcSecTagHtml(e, mixed, true)}${lcJobCell(e.prev_job, e.prev_company, true, e.prev_job_name)}</td><td style="${td}text-align:right;">${lcWasteHtml(e, true)}</td><td style="${td}">${lcJobCell(e.new_job, e.new_company, true, e.new_job_name)}</td>
       ${cols.map(col => { const [c] = lcColMark(e, col); return `<td style="${td}text-align:center;font-weight:bold;${c === 'lc-ok' ? 'color:#166534;background:#dcfce7;' : c === 'lc-no' ? 'color:#b91c1c;background:#fee2e2;' : 'color:#888;'}">${c === 'lc-ok' ? '&#10003;' : c === 'lc-no' ? '&#10007;' : '&ndash;'}</td>`; }).join('')}
       <td style="${td}text-align:center;font-weight:bold;color:${e.qc_cleared ? '#166534' : '#b91c1c'};background:${e.qc_cleared ? '#dcfce7' : '#fee2e2'};">${e.qc_cleared ? '&#10003;' : '&#10007;'}</td><td style="${td}">${esc(e.qa_name || '')}</td><td style="${td}">${esc(e.remarks || '')}</td></tr>`).join('');
@@ -44089,7 +44091,7 @@ function stationLcReportHtml() {
 function stationHasQa() { return !!(stationOperator && stationOperator.kind === 'qa'); }
 function stationQaNowTime() { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
 function stationQaBlank() {
-  return { entry_date: localDateISO(), entry_time: stationQaNowTime(), form: '', sections: [], machine: '',
+  return { entry_date: localDateISO(), entry_time: stationQaNowTime(), start_time: stationQaNowTime(), form: '', sections: [], machine: '',
     qc_cleared: false, prev_job: '', prev_company: '', waste: '', new_job: '', new_company: '', points: {}, remarks: '' };
 }
 async function stationOpenQa() {
@@ -44501,7 +44503,8 @@ function stationQaHtml() {
                 <span class="lc-secpick-note">${q.section_note ? esc(q.section_note) : 'this machine does both - pick what the job was'}</span></div>`;
             })()}</div>
           <div class="lc-field"><label>Date <span class="urdu" dir="rtl" lang="ur">تاریخ</span></label><input type="date" value="${esc(q.entry_date)}" onchange="stationQaSet('entry_date', this.value)"></div>
-          <div class="lc-field"><label>Time <span class="urdu" dir="rtl" lang="ur">وقت</span></label><input type="time" value="${esc(q.entry_time)}" onchange="stationQaSet('entry_time', this.value)"></div>
+          <div class="lc-field"><label>Completion Time <span class="urdu" dir="rtl" lang="ur">ختم ہونے کا وقت</span></label><input type="time" value="${esc(q.entry_time)}" onchange="stationQaSet('entry_time', this.value)"></div>
+          <div class="lc-field"><label>Starting Time <span style="font-weight:500;">(new job)</span> <span class="urdu" dir="rtl" lang="ur">شروع ہونے کا وقت</span></label><input type="time" value="${esc(q.start_time || '')}" onchange="stationQaSet('start_time', this.value)"></div>
           <div class="lc-field"><label>QC <span class="urdu" dir="rtl" lang="ur">کیو سی</span></label>
             <label class="lc-qc ${q.qc_cleared ? 'is-on' : ''}"><input type="checkbox" ${q.qc_cleared ? 'checked' : ''} onchange="stationQaSet('qc_cleared', this.checked); this.closest('.lc-qc').classList.toggle('is-on', this.checked)"> Cleared by the Line Manager</label></div>
           ${lcJobFields(q, 'prev', 'Previous Job No.', 'پچھلی جاب نمبر', 'Previous Company')}
@@ -44551,7 +44554,7 @@ function stationQaRecentHtml() {
     const miss = lcMissing(e);
     return `<div class="lc-entry ${e.cleared ? 'ok' : 'no'}">
       <b>${esc(fmtDMY(e.entry_date))} ${esc(hm12(e.entry_time))}</b> &middot; ${esc(e.machine)} &middot; ${esc((e.sections || []).join(', '))}<br>
-      Job ${esc(lcJobNo(e.prev_job))}${e.prev_company ? ' (' + esc(e.prev_company) + ')' : ''}${e.waste != null ? ` (waste ${esc(lcWaste(e.waste))})` : ''} &rarr; ${esc(lcJobNo(e.new_job))} &middot; Line Cleared: ${e.cleared ? '<b class="lc-y">Y</b>' : `<b class="lc-x">N</b> (not ticked: ${miss.join(', ')})`} &middot; Line Manager: ${e.qc_cleared ? '<b class="lc-y">&#10003;</b>' : '<b class="lc-x">&#10007;</b>'}
+      Job ${esc(lcJobNo(e.prev_job))}${e.prev_company ? ' (' + esc(e.prev_company) + ')' : ''}${e.waste != null ? ` (waste ${esc(lcWaste(e.waste))})` : ''} &rarr; ${esc(lcJobNo(e.new_job))}${lcStartTime(e) ? ` (starts ${esc(hm12(lcStartTime(e)))})` : ''} &middot; Line Cleared: ${e.cleared ? '<b class="lc-y">Y</b>' : `<b class="lc-x">N</b> (not ticked: ${miss.join(', ')})`} &middot; Line Manager: ${e.qc_cleared ? '<b class="lc-y">&#10003;</b>' : '<b class="lc-x">&#10007;</b>'}
       ${e.remarks ? `<br><span style="color:var(--text2);">${esc(e.remarks)}</span>` : ''}</div>`;
   }).join('');
 }

@@ -469,7 +469,7 @@ function getDb() {
 // Bumped again for stock_groups.old_shipped (MIL Products report: shipped before the app, 2026-11-17).
 // Bumped again for stock_groups.remarks (MIL Products report Remarks column, 2026-11-17).
 // Bumped again for stock_groups.old_shipments (more than one old shipment per MIL product, 2026-11-17).
-const SCHEMA_VERSION = 'v2026-11-26-topups-in-packets';   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
+const SCHEMA_VERSION = 'v2026-11-28-lc-start-time';   // + line_clearance.start_time   // was v2026-11-26-topups-in-packets   // Store / carton / plate-from-Store rows: Procurement only   // was v2026-11-24-cartons-in-store   // plate_btn_use / _stock_in -> Procurement   // was v2026-11-24-plates-from-store   // + plate_sizes_store_part_uq   // was v2026-11-24-store-procurement   // Store rows -> Procurement   // was v2026-11-24-plates-in-store   // + plate_sizes.store_part_id, plate_stock_tx.store_tx_ids   // + store_* Access Register rows (the Store's tables are made by store-routes.js)   // + plate_btn_add/_stock_in/_use/_pickup/_delete rows   // + plate_pickups   // + finance.products.plate_colors   // + plate_stock_tx.plate_names   // + plate_stock_tx.job_no   // + plate_sizes.brand/.supplier, plate_stock_tx.job_name/.damaged_by/.recorded_at   // + plate_sizes, plate_stock_tx, plates, plate_events tables (v2026-11-23-plates)   // + plate_sizes, plate_stock_tx, plates, plate_events tables, + inv_btn_plate_store row   // + finance.products table, + products_btn_new row   // + inv_btn_rename_paper row   // + inv_btn_edit_paper row   // + job_btn_low_issue_ignore row   // + qa_waiting_ignore table, + qa_btn_waiting_ignore row   // + jobs.pm_check, + rpt_pm_checked row, + jobs.warn_ignored, + job_btn_warning_ignore row   // + operators.machine_code, line_clearance.machine_code   // + line_clearance.qc_cleared, .waste, .prev_company, .new_company
 
 // Extra papers on a job card beside the main one: the 2nd paper and the 3rd
 // paper (owner, 2026-10-21). Each lives in particulars[key] =
@@ -1633,6 +1633,9 @@ async function initDb() {
     await sql`CREATE INDEX IF NOT EXISTS line_clearance_date_idx ON line_clearance (entry_date)`;
     // QC's tick (owner, 2026-11-11): the line was cleared by QC (the line manager).
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS qc_cleared BOOLEAN NOT NULL DEFAULT false`;
+    // Starting Time of the New Job (owner, 2026-11-28); the old Time is the previous job's Completion Time. Empty on
+    // older entries - their one time is both.
+    await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS start_time TEXT NOT NULL DEFAULT ''`;
     // Waste QA counts for the previous job (owner, 2026-11-11); empty when not counted.
     await sql`ALTER TABLE line_clearance ADD COLUMN IF NOT EXISTS waste NUMERIC`;
     // The two jobs' companies as QA saved them (filled from the job card, or typed for a special job).
@@ -3444,7 +3447,7 @@ app.get('/api/jobs/:id/qa-starts', requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id) || String(id).startsWith('4')) return res.json([]);
     const rows = await sql`
-      SELECT id, machine, sections, to_char(entry_date, 'YYYY-MM-DD') AS entry_day, entry_time, new_job FROM line_clearance
+      SELECT id, machine, sections, to_char(entry_date, 'YYYY-MM-DD') AS entry_day, COALESCE(NULLIF(start_time, ''), entry_time) AS entry_time, new_job FROM line_clearance
        WHERE deleted_at IS NULL AND new_job ~ ${'(^|[^0-9])' + id + '([^0-9]|$)'}   -- no backslash in a query here: the driver drops it ('\D' became 'D' - "E-1545" never matched, owner 2026-11-26)
        ORDER BY entry_date, entry_time, created_at`;
     // The day as text from the database (owner, 2026-11-26): a Date's toISOString moves it a day back off UTC.
@@ -4091,7 +4094,7 @@ app.get('/api/factory/state', requireAuth, async (req, res) => {
       }
     }
     const since = businessDateISO(new Date(Date.now() - 90 * 86400000));
-    const lcs = idSet.size ? await sql`SELECT machine, sections, to_char(entry_date, 'YYYY-MM-DD') AS d, entry_time, new_job FROM line_clearance
+    const lcs = idSet.size ? await sql`SELECT machine, sections, to_char(entry_date, 'YYYY-MM-DD') AS d, COALESCE(NULLIF(start_time, ''), entry_time) AS entry_time, new_job FROM line_clearance
       WHERE deleted_at IS NULL AND entry_date >= ${since}` : [];
     for (const r of lcs) {
       const id = lcJobId(r.new_job);
@@ -4446,10 +4449,13 @@ function jobLogEnds(log) {
 // date|machine (lower case) -> { machine, date, mins, jobs: [{ job_id, job, name, start, end, running, mins }] }.
 async function machineHoursMap(sql, from, to) {
   const rows = await sql`
-    SELECT machine, entry_date, entry_time, new_job, prev_job, sections FROM line_clearance
+    SELECT machine, entry_date, entry_time, start_time, new_job, prev_job, sections FROM line_clearance
      WHERE deleted_at IS NULL AND entry_date <= ${to}
      ORDER BY machine, entry_date, entry_time, created_at`;
-  const at = r => pgDay(r.entry_date) + 'T' + (r.entry_time || '00:00');
+  // The new job runs from its Starting Time; the machine's next entry ends it at that entry's Completion Time
+  // (owner, 2026-11-28). An older entry has one time for both.
+  const doneAt = r => pgDay(r.entry_date) + 'T' + (r.entry_time || '00:00');
+  const at = r => pgDay(r.entry_date) + 'T' + (r.start_time || r.entry_time || '00:00');
   const ids = [...new Set(rows.map(r => lcJobId(r.new_job)).filter(Boolean))];
   const jobs = ids.length ? await sql`SELECT id, name, log FROM jobs WHERE id = ANY(${ids})` : [];
   const byId = new Map(jobs.map(j => [j.id, { name: j.name, ends: jobLogEnds(j.log) }]));
@@ -4487,7 +4493,7 @@ async function machineHoursMap(sql, from, to) {
       }
       return;
     }
-    const nx = rows[i + 1] && rows[i + 1].machine === r.machine ? wcMin(at(rows[i + 1])) : null;
+    const nx = rows[i + 1] && rows[i + 1].machine === r.machine ? wcMin(doneAt(rows[i + 1])) : null;
     const id = lcJobId(r.new_job), j = id ? byId.get(id) : null;
     const mLow = String(r.machine || '').trim().toLowerCase();
     // End: its completion entry by this machine (before the machine's next QA entry), else that next entry,
@@ -9363,8 +9369,8 @@ app.post('/api/station/line-clearance', requireStationUser, async (req, res) => 
     if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return res.status(400).json({ error: 'Waste must be a number' });
     const qaName = lcText(b.qa_name, 80) || v.operator.name;
     const row = (await sql`
-      INSERT INTO line_clearance (entry_date, entry_time, form, sections, machine, machine_code, operator_name, prev_job, prev_company, new_job, new_company, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
-      VALUES (${date}, ${lcText(b.entry_time, 10)}, ${form}, ${sections}, ${machine}, ${lcText(b.machine_code, 40)},
+      INSERT INTO line_clearance (entry_date, entry_time, start_time, form, sections, machine, machine_code, operator_name, prev_job, prev_company, new_job, new_company, points, cleared, qc_cleared, waste, remarks, qa_name, qa_operator_id)
+      VALUES (${date}, ${lcText(b.entry_time, 10)}, ${next ? (lcText(b.start_time, 10) || lcText(b.entry_time, 10)) : ''}, ${form}, ${sections}, ${machine}, ${lcText(b.machine_code, 40)},
               ${(((await machineOpsFor(sql, date)).present || {})[machine] || []).join(', ')},
               ${prev}, ${lcText(b.prev_company, 120)}, ${next}, ${lcText(b.new_company, 120)}, ${JSON.stringify(points)}, ${cleared}, ${b.qc_cleared === true}, ${waste}, ${lcText(b.remarks, 500)}, ${qaName}, ${v.operator.id})
       RETURNING *`)[0];
@@ -9771,14 +9777,19 @@ async function lcUpdate(sql, req, id, b, by) {
   if (!date) return { status: 400, error: 'Enter the date' };
   const prev = lcText(b.prev_job, 40), next = lcText(b.new_job, 40);
   if (!prev) return { status: 400, error: 'Enter the previous job' };
-  // New Job left empty and filled in now (owner, 2026-11-14): the new job starts now - its Job Time is this
-  // moment, unless the date / time were changed in the same save. A number already there is just corrected.
+  // New Job left empty and filled in now (owner, 2026-11-14): the new job starts now - its Starting Time is this
+  // moment (owner, 2026-11-28: the Time is the previous job's Completion Time, it stays), unless the Starting Time was
+  // changed in the same save. A number already there is just corrected.
   let dateOut = date, timeOut = lcText(b.entry_time, 10);
+  const curStart = cur.start_time || (String(cur.new_job || '').trim() ? cur.entry_time || '' : '');
+  let startOut = b.start_time === undefined ? curStart : lcText(b.start_time, 10);
   const curDate = pgDay(cur.entry_date);
-  if (!String(cur.new_job || '').trim() && next && date === curDate && timeOut === (cur.entry_time || '')) {
-    dateOut = businessDateISO();
-    timeOut = businessStamp().slice(-5);
+  if (!String(cur.new_job || '').trim() && next && startOut === curStart) {
+    startOut = businessStamp().slice(-5);
+    // Filled on a later day: the entry moves to today, as before (one date holds both times).
+    if (date === curDate && timeOut === (cur.entry_time || '') && businessDateISO() !== curDate) { dateOut = businessDateISO(); timeOut = startOut; }
   }
+  if (!next) startOut = '';
   const waste = b.waste === '' || b.waste == null ? null : Number(b.waste);
   if (waste != null && !(Number.isFinite(waste) && waste >= 0)) return { status: 400, error: 'Waste must be a number' };
   const nums = (LC_FORMS[cur.form] || []).filter(x => (cur.sections || []).includes(x[0])).flatMap(x => x[1]);
@@ -9792,7 +9803,7 @@ async function lcUpdate(sql, req, id, b, by) {
   if (lcJobId(prev) !== lcJobId(cur.prev_job) && prevCo === (cur.prev_company || '')) prevCo = (await coOf(prev)) || prevCo;
   if (lcJobId(next) !== lcJobId(cur.new_job) && nextCo === (cur.new_company || '')) nextCo = (await coOf(next)) || nextCo;
   const row = (await sql`
-    UPDATE line_clearance SET entry_date = ${dateOut}, entry_time = ${timeOut}, prev_job = ${prev}, prev_company = ${prevCo},
+    UPDATE line_clearance SET entry_date = ${dateOut}, entry_time = ${timeOut}, start_time = ${startOut}, prev_job = ${prev}, prev_company = ${prevCo},
       new_job = ${next}, new_company = ${nextCo}, waste = ${waste}, points = ${JSON.stringify(points)}, cleared = ${cleared},
       qc_cleared = ${b.qc_cleared === true}, remarks = ${lcText(b.remarks, 500)}, edited_at = NOW(), edited_by = ${by}
     WHERE id = ${id} RETURNING *`)[0];
