@@ -36,6 +36,19 @@
     if (st === 'new' || st === 'pending') return 'wait';
     return si;
   }
+  // When a job came on a machine at a stage (owner, 2026-11-28): QA's line clearance start or the operator's entry
+  // at the Station, the latest. Only the staff Factory view sends them (_starts); without them a job is placed as before.
+  function hasStarts(j) { return Array.isArray(j && j._starts); }
+  function stageStart(j, stage) {
+    const l = hasStarts(j) ? j._starts.filter(s => s && s.stage === stage) : [];
+    return l.length ? l[l.length - 1] : null;
+  }
+  // The stages a job goes through: Coatings only with a coating on it.
+  function jobHasStage(j, st) {
+    if (st !== 2) return true;
+    const c = j && j.coatings;
+    return Array.isArray(c) ? c.length > 0 : !!String(c || '').trim();
+  }
   function isBlocked(j) {
     const s = j && j.stages && j.stages[String(stageIndex(j))];
     return !!(s && s.status === 'blocked');
@@ -414,6 +427,7 @@
   };
   // A pallet's top in its stage's colour.
   const zoneTop = key => key === 'issued' ? 0xffffff : String(key).startsWith('press:') || key === 'printx' ? 0x111827
+    : String(key).startsWith('mach:') ? (({ 2: 0x2563eb, 3: 0xdc2626, 5: 0xf97316 })[(machOfKey(key) || {}).stage] || 0x9ca3af)
     : ({ coat: 0x2563eb, emboss: 0x9333ea, die: 0xdc2626, sort: 0xfacc15, paste: 0xf97316, final0: 0x16a34a, final1: 0x16a34a, ready: 0x16a34a })[key] || 0x9ca3af;
   // The green spots beside each press (owner's dots), by press number; 4 & 7 and 5 & 6 share an area.
   const PRESS_SPOTS = [
@@ -434,6 +448,29 @@
     });
     return best;
   };
+  // The machine a QA / Station entry names, at that stage (owner, 2026-11-28): 'press:i' for a press, else
+  // 'mach:<floor b/g/f>:<index>'; null when no machine of that stage has that name.
+  const MACHINE_LISTS = { b: () => MACHINES, g: () => GROUND_MACHINES, f: () => FIRST_MACHINES };
+  const MACHINE_FLOOR_NAMES = { b: 'basement', g: 'ground', f: 'first' };
+  const machineKeyFor = (name, stage) => {
+    const n = v => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const jm = n(String(name || '').split(/[|+,]/)[0]);
+    if (!jm) return null;
+    let best = null, score = 0;
+    for (const g of ['b', 'g', 'f']) MACHINE_LISTS[g]().forEach((m, i) => {
+      if (m.stage !== stage || !(m.pallets || []).length) return;
+      const [st, nm] = MACHINE_STATIONS[MACHINE_FLOOR_NAMES[g]][i] || [];
+      for (const k of [n(st), n(nm)]) {
+        if (!k) continue;
+        const sc = k === jm ? 3 : (k.startsWith(jm) && /^\d*$/.test(k.slice(jm.length))) ? 2 : (k.startsWith(jm) || jm.startsWith(k)) ? 1 : 0;
+        if (sc > score) { score = sc; best = g + ':' + i; }
+      }
+    });
+    if (!best) return null;
+    return stage === 1 && best.startsWith('b:') ? 'press:' + best.slice(2) : 'mach:' + best;
+  };
+  const machOfKey = key => { const [, g, i] = String(key).split(':'); return MACHINE_LISTS[g] ? MACHINE_LISTS[g]()[+i] || null : null; };
+  const STAGE_ZONE_KEY = { 1: 'printx', 2: 'coat', 3: 'die', 4: 'sort', 5: 'paste' };
   // The PM's Mark Ready tick, still standing (a delivery after it retires it).
   const readyTicked = j => {
     const c = j && j.ready_check, t = c && Date.parse(c.at);
@@ -445,6 +482,15 @@
     if (place === 'wait') return 'wait';
     if (place === 'ready') return j && j.stock_group_name ? 'ready' : (readyTicked(j) ? 'final0' : 'final1');
     if (place === 0) return 'ctp';
+    // Staff Factory (owner, 2026-11-28): the issued stock waits in the white area until the job is on a press - QA's
+    // start or the operator's entry - then stands beside THAT press; each later stage beside the machine it came on.
+    if (hasStarts(j) && place >= 1 && place <= 5) {
+      const st = stageStart(j, place);
+      if (place === 1 && !st) return 'issued';
+      const mk = st && machineKeyFor(st.machine, place);
+      if (mk) return mk;
+      if (place === 1) return 'printx';
+    }
     if (place === 1) {
       const t = Date.parse(j && j.issued_at);
       if (Number.isFinite(t) && Date.now() - t < 5 * 86400000) return 'issued';   // fresh issued stock: up to 5 days in white (owner, 2026-10-24)
@@ -548,6 +594,10 @@
     if (key.startsWith('press:')) {
       const pt = pressSpots(+key.slice(6))[k] || pressSpots(+key.slice(6))[0];
       return { x: wx(PLAN_B, pt[0]), z: wz(PLAN_B, pt[1]), lift: 0, y: FLOOR_Y[0] + basementRaise(pt[0], pt[1]), floor: 0 };
+    }
+    if (key.startsWith('mach:')) {   // beside the machine the job came on (owner, 2026-11-28)
+      const m = machOfKey(key), sp = (m && m.pallets) || [], off = sp[k % Math.max(1, sp.length)] || [0, 0], at = machinePos(m);
+      return { x: at.x + off[0], z: at.z + off[1], lift: sp.length ? Math.floor(k / sp.length) : 0, y: at.y, floor: at.floor };
     }
     const zones = FLOW_ZONES[key] || FLOW_ZONES.printx;
     // Packed close from the area's corner, not spread over it (owner, 2026-10-24).
@@ -2240,7 +2290,8 @@
       g.position.set(dx, 0, DOCK_Z);
       const driver = person(dx + 1.85, DOCK_Z + 3.6, -Math.PI / 2);   // the driver stands by his truck (owner, 2026-10-24)
       driver.userData.info = { name: 'Driver ' + (k + 1), role: 'Driver', note: 'Truck ' + (k + 1) + ' · no record in the app' };
-      trucks.push({ g, k, dx, driver, state: 'docked', path: null, t: 0, badge: null, onDone: null });
+      trucks.push({ g, k, dx, driver, state: 'docked', path: null, t: 0, badge: null, onDone: null, loads: [], company: null, day: null });
+      g.traverse(o => { o.userData.truckK = k; });
     });
     // Smooth curves for a truck's trips (CatmullRom through key points).
     const P = (x, z) => new THREE.Vector3(x, 0, z);
@@ -2250,6 +2301,34 @@
     const returnCurve = dx => curve([P(gx + 130, ROAD_Z - 2.4), P(gx + 16, ROAD_Z - 2.4), P(gx + 3, ROAD_Z - 2), P(gx + 1, GATE.z + 1), P(gx - 2, GATE.z - 5), P(dx + 10, DOCK_Z + 13), P(dx - 3, DOCK_Z + 12), P(dx - 7, DOCK_Z + 8), P(dx - 4, DOCK_Z + 6.2), P(dx + 7, DOCK_Z + 7.6)]);
     const reverseCurve = dx => curve([P(dx + 7, DOCK_Z + 7.6), P(dx + 2.5, DOCK_Z + 6.4), P(dx, DOCK_Z + 3), P(dx, DOCK_Z)]);
     const startTrip = (tr, legs, onDone) => { tr.legs = legs; tr.leg = 0; tr.t = 0; tr.v = 0; tr.onDone = onDone; };
+    // The day's deliveries (owner, 2026-11-28): loaded at the dock during the day, one truck per company; at the end
+    // of work (5 pm) they drive out and keep driving on the road - a click shows what they delivered - and at
+    // midnight, the day done, they come back.
+    const END_HOUR = 17;
+    const afterEnd = () => new Date().getHours() >= END_HOUR;
+    const companyOf = j => String((j && j.client) || '').trim() || 'No company';
+    // Round and round on the stretch of road in view (left of the gate): along the near lane, a U-turn, back on the far one.
+    const RE = gx - 6, RW = gx - 55;
+    const toRoadCurve = dx => curve([P(dx, DOCK_Z), P(dx, DOCK_Z + 6), P((dx + gx) / 2 + 2, GATE.z - 6), P(gx - 1, GATE.z - 2), P(gx, GATE.z + 2), P(gx - 2, ROAD_Z - 2.2), P(gx - 9, ROAD_Z - 2.4)]);
+    const roadLoop = new THREE.CatmullRomCurve3([P(RE, ROAD_Z - 2.4), P((RE + RW) / 2, ROAD_Z - 2.4), P(RW, ROAD_Z - 2.4), P(RW - 3.2, ROAD_Z), P(RW, ROAD_Z + 2.4),
+      P((RE + RW) / 2, ROAD_Z + 2.4), P(RE, ROAD_Z + 2.4), P(RE + 3.2, ROAD_Z)], true, 'centripetal');
+    const startRoad = (tr, at) => { tr.state = 'road'; tr.legs = [{ c: roadLoop, speed: 6, loop: true }]; tr.leg = 0; tr.t = at || 0; tr.v = 6; tr.onDone = null; tr.g.visible = true; };
+    const setTruckBadge = tr => {
+      if (tr.badge) { disposeSprite(tr.badge); tr.badge = null; }
+      if (!tr.loads.length) return;
+      const n = tr.loads.length;
+      tr.badge = tag(clip(tr.company || '', 18), n + (n === 1 ? ' delivery' : ' deliveries'), 'blue');
+      tr.badge.position.set(0, 5.4, -1); tr.badge.userData.truckK = tr.k; tr.g.add(tr.badge);
+    };
+    const addLoad = (tr, q) => {
+      const co = companyOf(q.job);
+      tr.loads.push({ job: q.job, cartons: q.cartons });
+      if (!tr.company) tr.company = co;
+      else if (!tr.company.split(' + ').includes(co)) tr.company += ' + ' + co;
+      tr.day = localDay();
+      setTruckBadge(tr);
+    };
+    const clearTruck = tr => { tr.loads = []; tr.company = null; tr.day = null; setTruckBadge(tr); };
 
     // ── Job pallets ──
     const pallets = new Map();     // job id -> { g, place, job, ... }
@@ -2352,7 +2431,8 @@
     const layout = (instant) => {
       const groups = new Map();
       const addTo = (k, p) => { if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); };
-      for (const p of pallets.values()) { if (p.leaving) continue; addTo(zoneKeyFor(p.job, p.place), p); }
+      // A pallet on its way through stages it skipped goes to its next stop first (owner, 2026-11-28).
+      for (const p of pallets.values()) { if (p.leaving) continue; addTo(p.hops && p.hops.length ? p.hops[0] : zoneKeyFor(p.job, p.place), p); }
       // Each pallet keeps its spot while it stays in its area (owner, 2026-10-26):
       // one leaving doesn't make the rest shuffle along - only a pallet whose
       // area changes is moved. A newcomer takes the first free spot.
@@ -2373,8 +2453,10 @@
         return over;
       };
       for (const [k, list] of [...groups]) if (k.startsWith('press:')) keepSpots(k, list, pressSpots(+k.slice(6)).length).forEach(p => addTo('printx', p));
+      // A machine holds as many as its spots; the rest wait in that stage's area.
+      for (const [k, list] of [...groups]) if (k.startsWith('mach:')) { const m = machOfKey(k); keepSpots(k, list, Math.max(1, ((m && m.pallets) || []).length)).forEach(p => addTo(STAGE_ZONE_KEY[m && m.stage] || 'printx', p)); }
       for (const [k, list] of groups) {
-        if (!k.startsWith('press:')) keepSpots(k, list);
+        if (!k.startsWith('press:') && !k.startsWith('mach:')) keepSpots(k, list);
         list.forEach(p => {
           const i = p.slotIdx, s = zoneSlot(k, i);
           p.stag = i % 2;
@@ -2420,7 +2502,7 @@
             const hm = hp >= 0 ? MACHINES[hp] : null;
             const home = hm ? new THREE.Vector3(wx(PLAN_B, hm.at[0]), FLOOR_Y[0] + basementRaise(hm.at[0], hm.at[1]) + SLAB, wz(PLAN_B, hm.at[1]) + 2.2)
               : nearOperator(from) || from.clone().add(new THREE.Vector3(2.4, 0, 1.2));
-            const op = nearOperator(home), toName = String(k).startsWith('press:') ? 'its press' : (ZONE_STYLE[k] ? ZONE_STYLE[k][2].toLowerCase() : 'its next area');
+            const op = nearOperator(home), toName = String(k).startsWith('press:') ? 'its press' : String(k).startsWith('mach:') ? 'its machine' : (ZONE_STYLE[k] ? ZONE_STYLE[k][2].toLowerCase() : 'its next area');
             const info = Object.assign({ name: 'Operator', role: 'Operator' }, op && op.info, { note: 'Moving E-' + p.job.id + ' to ' + toName });
             // He needs one of his floor's hand lifters: waits his turn if both are out.
             p.move = { waiting: true, floor: hm ? 0 : f0, home, via, to: to.clone(), info, refill: p.pendingFill };
@@ -2433,16 +2515,56 @@
       }
     };
 
+    // The stops on the way from one stage to a later one (owner, 2026-11-28): the machine of the stage it leaves when
+    // it never stood there (saved at the Station with no QA start - the job still goes to the machine), then every
+    // stage in between that the job has - beside its machine when one was named, else in that stage's area.
+    const hopsFor = (j, from, to, curKey) => {
+      if (typeof from !== 'number' || from < 1) return [];   // CTP / waiting: it simply goes there
+      const ti = to === 'ready' ? 6 : to === 'delivered' ? 7 : to;
+      if (typeof ti !== 'number' || ti <= from) return [];
+      const mk = s => { const st = stageStart(j, s); return (st && machineKeyFor(st.machine, s)) || null; };
+      const hops = [];
+      const own = mk(from) || (from === 1 && curKey === 'issued' ? (pressIndexFor(j) >= 0 ? 'press:' + pressIndexFor(j) : 'printx') : null);
+      if (own && own !== curKey) hops.push(own);
+      for (let s = from + 1; s < ti && s <= 5; s++) if (jobHasStage(j, s)) hops.push(mk(s) || STAGE_ZONE_KEY[s]);
+      return hops;
+    };
+    // Its next stop once it stands still a moment; the last one done, a delivered job goes on the truck.
+    const stepHops = dt => {
+      let again = false;
+      for (const p of pallets.values()) {
+        if (p.move || p.leaving || p.inTransit) continue;
+        if (p.hops && p.hops.length) {
+          p.hopHold = (p.hopHold == null ? 1.2 : p.hopHold) - dt;
+          if (p.hopHold > 0) continue;
+          p.hops.shift(); p.hopHold = null; again = true;
+        } else if (p.deliverAfter) {
+          const list = p.deliverAfter; p.deliverAfter = null; p.leaving = true;
+          list.forEach((c, i) => { enqueueDeparture(p.job, c, p.g.position.clone()); if (i === list.length - 1) queue[queue.length - 1].onPicked = () => removePallet(p); });
+          again = true;
+        }
+      }
+      if (again) { layout(false); for (const p of pallets.values()) if (p.pendingFill && !p.move) { fillPallet(p); p.pendingFill = false; } }
+    };
+
     // ── Deliveries: the loader carries the cartons to a truck, it drives off ──
     const queue = [];
     let loaderJob = null;
-    const freeTruck = () => trucks.find(t => t.state === 'docked');
+    const freeTruck = () => trucks.find(t => t.state === 'docked' && !t.loads.length);
     const enqueueDeparture = (job, cartons, fromPos) => { queue.push({ job, cartons, fromPos }); };
     const runQueue = () => {
       if (loaderJob || !queue.length) return;
-      const tr = freeTruck();
+      const q = queue[0], co = companyOf(q.job);
+      // The company's truck at the dock, else an empty one; more companies than trucks share the least loaded.
+      const docked = trucks.filter(t => t.state === 'docked');
+      let tr = docked.find(t => t.company && t.company.split(' + ').includes(co)) || docked.find(t => !t.loads.length);
+      if (!tr) {
+        const road = trucks.find(t => t.state === 'road' && t.company && t.company.split(' + ').includes(co)) || trucks.find(t => t.state === 'road' || t.state === 'out');
+        if (afterEnd() && road && !docked.length) { queue.shift(); if (q.onPicked) q.onPicked(); addLoad(road, q); renderStats(); return; }   // all out: rides with one on the road
+        tr = docked.slice().sort((a, b) => a.loads.length - b.loads.length)[0];
+      }
       if (!tr) return;
-      const q = queue.shift();
+      queue.shift();
       tr.state = 'loading';
       const crate = new THREE.Group();
       for (const x of [-0.55, 0.55]) for (const z of [-0.45, 0.45]) box(1.04, 0.72, 0.86, 0xc9a26b, x, 0.5, z, crate);
@@ -2451,15 +2573,17 @@
       loaderJob = { q, tr, crate, phase: 'toStack', from: q.fromPos || new THREE.Vector3(READY.x0 + 10, 0.3, READY.z0 + 12) };
       loader.busy = true; loader.target = null;
     };
-    const departTruck = (tr, q) => {
-      const cart = q.cartons > 0 ? q.cartons.toLocaleString() + ' cartons' : 'Delivered';
-      tr.badge = tag(jobTitle(q.job), cart, 'blue');
-      tr.badge.position.set(0, 5.4, -1); tr.g.add(tr.badge);
+    // Out of the gate onto the road, then round and round till midnight.
+    const departTruck = tr => {
       tr.state = 'out';
-      startTrip(tr, [{ c: departCurve(tr.dx), speed: 10 }], () => {
-        disposeSprite(tr.badge); tr.badge = null;
-        tr.state = 'away'; tr.awayFor = reduceMotion ? 1 : 6;
-      });
+      startTrip(tr, [{ c: toRoadCurve(tr.dx), speed: 10 }], () => { startRoad(tr, 0.02); renderStats(); });
+    };
+    // Midnight: back from the road (from the far lane, heading for the gate) and backed onto its dock, empty.
+    const returnTruck = tr => {
+      tr.state = 'returning'; tr.returnDue = false; clearTruck(tr);
+      const pos = tr.g.position;
+      startTrip(tr, [{ c: curve([P(pos.x, pos.z), P(gx - 7, ROAD_Z + 2.2), P(gx - 1, ROAD_Z - 1.5), P(gx + 1, GATE.z + 1), P(gx - 2, GATE.z - 5), P(tr.dx + 10, DOCK_Z + 13), P(tr.dx - 3, DOCK_Z + 12), P(tr.dx - 7, DOCK_Z + 8), P(tr.dx - 4, DOCK_Z + 6.2), P(tr.dx + 7, DOCK_Z + 7.6)]), speed: 10 },
+        { c: reverseCurve(tr.dx), speed: 3, reverse: true }], () => { tr.state = 'docked'; tr.g.position.set(tr.dx, 0, DOCK_Z); tr.g.rotation.y = 0; renderStats(); });
     };
 
     // ── Stock in (owner, 2026-10-25) ──
@@ -2677,12 +2801,13 @@
       const delivered = jobs.filter(j => jobPlace(j) === 'delivered').length;
       const blocked = live.filter(isBlocked).length;
       const out = trucks.filter(t => t.state !== 'docked' && t.state !== 'loading').length;
+      const loaded = trucks.filter(t => (t.state === 'docked' || t.state === 'loading') && t.loads.length).length;
       ui.stats.innerHTML =
         `<div class="saa-card blue"><b>${inProc}</b><span>In production</span></div>` +
         `<div class="saa-card green"><b>${ready}</b><span>Ready to ship</span></div>` +
         `<div class="saa-card"><b>${delivered}</b><span>Delivered (3 days)</span></div>` +
         (blocked ? `<div class="saa-card red"><b>${blocked}</b><span>On hold</span></div>` : '') +
-        `<div class="saa-card"><b>${out ? out + ' on road' : 'All 3'}</b><span>${out ? (3 - out) + ' at the dock' : 'trucks at the dock'}</span></div>`;
+        `<div class="saa-card"><b>${out ? out + ' on road' : loaded ? loaded + ' loaded' : 'All 3'}</b><span>${out ? (3 - out) + ' at the dock' : loaded ? 'leave at 5 pm' : 'trucks at the dock'}</span></div>`;
     };
     const renderBar = () => {
       const j = selectedId != null ? jobs.find(x => x.id === selectedId) : null;
@@ -2905,6 +3030,24 @@
         (i.note ? popRow('Note', esc(i.note)) : ''),
         { obj: r.who, dy: 2.6, person: true });
     };
+    // A truck (owner, 2026-11-28): what it carries today - each delivery's job, product and cartons.
+    const pickTruck = (cx, cy) => {
+      const r = el.getBoundingClientRect();
+      ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, camera);
+      const hit = ray.intersectObjects(trucks.filter(t => t.g.visible).map(t => t.g), true)[0];
+      return hit && hit.object.userData.truckK != null ? trucks[hit.object.userData.truckK] : null;
+    };
+    const showTruckPop = tr => {
+      const n = tr.loads.length;
+      const status = tr.state === 'road' || tr.state === 'out' ? 'On the road · back at midnight'
+        : tr.state === 'returning' ? 'Coming back' : n ? 'Loaded · leaves at 5 pm' : tr.state === 'issuing' ? 'Fetching issued stock' : 'At the dock';
+      const rows = tr.loads.map(l => popRow('E-' + esc(l.job.id), esc(clip(l.job.name || '', 24)) + (l.cartons > 0 ? ' · ' + l.cartons.toLocaleString() + ' cartons' : ''))).join('');
+      openPop('#1e40af', 'TRUCK ' + (tr.k + 1),
+        `<div class="saa-pop-size"><b>${esc(tr.company || 'Empty')}</b></div>` + popRow('Status', esc(status)) +
+        (n ? popRow('Delivered today', n + (n === 1 ? ' delivery' : ' deliveries')) + rows : popRow('Load', 'Nothing today')),
+        { obj: tr.g, dy: 6 });
+    };
     const showReadyPop = p => {
       const j = p.job, n = readyCartonsLeft(j), R = num(j._readyQty), D = shippedCartons(j), mil = !!j.stock_group_name;
       ui.pop.style.setProperty('--tone', '#166534');
@@ -2976,10 +3119,12 @@
         else {
           if (stockSel != null) selectStock(null);
           const nj = id == null ? pickNewJob(e.clientX, e.clientY) : null;
-          const pr = id == null && nj == null && !forClient ? pickPerson(e.clientX, e.clientY) : null;   // a client sees people, not who they are
-          const mc = id == null && nj == null && !pr ? pickMachine(e.clientX, e.clientY) : null;
+          const tk = id == null && nj == null ? pickTruck(e.clientX, e.clientY) : null;
+          const pr = id == null && nj == null && !tk && !forClient ? pickPerson(e.clientX, e.clientY) : null;   // a client sees people, not who they are
+          const mc = id == null && nj == null && !tk && !pr ? pickMachine(e.clientX, e.clientY) : null;
           select(id);
           if (nj != null) { if (opts.onJobCard) opts.onJobCard(nj); }
+          else if (tk) showTruckPop(tk);
           else if (pr) showPersonPop(pr);
           else if (mc) showMachinePop(mc);
         }
@@ -3111,16 +3256,27 @@
           if (L.t >= 0.8) {
             f.remove(L.crate);
             L.crate.traverse(o => { if (o.isMesh) o.geometry.dispose(); });
-            departTruck(L.tr, L.q);
+            addLoad(L.tr, L.q); L.tr.state = 'docked';   // loaded; it leaves at 5 pm (see the trucks below)
             loaderJob = null; loader.busy = false; loader.home = [READY.x0 + 14, READY.z1 - 3];
             renderStats();
           }
         }
       }
+      stepHops(dt);
       runQueue();
       // The store run for issued stock, a step at a time.
       if (issueRun) { if (issueRun.steps[issueRun.i](dt)) issueRun.i++; if (issueRun.i >= issueRun.steps.length) issueRun = null; }
       else startIssueRun();
+      // 5 pm: the loaded trucks leave (once nothing more for their company is being loaded); midnight: they come back.
+      const today = localDay();
+      for (const tr of trucks) {
+        if (tr.state === 'docked' && tr.loads.length && tr.day && tr.day !== today) clearTruck(tr);   // a past day's load never left
+        else if (tr.state === 'docked' && tr.loads.length && afterEnd() && !(loaderJob && loaderJob.tr === tr)
+          && !trucks.some(t => t.state === 'out')   // one at a time through the gate, spaced out on the road
+          && !queue.some(q => tr.company.split(' + ').includes(companyOf(q.job)))) departTruck(tr);
+        if ((tr.state === 'road' || tr.state === 'out') && tr.day && tr.day !== today) tr.returnDue = true;
+        if (tr.state === 'road' && tr.returnDue && tr.g.position.z > ROAD_Z + 1 && tr.g.position.x > RW + 8 && tr.g.position.x < gx - 16) returnTruck(tr);
+      }
       // Trucks on their trips.
       for (const tr of trucks) {
         if (tr.state === 'away') {
@@ -3135,8 +3291,11 @@
         const len = leg.len || (leg.len = leg.c.getLength());
         // Pull away gently, then cruise; slow right down for the last metres.
         const left = (1 - tr.t) * len;
-        tr.v += (Math.min(leg.speed, 1.2 + left * 0.9) - tr.v) * Math.min(1, dt * 1.4);
-        tr.t = Math.min(1, tr.t + dt * Math.max(0.6, tr.v) / len);
+        if (leg.loop) { tr.v = leg.speed; tr.t = (tr.t + dt * tr.v / len) % 1; }   // round and round on the road
+        else {
+          tr.v += (Math.min(leg.speed, 1.2 + left * 0.9) - tr.v) * Math.min(1, dt * 1.4);
+          tr.t = Math.min(1, tr.t + dt * Math.max(0.6, tr.v) / len);
+        }
         leg.c.getPointAt(tr.t, tr.g.position);
         const tan = leg.c.getTangentAt(tr.t);
         const head = Math.atan2(tan.x, tan.z) + (leg.reverse ? Math.PI : 0);
@@ -3200,20 +3359,28 @@
       // New jobs pop in, staggered on the first load.
       let n = 0;
       for (const j of d.added) { const place = jobPlace(j); if (place !== 'delivered' && place !== 'wait' && !pallets.has(j.id)) makePallet(j, place, first ? (n++) * 0.06 : 0); }
-      // Departures: the pallet (or a share of it) goes on a truck.
+      // Departures: the pallet (or a share of it) goes on a truck. Delivered straight from production (staff
+      // Factory, owner 2026-11-28): it goes through every stage it has, to Ready, and only then onto the truck.
       for (const dep of d.departures) {
         const p = pallets.get(dep.job.id);
         const fromPos = p ? p.g.position.clone() : null;
         const full = jobPlace(dep.job) === 'delivered';
+        if (p && full && hasStarts(dep.job) && !reduceMotion && typeof p.place === 'number' && p.place >= 1) {
+          if (!p.deliverAfter) { p.hops = hopsFor(dep.job, p.place, 'ready', p.keyWas); p.place = 'ready'; p.pendingFill = true; p.deliverAfter = []; }
+          p.deliverAfter.push(dep.cartons);
+          continue;
+        }
         enqueueDeparture(dep.job, dep.cartons, fromPos);
         if (p && full) { const q = queue[queue.length - 1]; p.leaving = true; q.onPicked = () => removePallet(p); }
       }
-      // Moves between areas.
+      // Moves between areas. A job that skipped stages (or was saved at the Station without a QA start) walks
+      // through them: its machine first, then each stage it has, then where it is now (owner, 2026-11-28).
       for (const mv of d.moves) {
         const p = pallets.get(mv.job.id);
         if (!p) { if (mv.to !== 'delivered' && mv.to !== 'wait') makePallet(mv.job, mv.to, 0); continue; }
         if (mv.to === 'wait') { removePallet(p); continue; }
-        if (mv.to === 'delivered') { if (!p.leaving) { p.leaving = true; enqueueDeparture(mv.job, 0, p.g.position.clone()); queue[queue.length - 1].onPicked = () => removePallet(p); } continue; }
+        if (mv.to === 'delivered') { if (p.deliverAfter) continue; if (!p.leaving) { p.leaving = true; enqueueDeparture(mv.job, 0, p.g.position.clone()); queue[queue.length - 1].onPicked = () => removePallet(p); } continue; }
+        if (hasStarts(mv.job) && !reduceMotion) p.hops = hopsFor(mv.job, p.place, mv.to, p.keyWas);
         p.place = mv.to; p.pendingFill = true;
       }
       for (const p of pallets.values()) { const j = byId.get(p.job.id); if (j) { p.job = j; setTag(p); if (p.place === 'ready' && readyCartonsLeft(j) !== (p.readyN || 0)) p.pendingFill = true; if (zoneKeyFor(j, p.place) !== p.zoneKey) p.pendingFill = true; } }
@@ -3227,8 +3394,15 @@
       renderStats(); renderBar();
     };
     applyJobs(opts.jobs, true);
-    // Replay today's deliveries once, so the trucks' trips are seen.
-    if (!reduceMotion) for (const s of todaysShipments(jobs).slice(0, 3)) enqueueDeparture(s.job, s.cartons, null);
+    // Today's deliveries when the view opens (owner, 2026-11-28): before 5 pm loaded on the trucks at the dock, one
+    // truck per company; after 5 pm out on the road till midnight.
+    (() => {
+      const byCo = new Map();
+      for (const s of todaysShipments(jobs)) { const co = companyOf(s.job); if (!byCo.has(co)) byCo.set(co, []); byCo.get(co).push(s); }
+      [...byCo.values()].forEach((list, i) => { const tr = trucks[Math.min(i, trucks.length - 1)]; for (const s of list) addLoad(tr, { job: s.job, cartons: s.cartons }); });
+      if (afterEnd()) trucks.forEach((tr, k) => { if (tr.loads.length) startRoad(tr, (k * 0.33 + 0.1) % 1); });
+      renderStats();
+    })();
     resize(); setView('overview', true);
 
     // ── Fewer things to draw (owner, 2026-10-29) ──
@@ -3344,5 +3518,5 @@
     return ctl;
   }
 
-  window.SAAnimation = { mount, _test: { jobPlace, diffJobs, todaysShipments, slotFor, dayOf, shippedCartons, isBlocked, FLOORS, FLOOR_Y, RAISE, PLAN_P, TOWERS, stockLayout, INV } };
+  window.SAAnimation = { mount, _test: { jobPlace, diffJobs, todaysShipments, slotFor, dayOf, shippedCartons, isBlocked, FLOORS, FLOOR_Y, RAISE, PLAN_P, TOWERS, stockLayout, INV, machineKeyFor, zoneKeyFor, zoneSlot, stageStart } };
 })();

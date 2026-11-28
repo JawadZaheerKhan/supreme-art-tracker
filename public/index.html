@@ -48907,7 +48907,7 @@ async function loadClientViewJobs(showToast) {
 // client portal): a 3D view of the shop - Production building, Ready Stock
 // building, 3 trucks - drawn by public/animation.js from the same
 // client-filtered jobs the Jobs sub-tab lists. Loaded only when opened.
-const CLIENT_ANIM_SRC = '/animation.js?v=69';
+const CLIENT_ANIM_SRC = '/animation.js?v=70';
 const CLIENT_ANIM_SHELLS = {
   'client-view': {
     bar: 'client-view-subtabs', jobs: 'client-view-jobs-pane', anim: 'client-view-anim',
@@ -48925,12 +48925,21 @@ const CLIENT_ANIM_SHELLS = {
   },
 };
 // The Factory tab: every job in the factory (owner, 2026-10-24).
+// Each job carries its stage starts (owner, 2026-11-28): QA's line clearance start or the operator's Station entry -
+// its stock waits in the white area until then and goes to that machine (see /api/factory/state).
 CLIENT_ANIM_SHELLS.factory = {
   anim: 'factory-anim',
-  rows: () => (Array.isArray(jobs) ? jobs : []).filter(j => j && !j.deleted_at),
+  rows: () => (Array.isArray(jobs) ? jobs : []).filter(j => j && !j.deleted_at)
+    .map(j => _factoryState ? { ...j, _starts: (_factoryState.starts || {})[j.id] || [] } : j),
   company: () => '__factory__',
   reload: () => loadJobs().then(() => refreshClientAnim('factory')),
 };
+let _factoryState = null, _factoryStateAt = 0;
+async function loadFactoryState() {
+  if (_factoryState && Date.now() - _factoryStateAt < 50000) return _factoryState;
+  try { _factoryState = await api('GET', '/api/factory/state'); _factoryStateAt = Date.now(); } catch (e) { /* keep the last one */ }
+  return _factoryState;
+}
 const clientSubTab = { 'client-view': 'jobs', 'client-portal': 'jobs', factory: 'animation' };
 const clientAnim = {};
 let clientAnimScript = null;
@@ -48965,6 +48974,7 @@ async function refreshClientAnim(shell) {
   if (!cfg || clientSubTab[shell] !== 'animation') return;
   const host = document.getElementById(cfg.anim);
   if (!host) return;
+  if (shell === 'factory') await loadFactoryState();
   // Each row also carries its Ready Qty and its Carton Shipper count - the
   // Ready Stock store shows that many cartons (owner, 2026-10-24).
   const rawRows = cfg.rows();
@@ -49051,13 +49061,21 @@ async function factoryMoveStage(id, target) {
   await moveToStage(id, target);
   refreshClientAnim('factory');
 }
-// Every operator with the station (machine) they work, for the 3D view;
-// re-read at most every 10 minutes.
+// Every operator with the station (machine) they work, for the 3D view - today's, as QA set them in Today's
+// operators: the ones marked absent today stay off their machine (owner, 2026-11-28). Re-read every minute.
 let _animCrew = null, _animCrewAt = 0;
 async function animCrewRows() {
-  if (_animCrew && Date.now() - _animCrewAt < 600000) return _animCrew;
-  try { _animCrew = await api('GET', '/api/operators/all-persons'); _animCrewAt = Date.now(); }
-  catch (e) { _animCrew = _animCrew || []; }
+  if (_animCrew && Date.now() - _animCrewAt < 55000) return _animCrew;
+  try {
+    const [all, st] = await Promise.all([api('GET', '/api/operators/all-persons'), loadFactoryState()]);
+    const present = (st && st.present) || null, assign = (st && st.assign) || {};
+    const lc = s => String(s || '').trim().toLowerCase();
+    _animCrew = (all || []).filter(o => {
+      if (!present || !assign[o.machine]) return true;   // managers, QA / QC: not in Today's operators
+      return (present[o.machine] || []).some(n => lc(n) === lc(o.name));
+    });
+    _animCrewAt = Date.now();
+  } catch (e) { _animCrew = _animCrew || []; }
   return _animCrew;
 }
 // The inventory store in the 3D view shows the paper / board on hand. Only

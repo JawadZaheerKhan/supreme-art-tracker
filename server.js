@@ -4068,6 +4068,44 @@ app.get('/api/operators/all-persons', requireAuth, async (req, res) => {
     console.error(err); res.status(500).json({ error: err.message });
   }
 });
+// The 3D Factory (owner, 2026-11-28): when each job came on a machine at each stage - QA's line clearance start or the
+// operator's saved entry at the Station, whichever - so its stock waits in the white area until then and goes to THAT
+// machine; and today's operators as QA set them, without the ones marked absent. Staff only.
+app.get('/api/factory/state', requireAuth, async (req, res) => {
+  try {
+    await dbReady;
+    const sql = getDb();
+    const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+    if (roles.includes('client')) return res.status(403).json({ error: 'Not for clients.' });
+    const today = businessDateISO();
+    const { assign, present } = await machineOpsFor(sql, today);
+    const jobs = await sql`SELECT id, log FROM jobs WHERE deleted_at IS NULL AND (COALESCE(stage_index, 0) < 7 OR updated_at > NOW() - INTERVAL '4 days')`;
+    const idSet = new Set(jobs.map(j => j.id));
+    const starts = {};
+    const add = (id, s) => { (starts[id] = starts[id] || []).push(s); };
+    const stageIdx = new Map(STAGES.map((s, i) => [s.toLowerCase(), i]));
+    for (const j of jobs) {
+      for (const e of jobLogEnds(j.log)) {
+        const st = stageIdx.get(String(e.stage || '').toLowerCase());
+        if (st >= 1 && st <= 5) add(j.id, { stage: st, machine: e.machine, at: Number.isFinite(e.min) ? e.min : 0, src: 'op' });
+      }
+    }
+    const since = businessDateISO(new Date(Date.now() - 90 * 86400000));
+    const lcs = idSet.size ? await sql`SELECT machine, sections, to_char(entry_date, 'YYYY-MM-DD') AS d, entry_time, new_job FROM line_clearance
+      WHERE deleted_at IS NULL AND entry_date >= ${since}` : [];
+    for (const r of lcs) {
+      const id = lcJobId(r.new_job);
+      if (!idSet.has(id)) continue;
+      const at = wcMin(r.d + 'T' + (r.entry_time || '00:00'));
+      for (const sec of (r.sections || [])) {
+        const st = LC_SECTION_STAGE_IDX[sec];
+        if (st >= 1 && st <= 5) add(id, { stage: st, machine: r.machine, at: Number.isFinite(at) ? at : 0, src: 'qa' });
+      }
+    }
+    for (const k of Object.keys(starts)) starts[k].sort((a, b) => a.at - b.at);
+    res.json({ day: today, assign, present, starts });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 
 // Aggregate Daily Production data for one section + date. Both the
 // Printing and Die endpoints use this — the only difference is which
